@@ -9,6 +9,8 @@ const assetRoutes: Record<string, { file: string; contentType: string }> = {
   '/': { file: 'dashboard.html', contentType: 'text/html; charset=utf-8' },
   '/dashboard': { file: 'dashboard.html', contentType: 'text/html; charset=utf-8' },
   '/dashboard/': { file: 'dashboard.html', contentType: 'text/html; charset=utf-8' },
+  '/admin': { file: 'admin.html', contentType: 'text/html; charset=utf-8' },
+  '/admin/': { file: 'admin.html', contentType: 'text/html; charset=utf-8' },
   '/assets/dashboard.css': { file: 'assets/dashboard.css', contentType: 'text/css; charset=utf-8' },
   '/assets/dashboard.js': { file: 'assets/dashboard.js', contentType: 'text/javascript; charset=utf-8' },
 };

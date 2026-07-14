@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Unbrewed Admin</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --surface-hover: #22252f;
+      --border: #2a2d37;
+      --text: #e4e6eb;
+      --text-muted: #8b8fa3;
+      --accent: #6c63ff;
+      --accent-hover: #5a52e0;
+      --danger: #e05252;
+      --danger-hover: #c93c3c;
+      --success: #4caf50;
+      --mono: 'IBM Plex Mono', monospace;
+      --sans: 'Archivo', system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--sans);
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    .topbar {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 1.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .topbar h1 { font-size: 1.1rem; font-weight: 600; }
+    .topbar a {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 0.85rem;
+    }
+    .topbar a:hover { color: var(--text); }
+
+    .container { max-width: 900px; margin: 0 auto; padding: 2rem 1.5rem; }
+
+    /* Auth gate */
+    #auth-gate {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1rem;
+      margin-top: 4rem;
+    }
+    #auth-gate label { font-size: 0.95rem; color: var(--text-muted); }
+    #auth-gate input {
+      font-family: var(--mono);
+      font-size: 0.9rem;
+      padding: 0.6rem 1rem;
+      width: 360px;
+      max-width: 100%;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      outline: none;
+    }
+    #auth-gate input:focus { border-color: var(--accent); }
+    .btn {
+      font-family: var(--sans);
+      font-size: 0.85rem;
+      font-weight: 600;
+      padding: 0.5rem 1.2rem;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover { background: var(--accent-hover); }
+    .btn-danger { background: var(--danger); color: #fff; }
+    .btn-danger:hover { background: var(--danger-hover); }
+    .btn-danger:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-sm { padding: 0.35rem 0.8rem; font-size: 0.8rem; }
+    .error-msg { color: var(--danger); font-size: 0.85rem; }
+    .success-msg { color: var(--success); font-size: 0.85rem; }
+
+    /* Admin content */
+    #admin-content { display: none; }
+    .section-title {
+      font-size: 1rem;
+      font-weight: 600;
+      margin-bottom: 1rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .deck-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+    }
+    .deck-table th {
+      text-align: left;
+      padding: 0.6rem 0.8rem;
+      border-bottom: 2px solid var(--border);
+      color: var(--text-muted);
+      font-weight: 500;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .deck-table td {
+      padding: 0.55rem 0.8rem;
+      border-bottom: 1px solid var(--border);
+      vertical-align: middle;
+    }
+    .deck-table tr:hover td { background: var(--surface-hover); }
+    .deck-id { font-family: var(--mono); font-size: 0.82rem; }
+    .deck-versions { color: var(--text-muted); font-size: 0.8rem; }
+    .deck-games { font-family: var(--mono); font-size: 0.82rem; text-align: right; }
+    .deck-actions { text-align: right; white-space: nowrap; }
+
+    .empty-state {
+      text-align: center;
+      color: var(--text-muted);
+      padding: 3rem 1rem;
+      font-size: 0.9rem;
+    }
+
+    .confirm-overlay {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.6);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 100;
+    }
+    .confirm-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.5rem;
+      max-width: 440px;
+      width: 90%;
+    }
+    .confirm-box h3 { font-size: 1rem; margin-bottom: 0.5rem; }
+    .confirm-box p { font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1.2rem; line-height: 1.5; }
+    .confirm-box .actions { display: flex; gap: 0.6rem; justify-content: flex-end; }
+    .confirm-box .btn-cancel {
+      background: var(--surface-hover);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .stats-bar {
+      display: flex;
+      gap: 2rem;
+      margin-bottom: 2rem;
+      padding: 1rem;
+      background: var(--surface);
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+    .stat-item .stat-value {
+      font-family: var(--mono);
+      font-size: 1.3rem;
+      font-weight: 600;
+    }
+    .stat-item .stat-label {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <h1>Unbrewed Admin</h1>
+    <a href="/dashboard">← Back to Dashboard</a>
+  </div>
+
+  <div class="container">
+    <div id="auth-gate">
+      <label for="secret-input">Enter admin secret to continue</label>
+      <input id="secret-input" type="password" placeholder="telemetry secret" autocomplete="off">
+      <button class="btn btn-primary" onclick="doAuth()">Authenticate</button>
+      <div id="auth-error" class="error-msg"></div>
+    </div>
+
+    <div id="admin-content">
+      <div id="stats-bar" class="stats-bar"></div>
+
+      <div class="section-title">Deck Definitions</div>
+      <div id="deck-list"></div>
+      <div id="action-status"></div>
+    </div>
+  </div>
+
+  <div id="confirm-overlay" class="confirm-overlay" style="display:none">
+    <div class="confirm-box">
+      <h3 id="confirm-title">Confirm Delete</h3>
+      <p id="confirm-body"></p>
+      <div class="actions">
+        <button class="btn btn-cancel btn-sm" onclick="closeConfirm()">Cancel</button>
+        <button id="confirm-btn" class="btn btn-danger btn-sm">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let secret = '';
+
+    async function api(method, path, body) {
+      const opts = {
+        method,
+        headers: {
+          'Authorization': `Bearer ${secret}`,
+          'Content-Type': 'application/json',
+        },
+      };
+      if (body !== undefined) opts.body = JSON.stringify(body);
+      const res = await fetch(path, opts);
+      return { status: res.status, data: await res.json() };
+    }
+
+    async function doAuth() {
+      secret = document.getElementById('secret-input').value.trim();
+      if (!secret) return;
+      try {
+        const { status, data } = await api('GET', '/v1/admin/decks');
+        if (status === 401 || status === 403) {
+          document.getElementById('auth-error').textContent = 'Invalid secret';
+          return;
+        }
+        document.getElementById('auth-gate').style.display = 'none';
+        document.getElementById('admin-content').style.display = 'block';
+        sessionStorage.setItem('admin-secret', secret);
+        renderDecks(data);
+      } catch (e) {
+        document.getElementById('auth-error').textContent = 'Connection error';
+      }
+    }
+
+    function renderDecks(data) {
+      // Stats bar
+      const statsBar = document.getElementById('stats-bar');
+      statsBar.innerHTML = `
+        <div class="stat-item"><div class="stat-value">${data.totalDecks ?? 0}</div><div class="stat-label">Deck Definitions</div></div>
+        <div class="stat-item"><div class="stat-value">${data.totalGames ?? 0}</div><div class="stat-label">Total Games</div></div>
+      `;
+
+      const container = document.getElementById('deck-list');
+      if (!data.decks || data.decks.length === 0) {
+        container.innerHTML = '<div class="empty-state">No deck definitions found.</div>';
+        return;
+      }
+      let html = `<table class="deck-table"><thead><tr>
+        <th>Deck</th><th>Name</th><th>Versions</th><th style="text-align:right">Games</th><th style="text-align:right">Actions</th>
+      </tr></thead><tbody>`;
+      for (const d of data.decks) {
+        html += `<tr>
+          <td class="deck-id">${esc(d.deckId)}</td>
+          <td>${esc(d.name || '—')}</td>
+          <td class="deck-versions">${esc(d.versions.join(', '))}</td>
+          <td class="deck-games">${d.gameCount}</td>
+          <td class="deck-actions">
+            <button class="btn btn-danger btn-sm" onclick="confirmDelete('${esc(d.deckId)}', ${d.gameCount})">Delete</button>
+          </td>
+        </tr>`;
+      }
+      html += '</tbody></table>';
+      container.innerHTML = html;
+    }
+
+    function esc(s) {
+      const el = document.createElement('span');
+      el.textContent = s;
+      return el.innerHTML;
+    }
+
+    let pendingDeleteId = null;
+    function confirmDelete(deckId, gameCount) {
+      pendingDeleteId = deckId;
+      document.getElementById('confirm-title').textContent = `Delete ${deckId}?`;
+      const gamesWarning = gameCount > 0
+        ? `This will also permanently remove ${gameCount} game(s) from stats where this deck was used.`
+        : 'No games reference this deck.';
+      document.getElementById('confirm-body').textContent =
+        `This will delete all versions of "${deckId}" from the deck registry. ${gamesWarning} This action cannot be undone.`;
+      document.getElementById('confirm-btn').onclick = () => doDelete(deckId);
+      document.getElementById('confirm-overlay').style.display = 'flex';
+    }
+
+    function closeConfirm() {
+      pendingDeleteId = null;
+      document.getElementById('confirm-overlay').style.display = 'none';
+    }
+
+    async function doDelete(deckId) {
+      closeConfirm();
+      const statusEl = document.getElementById('action-status');
+      statusEl.innerHTML = '';
+      try {
+        const { status, data } = await api('DELETE', `/v1/admin/deck?deck=${encodeURIComponent(deckId)}`);
+        if (status === 200 && data.ok) {
+          statusEl.innerHTML = `<p class="success-msg">Deleted ${esc(deckId)}: removed ${data.deletedDefinitions} definition(s) and ${data.deletedGames} game(s).</p>`;
+          // Refresh list
+          const refresh = await api('GET', '/v1/admin/decks');
+          renderDecks(refresh.data);
+        } else {
+          statusEl.innerHTML = `<p class="error-msg">Error: ${esc(data.message || 'Unknown error')}</p>`;
+        }
+      } catch (e) {
+        statusEl.innerHTML = `<p class="error-msg">Connection error</p>`;
+      }
+    }
+
+    // Auto-auth from session
+    (function() {
+      const saved = sessionStorage.getItem('admin-secret');
+      if (saved) {
+        document.getElementById('secret-input').value = saved;
+        doAuth();
+      }
+      // Enter key
+      document.getElementById('secret-input').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') doAuth();
+      });
+    })();
+  </script>
+</body>
+</html>
