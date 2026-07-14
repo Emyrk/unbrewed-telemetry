@@ -1,0 +1,220 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unbrewed.xyz/schemas/telemetry/game-submission.v1.schema.json",
+  "title": "Unbrewed Telemetry Game Submission v1",
+  "description": "A single completed game submitted to the Unbrewed balance telemetry service.",
+  "type": "object",
+  "required": ["schemaVersion", "format", "map", "teams", "winner"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "gameId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Producer-stable game id. If omitted, the idempotency key becomes the game id."
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Producer-stable dedupe key. The HTTP Idempotency-Key header wins when both are present."
+    },
+    "submittedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the game was submitted by the producer."
+    },
+    "endedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the game ended according to the producer."
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "examples": ["server", "manual", "ai-lab", "backfill"]
+    },
+    "format": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable format id, for example duel, team-2v2, two-v-one-boss, or ffa-3."
+    },
+    "formatLabel": {
+      "type": "string",
+      "description": "Optional display label, for example 1v1 or 2v2."
+    },
+    "boss": {
+      "type": ["string", "null"],
+      "description": "Boss category for boss-battle games. Convention: the boss is teams[0]."
+    },
+    "map": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable map id."
+    },
+    "mapVersion": {
+      "type": "string",
+      "description": "Optional map version or hash."
+    },
+    "teams": {
+      "type": "array",
+      "minItems": 2,
+      "description": "One entry per side, in seating order. Supports team games and FFA.",
+      "items": { "$ref": "#/$defs/team" }
+    },
+    "winner": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Index into teams of the winning side. Ignored when draw is true."
+    },
+    "draw": {
+      "type": "boolean",
+      "default": false
+    },
+    "endCondition": {
+      "type": "string",
+      "examples": ["hero_defeated", "simultaneous", "forfeit", "timeout", "objective"]
+    },
+    "turns": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "durationSeconds": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "firstPlayerTeam": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Index into teams of the side that took the first turn."
+    },
+    "engine": { "$ref": "#/$defs/engine" },
+    "replayHash": {
+      "type": "string",
+      "description": "Hash of the replay bundle or canonical action log."
+    },
+    "stateHash": {
+      "type": "string",
+      "description": "Final engine state hash."
+    },
+    "telemetry": { "$ref": "#/$defs/telemetry" },
+    "notes": {
+      "type": ["string", "null"],
+      "description": "Free-form annotation for manual or lab submissions."
+    }
+  },
+  "$defs": {
+    "engine": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": { "type": "integer", "minimum": 1 },
+        "dslVersion": { "type": "string", "minLength": 1 },
+        "protocolVersion": { "type": "integer", "minimum": 1 },
+        "contentVersion": { "type": "string", "minLength": 1 }
+      }
+    },
+    "team": {
+      "type": "object",
+      "required": ["seats"],
+      "additionalProperties": false,
+      "properties": {
+        "role": {
+          "type": "string",
+          "description": "Optional team role, for example boss, challengers, team, or ffa."
+        },
+        "seats": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/seat" }
+        }
+      }
+    },
+    "seat": {
+      "type": "object",
+      "required": ["deck", "pilot"],
+      "additionalProperties": false,
+      "properties": {
+        "deck": {
+          "type": "string",
+          "pattern": "^[^@\\s]+@[^@\\s]+$",
+          "description": "Versioned deck identifier, '<deck-id>@<version>'."
+        },
+        "pilot": {
+          "type": "string",
+          "pattern": "^(human|bot:[^\\s]+)$",
+          "description": "'human' or a bot id, for example bot:hard or bot:gruncle-v2."
+        },
+        "runtimePlayerId": {
+          "type": "string",
+          "pattern": "^p[1-9][0-9]*$"
+        },
+        "playerId": {
+          "type": "string",
+          "description": "Optional pseudonymous player id for humans. Do not send display names or emails."
+        },
+        "heroId": { "type": "string" },
+        "heroName": { "type": "string" },
+        "botDifficulty": { "type": "string" },
+        "botVersion": { "type": "string" },
+        "finalHealth": { "type": "integer", "minimum": 0 },
+        "finalDeckCount": { "type": "integer", "minimum": 0 },
+        "finalHandCount": { "type": "integer", "minimum": 0 },
+        "finalDiscardCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "seatRef": {
+      "type": "array",
+      "description": "Address of a seat: [teamIndex, seatIndex].",
+      "prefixItems": [
+        { "type": "integer", "minimum": 0 },
+        { "type": "integer", "minimum": 0 }
+      ],
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "telemetry": {
+      "type": "object",
+      "description": "Optional per-game instrumentation for card, damage, and health analysis.",
+      "additionalProperties": false,
+      "properties": {
+        "cardsPlayed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["seat", "card"],
+            "additionalProperties": false,
+            "properties": {
+              "seat": { "$ref": "#/$defs/seatRef" },
+              "card": { "type": "string" },
+              "turn": { "type": "integer", "minimum": 1 },
+              "context": {
+                "type": "string",
+                "examples": ["attack", "defense", "scheme", "boost", "discard"]
+              }
+            }
+          }
+        },
+        "damageDealt": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["seat", "total"],
+            "additionalProperties": false,
+            "properties": {
+              "seat": { "$ref": "#/$defs/seatRef" },
+              "total": { "type": "integer", "minimum": 0 }
+            }
+          }
+        },
+        "finalHealth": {
+          "type": "array",
+          "description": "Remaining health per seat, shaped like teams.",
+          "items": {
+            "type": "array",
+            "items": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,775 @@
+// Unbrewed Balance Dashboard.
+// Plain ES module, no build step. Renders the balance views defined in
+// MockDashboard/Balance Dashboard.dc.html against the live /v1/stats API.
+
+const COLORS = {
+  text: '#f2ead9',
+  muted: '#b9a5c0',
+  green: '#7ecb8f',
+  red: '#e0796a',
+  blue: '#7aa3d4',
+  violet: '#a78bc9',
+  gold: '#d4ab4f',
+  overCi: 'rgba(224, 121, 106, 0.55)',
+  underCi: 'rgba(122, 157, 208, 0.55)',
+  neutralCi: 'rgba(255, 255, 255, 0.3)',
+};
+
+// Balance-flag rules mirror the design mock's defaults.
+const FLAG_THRESHOLD = 0.55;
+const FLAG_MIN_GAMES = 30;
+const MATRIX_MIN_GAMES = 3;
+const MATRIX_MAX_DECKS = 16;
+
+const TABS = [
+  ['overview', 'Overview'],
+  ['heroes', 'Heroes'],
+  ['matchups', 'Matchups'],
+  ['scatter', 'Pick vs Win'],
+  ['formats', 'Formats'],
+  ['synergy', '2v2 Synergy'],
+];
+
+// Card-context bucket presentation for the influence table.
+const BUCKET_META = {
+  attack: { tag: 'ATK', color: '#d9705c' },
+  defense: { tag: 'DEF', color: '#7aa3d4' },
+  scheme: { tag: 'SCH', color: '#a78bc9' },
+  boost: { tag: 'BST', color: '#d4ab4f' },
+  discard: { tag: 'DSC', color: '#9d87a6' },
+  other: { tag: '—', color: '#9d87a6' },
+};
+
+const state = readStateFromUrl();
+const sort = { key: 'wr', dir: -1 };
+
+const els = {
+  heroTotal: document.querySelector('#hero-total'),
+  heroSubtitle: document.querySelector('#hero-subtitle'),
+  formatChips: document.querySelector('#format-chips'),
+  pilotChips: document.querySelector('#pilot-chips'),
+  tabs: document.querySelector('#tabs'),
+  status: document.querySelector('#status'),
+  view: document.querySelector('#view'),
+  modalRoot: document.querySelector('#modal-root'),
+};
+
+let current = null;
+let allPilots = [];
+
+renderTabs();
+loadDashboard().catch(showError);
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') closeModal();
+});
+
+// ---------- state / url ----------
+function readStateFromUrl() {
+  const params = new URLSearchParams(location.search);
+  const exclude = params.get('exclude');
+  return {
+    tab: params.get('tab') || 'overview',
+    format: normalizedParam(params.get('format')),
+    excluded: new Set(exclude ? exclude.split(',').map((v) => v.trim()).filter(Boolean) : []),
+    deck: params.get('deck') || null,
+  };
+}
+
+function writeStateToUrl() {
+  const params = new URLSearchParams();
+  if (state.tab !== 'overview') params.set('tab', state.tab);
+  if (state.format) params.set('format', state.format);
+  if (state.excluded.size) params.set('exclude', [...state.excluded].join(','));
+  if (state.deck) params.set('deck', state.deck);
+  const next = `${location.pathname}${params.toString() ? `?${params}` : ''}`;
+  history.replaceState(null, '', next);
+}
+
+function normalizedParam(value) {
+  if (!value || value === 'all') return null;
+  return value;
+}
+
+// Pilots to send to the API: the set that is *not* excluded. Empty = no filter.
+function includedPilots() {
+  if (!state.excluded.size) return [];
+  return allPilots.filter((pilot) => !state.excluded.has(pilot));
+}
+
+function statsQuery() {
+  const params = new URLSearchParams();
+  if (state.format) params.set('format', state.format);
+  const pilots = includedPilots();
+  if (pilots.length) params.set('pilots', pilots.join(','));
+  return params;
+}
+
+// ---------- data loading ----------
+async function loadDashboard() {
+  setStatus('Loading telemetry…');
+  const params = statsQuery();
+  const json = await fetchJson(`/v1/stats/dashboard${params.toString() ? `?${params}` : ''}`);
+  current = json;
+  if (allPilots.length === 0) {
+    allPilots = (json.pilots || []).map((row) => row.pilot);
+  }
+  els.heroTotal.textContent = number(json.totalGames);
+  const fp = json.firstPlayer && json.firstPlayer.winRate != null ? ` · first player ${pct(json.firstPlayer.winRate, 0)}` : '';
+  els.heroSubtitle.innerHTML = `<span class="sub"> · ${number(json.totalSubmissions)} submissions, ${number(json.invalidSubmissions)} invalid${esc(fp)}</span>`;
+  renderControls(json);
+  renderTabs();
+  renderView(json);
+  clearStatus();
+  if (state.deck && !els.modalRoot.hasChildNodes()) openDeck(state.deck);
+}
+
+async function fetchJson(url) {
+  const response = await fetch(url, { headers: { accept: 'application/json' } });
+  const json = await response.json();
+  if (!response.ok || !json.ok) throw new Error(json.message || json.code || 'Request failed');
+  return json;
+}
+
+// ---------- controls ----------
+function renderControls(data) {
+  const formats = data.formats || [];
+  els.formatChips.innerHTML = [chip('All formats', !state.format, () => setFormat(null))]
+    .concat(formats.map((f) => chip(f.label, state.format === f.format, () => setFormat(f.format))))
+    .join('');
+  bindHandlers(els.formatChips);
+
+  const pilots = pilotOptions(data.pilots || []);
+  els.pilotChips.innerHTML = pilots.map((pilot) => {
+    const off = state.excluded.has(pilot.value);
+    const id = registerHandler(() => togglePilot(pilot.value));
+    const title = off
+      ? 'Excluded — games with this pilot type are hidden. Click to include.'
+      : 'Included. Click to exclude games with this pilot type.';
+    return `<button class="pilot-chip${off ? ' off' : ''}" data-handler="${id}" type="button" title="${esc(title)}">${esc(pilot.label)}</button>`;
+  }).join('');
+  bindHandlers(els.pilotChips);
+}
+
+function pilotOptions(rows) {
+  return rows.map((row) => ({ value: row.pilot, label: pilotLabel(row.pilot), seats: row.seats }));
+}
+
+function pilotLabel(pilot) {
+  if (pilot === 'human') return 'Human';
+  if (pilot.startsWith('bot:')) return `Bot: ${pilot.slice(4)}`;
+  return pilot;
+}
+
+function setFormat(format) {
+  state.format = format;
+  writeStateToUrl();
+  loadDashboard().catch(showError);
+}
+
+function togglePilot(pilot) {
+  if (state.excluded.has(pilot)) state.excluded.delete(pilot);
+  else state.excluded.add(pilot);
+  writeStateToUrl();
+  loadDashboard().catch(showError);
+}
+
+function renderTabs() {
+  els.tabs.innerHTML = TABS.map(([key, label]) =>
+    `<button class="tab${state.tab === key ? ' active' : ''}" data-tab="${key}" type="button">${esc(label)}</button>`,
+  ).join('');
+  els.tabs.querySelectorAll('[data-tab]').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.tab = button.dataset.tab;
+      writeStateToUrl();
+      renderTabs();
+      if (current) renderView(current);
+    });
+  });
+}
+
+// ---------- view routing ----------
+function renderView(data) {
+  if (data.totalGames === 0) {
+    els.view.innerHTML = card(empty('No completed games match these filters yet. Submit sample data or run local simulations to populate the dashboard.'));
+    return;
+  }
+  const decks = decorateDecks(data.decks);
+  if (state.tab === 'heroes') renderHeroes(data, decks);
+  else if (state.tab === 'matchups') renderMatchups(data, decks);
+  else if (state.tab === 'scatter') renderScatter(data, decks);
+  else if (state.tab === 'formats') renderFormats(data);
+  else if (state.tab === 'synergy') renderSynergy(data);
+  else renderOverview(data, decks);
+  bindHandlers(els.view);
+}
+
+// Attach balance-flag classification to each deck once, shared across views.
+function decorateDecks(decks) {
+  return decks.map((deck) => {
+    let flag = null;
+    if (deck.games >= FLAG_MIN_GAMES) {
+      if (deck.ciLow > FLAG_THRESHOLD) flag = 'over';
+      else if (deck.ciHigh < 1 - FLAG_THRESHOLD) flag = 'under';
+    }
+    return { ...deck, flag };
+  });
+}
+
+// ---------- overview ----------
+function renderOverview(data, decks) {
+  const flags = decks
+    .filter((deck) => deck.flag)
+    .sort((a, b) => Math.abs(b.winRate - 0.5) - Math.abs(a.winRate - 0.5));
+  const eligible = decks.filter((deck) => deck.games >= 15).sort((a, b) => b.winRate - a.winRate);
+  const extremes = eligible.length > 6
+    ? [...eligible.slice(0, 3), ...eligible.slice(-3)]
+    : eligible;
+
+  els.view.innerHTML = `
+    <div class="grid-4">
+      ${statCard('Games (' + esc(selectedFormatLabel(data)) + ')', number(data.totalGames), pilotSummary(), COLORS.text)}
+      ${statCard('Decks tracked', number(decks.length), 'active in this pool', COLORS.text)}
+      ${statCard('Avg game length', data.avgTurns == null ? 'n/a' : data.avgTurns.toFixed(1), 'turns per game', COLORS.text)}
+      ${statCard('Balance flags', String(flags.length), 'outside CI threshold', flags.length ? '#e89286' : COLORS.green)}
+    </div>
+    <div class="two-col">
+      <div class="card panel">
+        <div class="section-head">
+          <div class="section-title">Balance flags</div>
+          <div class="kicker">95% CI beyond ${Math.round(FLAG_THRESHOLD * 100)}% / ${Math.round((1 - FLAG_THRESHOLD) * 100)}% · min ${FLAG_MIN_GAMES} games</div>
+        </div>
+        ${flags.length
+          ? `<div class="list">${flags.map(flagRow).join('')}</div>`
+          : `<div class="empty" style="margin-top:12px">No decks outside the flag threshold in this view. Looking healthy.</div>`}
+      </div>
+      <div class="card panel">
+        <div class="section-title">Win-rate extremes</div>
+        <div class="list tight">${extremes.length ? extremes.map(extremeRow).join('') : empty('No deck stats available yet.')}</div>
+      </div>
+    </div>`;
+}
+
+function flagRow(deck) {
+  return `<div class="flag" ${deckClick(deck)}>
+    <span class="badge ${deck.flag}">${deck.flag === 'over' ? 'OVER' : 'UNDER'}</span>
+    <span class="flag-name">${esc(deck.label)}</span>
+    <span class="flag-games">${number(deck.games)} games</span>
+    <span class="mono" style="color:${wrColor(deck.winRate)}">${pct(deck.winRate)}</span>
+    <span class="flag-ci">CI ${pct(deck.ciLow, 0)}–${pct(deck.ciHigh, 0)}</span>
+  </div>`;
+}
+
+function extremeRow(deck) {
+  const w = Math.round(deck.winRate * 100);
+  return `<div class="extreme" ${deckClick(deck)}>
+    <span class="name">${esc(deck.label)}</span>
+    <span class="bar-track"><span class="bar-fill" style="width:${w}%;background:${deck.winRate >= 0.5 ? COLORS.green : COLORS.red}"></span></span>
+    <span class="wr" style="color:${wrColor(deck.winRate)}">${pct(deck.winRate)}</span>
+  </div>`;
+}
+
+// ---------- heroes table ----------
+function renderHeroes(data, decks) {
+  const rows = sortDecks(decks);
+  const header = `<div class="deck-grid deck-head">
+    ${sortHeader('name', 'Hero')}
+    ${sortHeader('games', 'Games', true)}
+    ${sortHeader('pick', 'Pick rate', true)}
+    ${sortHeader('wr', 'Win rate · 95% CI (25–75% scale)')}
+    <span class="th-btn" style="cursor:default">Deck profile</span>
+  </div>`;
+  els.view.innerHTML = `<div class="card">
+    ${header}
+    ${rows.map(deckRow).join('')}
+    <div class="legend">
+      ${legendSwatch('#d9705c', 'Attack')}
+      ${legendSwatch('#7aa3d4', 'Defense')}
+      ${legendSwatch('#d4ab4f', 'Boost / other')}
+      ${legendSwatch('#a78bc9', 'Scheme')}
+      <span class="legend-spacer">Profile = how the deck spends its cards · click a deck for full detail</span>
+    </div>
+  </div>`;
+}
+
+function sortHeader(key, label, right = false) {
+  const arrow = sort.key === key ? (sort.dir === 1 ? ' ↑' : ' ↓') : '';
+  const id = registerHandler(() => setSort(key));
+  return `<button class="th-btn${right ? ' right' : ''}" data-handler="${id}" type="button">${esc(label)}${arrow}</button>`;
+}
+
+function setSort(key) {
+  if (sort.key === key) sort.dir = -sort.dir;
+  else { sort.key = key; sort.dir = key === 'name' ? 1 : -1; }
+  if (current) { renderView(current); }
+}
+
+function sortDecks(decks) {
+  const { key, dir } = sort;
+  return [...decks].sort((a, b) => {
+    const v = key === 'name' ? a.label.localeCompare(b.label)
+      : key === 'games' ? a.games - b.games
+      : key === 'pick' ? a.pickRate - b.pickRate
+      : a.winRate - b.winRate;
+    return v * dir;
+  });
+}
+
+function deckRow(deck) {
+  return `<div class="deck-grid deck-row" ${deckClick(deck)}>
+    <div><div class="deck-name">${esc(deck.label)}</div><div class="deck-tag">${esc(deckTag(deck))}</div></div>
+    <div class="num">${number(deck.games)}</div>
+    <div class="num">${pct(deck.pickRate)}</div>
+    ${ciCell(deck)}
+    ${profileBar(deck.profile)}
+  </div>`;
+}
+
+function deckTag(deck) {
+  if (deck.profile && deck.profile.lean) return `${deck.deckId} · ${deck.profile.lean}`;
+  return deck.deckId;
+}
+
+function ciCell(deck) {
+  const left = scaleCi(deck.ciLow);
+  const width = Math.max(1.5, scaleCi(deck.ciHigh) - left);
+  const dot = scaleCi(deck.winRate);
+  const band = deck.flag === 'over' ? COLORS.overCi : deck.flag === 'under' ? COLORS.underCi : COLORS.neutralCi;
+  const color = wrColor(deck.winRate);
+  return `<div class="ci-cell">
+    <div class="ci-track"></div>
+    <div class="ci-mid"></div>
+    <div class="ci-band" style="left:${left.toFixed(1)}%;width:${width.toFixed(1)}%;background:${band}"></div>
+    <div class="ci-dot" style="left:${dot.toFixed(1)}%;background:${color}"></div>
+    <div class="ci-label" style="color:${color}">${pct(deck.winRate)}</div>
+  </div>`;
+}
+
+function profileBar(profile) {
+  if (!profile) return `<div class="profile-none">no card data</div>`;
+  const seg = (share, color) => `<span style="width:${(share * 100).toFixed(1)}%;background:${color}"></span>`;
+  const other = profile.boost + profile.other;
+  return `<div class="profile-bar" title="Attack ${pct(profile.attack, 0)} · Defense ${pct(profile.defense, 0)} · Scheme ${pct(profile.scheme, 0)} · Boost/other ${pct(other, 0)}">
+    ${seg(profile.attack, '#d9705c')}${seg(profile.defense, '#7aa3d4')}${seg(other, '#d4ab4f')}${seg(profile.scheme, '#a78bc9')}
+  </div>`;
+}
+
+// ---------- matchups ----------
+function renderMatchups(data, decks) {
+  const top = decks.filter((deck) => deck.games > 0).slice(0, MATRIX_MAX_DECKS);
+  const lookup = new Map((data.matchups || []).map((row) => [`${row.rowDeck}|${row.colDeck}`, row]));
+
+  if (top.length < 2) {
+    els.view.innerHTML = card(empty('Need at least two decks with duel games for a matchup matrix.'), 'panel');
+    return;
+  }
+
+  const cols = `<div class="matrix-line"><div class="matrix-corner"></div>${top.map((d) => `<div class="matrix-colhead" title="${esc(d.label)}">${esc(code(d.deckId))}</div>`).join('')}</div>`;
+  const rows = top.map((rowDeck) => {
+    const cells = top.map((colDeck) => matrixCell(rowDeck, colDeck, lookup)).join('');
+    return `<div class="matrix-line"><div class="matrix-rowlabel" ${deckClick(rowDeck)} title="${esc(rowDeck.label)}">${esc(rowDeck.label)}</div>${cells}</div>`;
+  }).join('');
+
+  els.view.innerHTML = `<div class="card panel">
+    <div class="section-head">
+      <div class="section-title">1v1 Matchup Matrix</div>
+      <div class="kicker">Row deck win rate vs column deck · green favors row · min ${MATRIX_MIN_GAMES} games (· = not enough data)</div>
+    </div>
+    <div class="matrix-scroll"><div class="matrix-inner">${cols}${rows}</div></div>
+    <div class="legend">
+      ${legendSwatch('rgba(224,121,106,0.65)', 'Row loses')}
+      ${legendSwatch('rgba(255,255,255,0.1)', 'Even')}
+      ${legendSwatch('rgba(126,203,143,0.65)', 'Row wins')}
+      <span class="legend-spacer">Click a row deck for its full detail page</span>
+    </div>
+  </div>`;
+}
+
+function matrixCell(rowDeck, colDeck, lookup) {
+  if (rowDeck.deck === colDeck.deck) {
+    return `<div class="matrix-cell" style="background:transparent"></div>`;
+  }
+  const row = lookup.get(`${rowDeck.deck}|${colDeck.deck}`);
+  const title = `${esc(rowDeck.label)} vs ${esc(colDeck.label)}`;
+  if (!row || row.games < MATRIX_MIN_GAMES) {
+    return `<div class="matrix-cell" style="background:rgba(255,255,255,0.03);color:#6d5a76" title="${title}: ${row ? row.games : 0} games (min ${MATRIX_MIN_GAMES})">·</div>`;
+  }
+  const alpha = clamp(Math.abs(row.winRate - 0.5) * 2.2, 0.1, 0.75).toFixed(2);
+  const bg = row.winRate >= 0.5 ? `rgba(126,203,143,${alpha})` : `rgba(224,121,106,${alpha})`;
+  return `<div class="matrix-cell" style="background:${bg}" title="${title}: ${pct(row.winRate, 0)} over ${number(row.games)} games">${Math.round(row.winRate * 100)}</div>`;
+}
+
+// ---------- scatter ----------
+function renderScatter(data, decks) {
+  const dots = decks.filter((deck) => deck.games > 0);
+  const maxPick = Math.max(...dots.map((d) => d.pickRate), 0.02) * 1.15;
+  const avgPick = dots.reduce((sum, d) => sum + d.pickRate, 0) / (dots.length || 1);
+  const avgLeft = (avgPick / maxPick * 100).toFixed(1);
+
+  const gridlines = [0, 25, 50, 75].map((top) =>
+    `<div class="grid-line${top === 50 ? ' strong' : ''}" style="top:${top}%"></div>`,
+  ).join('');
+
+  const points = dots.map((deck) => {
+    const left = (deck.pickRate / maxPick * 100).toFixed(1);
+    const top = ((0.7 - clamp(deck.winRate, 0.3, 0.7)) / 0.4 * 100).toFixed(1);
+    const size = Math.round(10 + Math.min(1, deck.games / 250) * 14);
+    const color = deck.flag === 'over' ? COLORS.red : deck.flag === 'under' ? COLORS.blue : COLORS.violet;
+    return `<div class="dot-wrap" style="left:${left}%;top:${top}%" ${deckClick(deck)}>
+      <div class="dot" style="width:${size}px;height:${size}px;background:${color}"></div>
+      <div class="dot-label">${esc(deck.label)}</div>
+    </div>`;
+  }).join('');
+
+  els.view.innerHTML = `<div class="card panel">
+    <div class="section-head">
+      <div class="section-title">Pick rate vs win rate</div>
+      <div class="kicker">Top-right = popular &amp; strong (nerf watch) · Top-left = sleeper</div>
+    </div>
+    <div class="scatter-plot">
+      ${gridlines}
+      <div class="avg-line" style="left:${avgLeft}%"></div>
+      <div class="axis-y" style="top:-7px">70%</div>
+      <div class="axis-y" style="top:calc(50% - 7px)">50%</div>
+      <div class="axis-y" style="bottom:-7px">30%</div>
+      <div class="avg-note" style="left:calc(${avgLeft}% + 6px)">avg pick rate</div>
+      ${points}
+    </div>
+    <div class="scatter-x"><span>pick rate →</span><span>${pct(maxPick, 0)}</span></div>
+    <div class="legend">
+      ${legendSwatch(COLORS.red, 'Flagged overperforming', true)}
+      ${legendSwatch(COLORS.blue, 'Flagged underperforming', true)}
+      ${legendSwatch(COLORS.violet, 'Within threshold', true)}
+      <span class="legend-spacer">Dot size = games played</span>
+    </div>
+  </div>`;
+}
+
+// ---------- formats ----------
+function renderFormats(data) {
+  const formats = data.formats || [];
+  if (!formats.length) {
+    els.view.innerHTML = card(empty('No formats have been logged yet.'), 'panel');
+    return;
+  }
+  els.view.innerHTML = `<div class="format-grid">${formats.map(formatCard).join('')}</div>`;
+}
+
+function formatCard(row) {
+  const shareW = (row.share * 100).toFixed(1);
+  const accent = row.format.includes('2v2') || row.format.includes('team') ? COLORS.gold
+    : row.format.includes('boss') || row.format.includes('2v1') ? COLORS.violet
+    : 'var(--accent)';
+  const boss = row.bossGames > 0 ? `
+    <div class="stat-inline" style="margin-top:0">
+      <div>
+        <div class="label">Boss-side win rate</div>
+        <div class="big" style="color:${bossColor(row.bossWinRate)}">${pct(row.bossWinRate)}</div>
+      </div>
+    </div>
+    <div class="sub-title">By boss</div>
+    ${row.bosses.map((b) => `<div class="mini-row">
+      <span class="name">${esc(b.boss)}</span>
+      <span class="g">${number(b.games)}g</span>
+      <span class="mono" style="color:${wrColor(b.winRate)}">${pct(b.winRate)}</span>
+    </div>`).join('')}` : '';
+
+  return `<article class="card format-card">
+    <div class="section-head">
+      <div class="format-title">${esc(row.label)}</div>
+      <div class="mono kicker">${number(row.games)} games · ${pct(row.share, 0)}</div>
+    </div>
+    <div class="share-track"><div class="share-fill" style="width:${clamp(shareW, 0, 100)}%;background:${accent}"></div></div>
+    <div class="stat-inline">
+      <div>
+        <div class="label">Avg length</div>
+        <div class="big">${row.avgTurns == null ? 'n/a' : row.avgTurns.toFixed(1)} turns</div>
+      </div>
+    </div>
+    ${boss}
+  </article>`;
+}
+
+// ---------- synergy ----------
+function renderSynergy(data) {
+  const rows = [...(data.synergy || [])].sort((a, b) => b.delta - a.delta);
+  els.view.innerHTML = `<div class="card">
+    <div class="panel" style="padding-bottom:4px">
+      <div class="section-title">2v2 synergy pairs</div>
+      <div class="kicker" style="margin-top:3px">Δ = pair win rate minus expected (average of each deck's solo 2v2 win rate). Big positive Δ = more than the sum of its parts.</div>
+    </div>
+    <div class="syn-grid syn-head">
+      <span>Pair</span><span class="right">Games</span><span class="right">Win rate</span><span class="right">Expected</span><span class="right">Δ</span>
+    </div>
+    ${rows.length ? rows.map(synergyRow).join('') : `<div class="panel">${empty('No pairs with enough games under the current filters. Include more pilot types or log more 2v2 games.')}</div>`}
+  </div>`;
+}
+
+function synergyRow(row) {
+  const cls = row.delta > 0.03 ? 'delta-up' : row.delta < -0.03 ? 'delta-down' : 'delta-flat';
+  return `<div class="syn-grid syn-row">
+    <span style="font-weight:600;font-size:13px">${esc(labelForDeckId(row.deckAId))} + ${esc(labelForDeckId(row.deckBId))}</span>
+    <span class="num">${number(row.games)}</span>
+    <span class="mono" style="text-align:right">${pct(row.winRate)}</span>
+    <span class="num">${pct(row.expectedWinRate)}</span>
+    <span style="text-align:right"><span class="delta-badge ${cls}">${signedPct(row.delta)}</span></span>
+  </div>`;
+}
+
+function labelForDeckId(deckId) {
+  const match = (current?.decks || []).find((deck) => deck.deckId === deckId);
+  return match ? match.label : deckId;
+}
+
+// ---------- deck detail modal ----------
+async function openDeck(deck) {
+  setStatus('Loading deck detail…');
+  try {
+    const params = statsQuery();
+    params.set('deck', deck);
+    const detail = await fetchJson(`/v1/stats/deck?${params}`);
+    clearStatus();
+    state.deck = deck;
+    writeStateToUrl();
+    renderModal(detail);
+  } catch (error) {
+    showError(error);
+  }
+}
+
+function renderModal(d) {
+  const profile = d.profile;
+  const other = profile ? profile.boost + profile.other : 0;
+  const comp = profile ? `
+    <div class="modal-section">
+      <div class="sub-title" style="margin-top:0">Play mix — ${number(profile.plays)} card plays</div>
+      <div class="deck-comp-bar">
+        <span style="width:${(profile.attack * 100).toFixed(1)}%;background:#d9705c"></span>
+        <span style="width:${(profile.defense * 100).toFixed(1)}%;background:#7aa3d4"></span>
+        <span style="width:${(other * 100).toFixed(1)}%;background:#d4ab4f"></span>
+        <span style="width:${(profile.scheme * 100).toFixed(1)}%;background:#a78bc9"></span>
+      </div>
+      <div class="deck-cells">
+        ${compCell('Attack', profile.attack, '#d9705c')}
+        ${compCell('Defense', profile.defense, '#7aa3d4')}
+        ${compCell('Boost / other', other, '#d4ab4f')}
+        ${compCell('Scheme', profile.scheme, '#a78bc9')}
+      </div>
+      <div class="lean-line"><span>Lean: <b>${esc(profile.lean || '—')}</b></span></div>
+    </div>` : `<div class="modal-section"><div class="empty">No card telemetry for this deck yet.</div></div>`;
+
+  const matchups = matchupHighlights(d.matchups || []);
+
+  els.modalRoot.innerHTML = `
+    <div class="modal-overlay" data-overlay>
+      <div class="modal" data-screen-label="Deck detail" role="dialog" aria-modal="true">
+        <div class="modal-head">
+          <div style="flex:1">
+            <div class="modal-title">${esc(d.label)}</div>
+            <div class="modal-sub">${esc(d.deck)} · ${number(d.games)} games · pick rate ${pct(d.pickRate)}</div>
+          </div>
+          <div class="modal-wr" style="color:${wrColor(d.winRate)}">${pct(d.winRate)}</div>
+          <button class="modal-close" data-close type="button" aria-label="Close">✕</button>
+        </div>
+        <div class="modal-ci">95% CI ${pct(d.ciLow, 0)}–${pct(d.ciHigh, 0)}</div>
+        ${comp}
+        <div class="modal-cols">
+          <div>
+            <div class="sub-title" style="margin-top:0">Win rate by format</div>
+            <div class="list tight">${(d.formats || []).map(formatBarRow).join('') || empty('No format data.')}</div>
+          </div>
+          <div>
+            <div class="sub-title" style="margin-top:0">1v1 matchups (min 5 games)</div>
+            <div class="list tight">${matchups.length ? matchups.map(matchupRow).join('') : empty('Not enough duel data.')}</div>
+          </div>
+        </div>
+        <div class="modal-section">
+          <div class="sub-title" style="margin-top:0">Win rate by map</div>
+          <div class="map-grid">${(d.maps || []).map(mapLine).join('') || empty('No map data.')}</div>
+        </div>
+        <div class="modal-section" style="padding-bottom:22px">
+          <div class="section-head">
+            <div class="sub-title" style="margin-top:0">Card influence</div>
+            <div class="kicker">Δ win rate when the card is played vs the deck's baseline</div>
+          </div>
+          <div class="list tight" style="margin-top:9px;gap:0">${(d.cards || []).map(cardInflRow).join('') || empty('No card telemetry for this deck.')}</div>
+        </div>
+      </div>
+    </div>`;
+
+  els.modalRoot.querySelector('[data-overlay]')?.addEventListener('click', (event) => {
+    if (event.target === event.currentTarget) closeModal();
+  });
+  els.modalRoot.querySelector('[data-close]')?.addEventListener('click', closeModal);
+}
+
+function closeModal() {
+  els.modalRoot.innerHTML = '';
+  if (state.deck) { state.deck = null; writeStateToUrl(); }
+}
+
+function compCell(label, share, color) {
+  return `<div class="deck-cell">
+    <div class="cell-head"><span class="dot-swatch" style="background:${color}"></span><span class="cell-label">${esc(label)}</span></div>
+    <div class="cell-count">${pct(share, 0)}</div>
+    <div class="cell-sub">of card plays</div>
+  </div>`;
+}
+
+function formatBarRow(row) {
+  const color = row.winRate >= 0.5 ? COLORS.green : COLORS.red;
+  return `<div class="bar-row">
+    <span class="lbl">${esc(row.label)}</span>
+    <span class="bar-track"><span class="bar-fill" style="width:${Math.round(row.winRate * 100)}%;background:${color}"></span></span>
+    <span class="val">${pct(row.winRate)} <span class="g">${number(row.games)}g</span></span>
+  </div>`;
+}
+
+function matchupHighlights(matchups) {
+  const eligible = matchups.filter((m) => m.games >= 5).sort((a, b) => b.winRate - a.winRate);
+  if (eligible.length <= 6) return eligible.map((m) => ({ ...m, tag: m.winRate >= 0.5 ? 'BEST' : 'WORST' }));
+  const best = eligible.slice(0, 3).map((m) => ({ ...m, tag: 'BEST' }));
+  const worst = eligible.slice(-3).map((m) => ({ ...m, tag: 'WORST' }));
+  return [...best, ...worst];
+}
+
+function matchupRow(m) {
+  return `<div class="matchup-row">
+    <span class="tag" style="color:${m.tag === 'BEST' ? COLORS.green : '#e89286'}">${m.tag}</span>
+    <span class="name">${esc(m.label)}</span>
+    <span class="g">${number(m.games)}g</span>
+    <span class="mono" style="color:${wrColor(m.winRate)}">${pct(m.winRate)}</span>
+  </div>`;
+}
+
+function mapLine(row) {
+  const color = row.winRate >= 0.5 ? COLORS.green : COLORS.red;
+  return `<div class="map-line">
+    <span class="name">${esc(row.map)}</span>
+    <span class="bar-track"><span class="bar-fill" style="width:${Math.round(row.winRate * 100)}%;background:${color}"></span></span>
+    <span class="val">${pct(row.winRate)} <span class="g">${number(row.games)}g</span></span>
+  </div>`;
+}
+
+function cardInflRow(card) {
+  const meta = BUCKET_META[card.contextBucket] || BUCKET_META.other;
+  const infl = card.influence;
+  const inflColor = infl > 0.02 ? COLORS.green : infl < -0.02 ? '#e89286' : COLORS.muted;
+  const inflBg = infl > 0.02 ? 'rgba(126,203,143,0.2)' : infl < -0.02 ? 'rgba(224,121,106,0.2)' : 'rgba(255,255,255,0.08)';
+  const barW = Math.min(100, Math.abs(infl) / 0.1 * 100).toFixed(1);
+  return `<div class="card-infl-row">
+    <span class="type" style="color:${meta.color}">${meta.tag}</span>
+    <span class="cname">${esc(card.card)}</span>
+    <span class="meta">${esc(card.contextBucket)} · ${number(card.gamesWith)}g</span>
+    <span class="plays">${number(card.plays)} pl</span>
+    <span class="bar-track" style="height:6px"><span class="bar-fill" style="width:${barW}%;background:${inflColor};opacity:0.7"></span></span>
+    <span style="text-align:right"><span class="infl-badge" style="background:${inflBg};color:${inflColor}">${signedPct(infl)}</span></span>
+  </div>`;
+}
+
+// ---------- shared bits ----------
+function statCard(label, value, hint, color) {
+  return `<div class="card stat">
+    <div class="subtle">${esc(label)}</div>
+    <div class="value" style="color:${color}">${esc(value)}</div>
+    <div class="hint">${esc(hint)}</div>
+  </div>`;
+}
+
+function chip(label, active, onClick) {
+  const id = registerHandler(onClick);
+  return `<button class="chip${active ? ' active' : ''}" data-handler="${id}" type="button">${esc(label)}</button>`;
+}
+
+function legendSwatch(color, label, round = false) {
+  return `<span class="legend-item"><span class="swatch${round ? ' round' : ''}" style="background:${color}"></span>${esc(label)}</span>`;
+}
+
+function card(inner, extra = 'panel') {
+  return `<div class="card ${extra}">${inner}</div>`;
+}
+
+function deckClick(deck) {
+  const id = registerHandler(() => openDeck(deck.deck));
+  return `data-handler="${id}"`;
+}
+
+function selectedFormatLabel(data) {
+  if (!state.format) return 'All formats';
+  return (data.formats || []).find((f) => f.format === state.format)?.label || state.format;
+}
+
+function pilotSummary() {
+  if (!state.excluded.size) return 'all pilots';
+  const included = includedPilots();
+  return included.length ? `${included.length} pilot type${included.length === 1 ? '' : 's'}` : 'none';
+}
+
+// ---------- handler registry ----------
+const handlers = new Map();
+let handlerId = 0;
+function registerHandler(fn) {
+  const id = String(++handlerId);
+  handlers.set(id, fn);
+  return id;
+}
+function bindHandlers(root) {
+  root.querySelectorAll('[data-handler]').forEach((node) => {
+    if (node.dataset.bound) return;
+    node.dataset.bound = '1';
+    node.addEventListener('click', () => handlers.get(node.dataset.handler)?.());
+  });
+}
+
+// ---------- status ----------
+function setStatus(message) {
+  els.status.hidden = false;
+  els.status.textContent = message;
+}
+function clearStatus() {
+  els.status.hidden = true;
+  els.status.textContent = '';
+}
+function showError(error) {
+  console.error(error);
+  setStatus(error.message || 'Dashboard failed to load');
+}
+
+// ---------- formatting ----------
+function pct(value, digits = 1) {
+  if (value == null || Number.isNaN(value)) return 'n/a';
+  return `${(value * 100).toFixed(digits)}%`;
+}
+function signedPct(value) {
+  const points = value * 100;
+  return `${points >= 0 ? '+' : ''}${points.toFixed(1)}pp`;
+}
+function number(value) {
+  return Number(value || 0).toLocaleString();
+}
+function wrColor(value) {
+  if (value >= 0.55) return COLORS.green;
+  if (value <= 0.45) return COLORS.red;
+  return COLORS.text;
+}
+function bossColor(value) {
+  if (value == null) return COLORS.text;
+  return Math.abs(value - 0.5) > 0.05 ? (value > 0.5 ? '#e89286' : '#a8c8ee') : COLORS.green;
+}
+function scaleCi(value) {
+  return clamp(((value - 0.25) / 0.5) * 100, 0, 100);
+}
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, Number(value)));
+}
+function code(value) {
+  return String(value || '?').split(/[-_]/).map((part) => part[0] || '').join('').slice(0, 4).toUpperCase();
+}
+function esc(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}

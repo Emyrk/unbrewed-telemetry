@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Unbrewed Balance Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Oswald:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/dashboard.css">
+</head>
+<body>
+  <div class="app" data-screen-label="Balance Dashboard">
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="topbar-row">
+          <div class="brand-group">
+            <div class="brand">Deck Balance Tracker</div>
+            <div class="game-count"><span id="hero-total">…</span> games logged<span id="hero-subtitle"></span></div>
+          </div>
+          <div id="format-chips" class="format-pills" role="group" aria-label="Format filter"></div>
+        </div>
+        <div class="topbar-row topbar-row-bottom">
+          <nav id="tabs" class="tabs" aria-label="Dashboard sections"></nav>
+          <div class="pilot-filter" role="group" aria-label="Pilot filter">
+            <span class="pilot-label">Pilots</span>
+            <div id="pilot-chips" class="pilot-pills"></div>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main class="content">
+      <section id="status" class="status" hidden></section>
+      <section id="view" class="view"></section>
+    </main>
+  </div>
+
+  <div id="modal-root"></div>
+
+  <script src="/assets/dashboard.js" type="module"></script>
+</body>
+</html>

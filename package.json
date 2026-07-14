@@ -1,0 +1,33 @@
+{
+  "name": "unbrewed-telemetry",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Telemetry ingest and balance analytics service for Unbrewed",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "node --import tsx src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:migrate": "tsx scripts/migrate.mts",
+    "db:seed": "tsx scripts/seed-dev.mts",
+    "db:compose:up": "docker compose up -d postgres",
+    "db:compose:down": "docker compose down -v",
+    "submit:sample": "tsx scripts/submit-sample.mts"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
+    "pg": "^8.16.3",
+    "tsx": "^4.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/pg": "^8.15.5",
+    "typescript": "^5",
+    "vitest": "^3.2.4"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

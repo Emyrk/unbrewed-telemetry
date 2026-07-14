@@ -1,0 +1,211 @@
+import { createServer, type Server } from 'node:http';
+import { Pool } from 'pg';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { migrate } from '../src/db/migrate.js';
+import { PgTelemetryRepository } from '../src/db/repository.js';
+import { createApp } from '../src/http/app.js';
+import { signBody } from '../src/http/auth.js';
+import { sampleGame } from './fixtures.js';
+
+const databaseUrl = process.env.TEST_DATABASE_URL;
+const describeDb = databaseUrl ? describe : describe.skip;
+
+describeDb('telemetry api with postgres', () => {
+  let pool: Pool;
+  let server: Server;
+  let baseUrl: string;
+  const secret = 'test-secret';
+  const now = new Date('2026-07-14T16:30:00.000Z');
+
+  beforeAll(async () => {
+    pool = new Pool({ connectionString: databaseUrl });
+    await migrate(pool);
+    const repo = new PgTelemetryRepository(pool);
+    server = createServer(createApp({
+      repo,
+      config: {
+        telemetrySecret: secret,
+        allowUnauthenticatedIngest: false,
+        bodyLimitBytes: 1024 * 1024,
+        now: () => now,
+      },
+    }));
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Expected TCP server address');
+    baseUrl = `http://127.0.0.1:${address.port}`;
+  });
+
+  beforeEach(async () => {
+    await pool.query('TRUNCATE game_submissions CASCADE');
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await pool.end();
+  });
+
+  it('serves healthz', async () => {
+    const response = await fetch(`${baseUrl}/healthz`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, db: true });
+  });
+
+  it('serves the dashboard shell and assets', async () => {
+    const root = await fetch(`${baseUrl}/`);
+    expect(root.status).toBe(200);
+    expect(root.headers.get('content-type')).toContain('text/html');
+    expect(await root.text()).toContain('Deck Balance Tracker');
+
+    const page = await fetch(`${baseUrl}/dashboard`);
+    expect(page.status).toBe(200);
+    expect(page.headers.get('content-type')).toContain('text/html');
+    expect(await page.text()).toContain('Deck Balance Tracker');
+
+    const script = await fetch(`${baseUrl}/assets/dashboard.js`);
+    expect(script.status).toBe(200);
+    expect(script.headers.get('content-type')).toContain('text/javascript');
+  });
+
+  it('requires signatures for ingest', async () => {
+    const response = await fetch(`${baseUrl}/v1/games`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(sampleGame()),
+    });
+    expect(response.status).toBe(401);
+  });
+
+  it('ingests valid games idempotently and reports deck stats', async () => {
+    const first = await postGame(baseUrl, secret, sampleGame({ gameId: 'api-game-001', stateHash: 'api-state-001' }), 'api-game-001');
+    expect(first.status).toBe(201);
+    expect(await first.json()).toMatchObject({ ok: true, duplicate: false, gameId: 'api-game-001' });
+
+    const duplicate = await postGame(baseUrl, secret, sampleGame({ gameId: 'api-game-001', stateHash: 'api-state-001' }), 'api-game-001');
+    expect(duplicate.status).toBe(200);
+    expect(await duplicate.json()).toMatchObject({ ok: true, duplicate: true, gameId: 'api-game-001' });
+
+    const stats = await fetch(`${baseUrl}/v1/stats/decks?format=duel&pilots=bot:hard`);
+    expect(stats.status).toBe(200);
+    const json = await stats.json() as {
+      totalGames: number;
+      avgTurns: number;
+      decks: { deck: string; games: number; wins: number; winRate: number }[];
+    };
+    expect(json.totalGames).toBe(1);
+    expect(json.avgTurns).toBe(13);
+    expect(json.decks).toHaveLength(2);
+    expect(json.decks.find((deck) => deck.deck === 'king-kong@0.1.0')).toMatchObject({ games: 1, wins: 1, winRate: 1 });
+    expect(json.decks.find((deck) => deck.deck === 'the-mandalorian@0.1.0')).toMatchObject({ games: 1, wins: 0, winRate: 0 });
+  });
+
+  it('returns dashboard aggregates for the UI', async () => {
+    await postGame(baseUrl, secret, sampleGame({ gameId: 'dash-game-001', stateHash: 'dash-state-001' }), 'dash-game-001');
+
+    const response = await fetch(`${baseUrl}/v1/stats/dashboard?format=duel&pilots=bot:hard`);
+    expect(response.status).toBe(200);
+    const json = await response.json() as {
+      totalGames: number;
+      totalSubmissions: number;
+      formats: { format: string; games: number }[];
+      decks: { deck: string; label: string; games: number; wins: number; profile: { attack: number; lean: string } | null }[];
+      matchups: { rowDeck: string; colDeck: string; games: number; wins: number }[];
+      firstPlayer: { games: number; wins: number; winRate: number };
+    };
+    expect(json.totalGames).toBe(1);
+    expect(json.totalSubmissions).toBe(1);
+    expect(json.formats).toContainEqual(expect.objectContaining({ format: 'duel', games: 1 }));
+    const king = json.decks.find((deck) => deck.deck === 'king-kong@0.1.0');
+    expect(king).toMatchObject({ label: 'king-kong', games: 1, wins: 1 });
+    // king-kong played 2 attack / 1 defense / 1 scheme -> attack-leaning play mix.
+    expect(king?.profile).toMatchObject({ attack: 0.5, lean: 'Offensive' });
+    expect(json.matchups).toContainEqual(expect.objectContaining({ rowDeck: 'king-kong@0.1.0', colDeck: 'the-mandalorian@0.1.0', games: 1, wins: 1 }));
+    expect(json.firstPlayer).toMatchObject({ games: 1, wins: 1, winRate: 1 });
+  });
+
+  it('serves deck detail with card influence and matchups', async () => {
+    await postGame(baseUrl, secret, sampleGame({ gameId: 'detail-game-001', stateHash: 'detail-state-001' }), 'detail-game-001');
+
+    const response = await fetch(`${baseUrl}/v1/stats/deck?deck=king-kong@0.1.0&format=duel&pilots=bot:hard`);
+    expect(response.status).toBe(200);
+    const json = await response.json() as {
+      deck: string;
+      games: number;
+      winRate: number;
+      profile: { lean: string } | null;
+      formats: { format: string; winRate: number }[];
+      matchups: { deck: string; games: number; winRate: number }[];
+      cards: { card: string; contextBucket: string; influence: number; baselineWinRate: number }[];
+    };
+    expect(json).toMatchObject({ deck: 'king-kong@0.1.0', games: 1, winRate: 1 });
+    expect(json.profile?.lean).toBe('Offensive');
+    expect(json.formats).toContainEqual(expect.objectContaining({ format: 'duel', winRate: 1 }));
+    expect(json.matchups).toContainEqual(expect.objectContaining({ deck: 'the-mandalorian@0.1.0', games: 1, winRate: 1 }));
+    const crushing = json.cards.find((card) => card.card === 'crushing-blow');
+    expect(crushing).toMatchObject({ contextBucket: 'attack', baselineWinRate: 1, influence: 0 });
+  });
+
+  it('404s deck detail for an unknown deck', async () => {
+    const response = await fetch(`${baseUrl}/v1/stats/deck?deck=does-not-exist@9.9.9`);
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ ok: false, code: 'DECK_NOT_FOUND' });
+  });
+
+  it('reports boss-side win rate for boss formats', async () => {
+    const bossGame = sampleGame({
+      gameId: 'boss-game-001',
+      stateHash: 'boss-state-001',
+      format: 'two-v-one-boss',
+      formatLabel: '2v1 Boss',
+      boss: 'marrow-king',
+      teams: [
+        { role: 'boss', seats: [{ deck: 'marrow-king@0.1.0', pilot: 'bot:hard', runtimePlayerId: 'p1', heroId: 'marrow-king' }] },
+        {
+          seats: [
+            { deck: 'king-kong@0.1.0', pilot: 'bot:hard', runtimePlayerId: 'p2', heroId: 'king-kong' },
+            { deck: 'the-mandalorian@0.1.0', pilot: 'bot:hard', runtimePlayerId: 'p3', heroId: 'the-mandalorian' },
+          ],
+        },
+      ],
+      winner: 0,
+    });
+    await postGame(baseUrl, secret, bossGame, 'boss-game-001');
+
+    const response = await fetch(`${baseUrl}/v1/stats/dashboard`);
+    const json = await response.json() as {
+      formats: { format: string; bossGames: number; bossWinRate: number | null; bosses: { boss: string; winRate: number }[] }[];
+    };
+    const bossFormat = json.formats.find((format) => format.format === 'two-v-one-boss');
+    expect(bossFormat).toMatchObject({ bossGames: 1, bossWinRate: 1 });
+    expect(bossFormat?.bosses).toContainEqual(expect.objectContaining({ boss: 'marrow-king', winRate: 1 }));
+  });
+
+  it('stores invalid submissions and returns validation errors', async () => {
+    const response = await postRaw(baseUrl, secret, { schemaVersion: 1, format: 'duel', map: 'mended-drum', teams: [], winner: 0 }, 'bad-game-001');
+    expect(response.status).toBe(400);
+    const json = await response.json() as { code: string; submissionId: string; errors: string[] };
+    expect(json.code).toBe('VALIDATION_FAILED');
+    expect(json.submissionId).toBeTruthy();
+    const stored = await pool.query('SELECT validation_status FROM game_submissions WHERE id = $1', [json.submissionId]);
+    expect(stored.rows[0]?.validation_status).toBe('invalid');
+  });
+});
+
+async function postGame(baseUrl: string, secret: string, payload: unknown, idempotencyKey: string): Promise<Response> {
+  return postRaw(baseUrl, secret, payload, idempotencyKey);
+}
+
+async function postRaw(baseUrl: string, secret: string, payload: unknown, idempotencyKey: string): Promise<Response> {
+  const body = JSON.stringify(payload);
+  const { timestamp, signature } = signBody(secret, body, '2026-07-14T16:30:00.000Z');
+  return fetch(`${baseUrl}/v1/games`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'idempotency-key': idempotencyKey,
+      'x-unbrewed-timestamp': timestamp,
+      'x-unbrewed-signature': signature,
+    },
+    body,
+  });
+}

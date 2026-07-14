@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "gameId": "sample-game-001",
+  "submittedAt": "2026-07-14T16:00:00.000Z",
+  "endedAt": "2026-07-14T16:12:00.000Z",
+  "source": "manual",
+  "format": "duel",
+  "formatLabel": "1v1",
+  "map": "mended-drum",
+  "mapVersion": "dev",
+  "teams": [
+    {
+      "seats": [
+        {
+          "deck": "king-kong@0.1.0",
+          "pilot": "bot:hard",
+          "runtimePlayerId": "p1",
+          "heroId": "king-kong",
+          "botDifficulty": "hard",
+          "finalHealth": 7,
+          "finalDeckCount": 4,
+          "finalHandCount": 3,
+          "finalDiscardCount": 23
+        }
+      ]
+    },
+    {
+      "seats": [
+        {
+          "deck": "the-mandalorian@0.1.0",
+          "pilot": "bot:hard",
+          "runtimePlayerId": "p2",
+          "heroId": "the-mandalorian",
+          "botDifficulty": "hard",
+          "finalHealth": 0,
+          "finalDeckCount": 2,
+          "finalHandCount": 5,
+          "finalDiscardCount": 23
+        }
+      ]
+    }
+  ],
+  "winner": 0,
+  "draw": false,
+  "endCondition": "hero_defeated",
+  "turns": 13,
+  "durationSeconds": 720,
+  "firstPlayerTeam": 0,
+  "engine": {
+    "schemaVersion": 3,
+    "dslVersion": "0.18.0",
+    "protocolVersion": 12,
+    "contentVersion": "dev"
+  },
+  "stateHash": "sample-state-hash-001",
+  "telemetry": {
+    "cardsPlayed": [
+      { "seat": [0, 0], "card": "beast-form", "turn": 2, "context": "scheme" },
+      { "seat": [1, 0], "card": "disintegrate", "turn": 3, "context": "attack" }
+    ],
+    "damageDealt": [
+      { "seat": [0, 0], "total": 18 },
+      { "seat": [1, 0], "total": 11 }
+    ],
+    "finalHealth": [[7], [0]]
+  }
+}
