@@ -73,6 +73,7 @@ function readStateFromUrl() {
     format: normalizedParam(params.get('format')),
     excluded: new Set(exclude ? exclude.split(',').map((v) => v.trim()).filter(Boolean) : []),
     deck: params.get('deck') || null,
+    pair: params.get('pair') || null,
   };
 }
 
@@ -82,6 +83,7 @@ function writeStateToUrl() {
   if (state.format) params.set('format', state.format);
   if (state.excluded.size) params.set('exclude', [...state.excluded].join(','));
   if (state.deck) params.set('deck', state.deck);
+  if (state.pair) params.set('pair', state.pair);
   const next = `${location.pathname}${params.toString() ? `?${params}` : ''}`;
   history.replaceState(null, '', next);
 }
@@ -121,7 +123,13 @@ async function loadDashboard() {
   renderTabs();
   renderView(json);
   clearStatus();
-  if (state.deck && !els.modalRoot.hasChildNodes()) openDeck(state.deck);
+  if (!els.modalRoot.hasChildNodes()) {
+    if (state.deck) openDeck(state.deck);
+    else if (state.pair) {
+      const [a, b] = state.pair.split('|');
+      if (a && b) openPair(a, b);
+    }
+  }
 }
 
 async function fetchJson(url) {
@@ -522,62 +530,90 @@ function renderSynergy(data) {
     <div class="syn-grid syn-head">
       <span>Pair</span><span class="right">Games</span><span class="right">Win rate</span><span class="right">Expected</span><span class="right">Δ</span>
     </div>
-    ${rows.length ? rows.map(synItem).join('') : `<div class="panel">${empty('No pairs with enough games under the current filters. Include more pilot types or log more 2v2 games.')}</div>`}
+    ${rows.length ? rows.map(synergyRow).join('') : `<div class="panel">${empty('No pairs with enough games under the current filters. Include more pilot types or log more 2v2 games.')}</div>`}
   </div>`;
-  els.view.querySelectorAll('.syn-row[data-syn]').forEach((rowEl) => {
-    rowEl.addEventListener('click', () => toggleSynergy(rowEl));
+  els.view.querySelectorAll('.syn-row[data-deck-a]').forEach((rowEl) => {
+    rowEl.addEventListener('click', () => openPair(rowEl.dataset.deckA, rowEl.dataset.deckB));
   });
 }
 
-function synItem(row) {
+function synergyRow(row) {
   const cls = row.delta > 0.03 ? 'delta-up' : row.delta < -0.03 ? 'delta-down' : 'delta-flat';
-  return `<div class="syn-item">
-    <div class="syn-grid syn-row" data-syn="${esc(row.deckA + '|' + row.deckB)}" data-deck-a="${esc(row.deckA)}" data-deck-b="${esc(row.deckB)}">
-      <span style="font-weight:600;font-size:13px"><span class="syn-caret">▸</span> ${esc(labelForDeckId(row.deckAId))} + ${esc(labelForDeckId(row.deckBId))}</span>
-      <span class="num">${number(row.games)}</span>
-      <span class="mono" style="text-align:right">${pct(row.winRate)}</span>
-      <span class="num">${pct(row.expectedWinRate)}</span>
-      <span style="text-align:right"><span class="delta-badge ${cls}">${signedPct(row.delta)}</span></span>
-    </div>
-    <div class="syn-expand" hidden></div>
+  return `<div class="syn-grid syn-row" data-deck-a="${esc(row.deckA)}" data-deck-b="${esc(row.deckB)}">
+    <span style="font-weight:600;font-size:13px">${esc(labelForDeckId(row.deckAId))} + ${esc(labelForDeckId(row.deckBId))}</span>
+    <span class="num">${number(row.games)}</span>
+    <span class="mono" style="text-align:right">${pct(row.winRate)}</span>
+    <span class="num">${pct(row.expectedWinRate)}</span>
+    <span style="text-align:right"><span class="delta-badge ${cls}">${signedPct(row.delta)}</span></span>
   </div>`;
 }
 
-const synCache = new Map();
-
-async function toggleSynergy(rowEl) {
-  const panel = rowEl.nextElementSibling;
-  const caret = rowEl.querySelector('.syn-caret');
-  if (!panel) return;
-  if (panel.dataset.open === '1') {
-    panel.hidden = true;
-    panel.dataset.open = '';
-    if (caret) caret.textContent = '▸';
-    return;
-  }
-  panel.hidden = false;
-  panel.dataset.open = '1';
-  if (caret) caret.textContent = '▼';
-
-  const key = rowEl.dataset.syn;
-  let detail = synCache.get(key);
-  if (!detail) {
-    panel.innerHTML = `<div class="syn-panel"><div class="empty">Loading…</div></div>`;
-    try {
-      const params = statsQuery();
-      params.set('deckA', rowEl.dataset.deckA);
-      params.set('deckB', rowEl.dataset.deckB);
-      detail = await fetchJson(`/v1/stats/synergy?${params}`);
-      synCache.set(key, detail);
-    } catch (error) {
-      panel.innerHTML = `<div class="syn-panel">${empty('Failed to load matchups: ' + (error.message || ''))}</div>`;
-      return;
-    }
-  }
-  renderSynPanel(panel, detail, 'pairs');
+// Opponent rows carry full deck ids (`id@version`); labelForDeckId keys on the id.
+function deckIdOf(deck) {
+  return String(deck || '').split('@')[0];
 }
 
-function renderSynPanel(panel, detail, mode) {
+// ---------- synergy pair modal (deep-linkable via ?pair=deckA|deckB) ----------
+const synCache = new Map();
+
+async function openPair(deckA, deckB) {
+  setStatus('Loading pair detail…');
+  try {
+    const key = `${deckA}|${deckB}`;
+    let detail = synCache.get(key);
+    if (!detail) {
+      const params = statsQuery();
+      params.set('deckA', deckA);
+      params.set('deckB', deckB);
+      detail = await fetchJson(`/v1/stats/synergy?${params}`);
+      synCache.set(key, detail);
+    }
+    clearStatus();
+    state.pair = key;
+    state.deck = null;
+    writeStateToUrl();
+    renderPairModal(detail);
+  } catch (error) {
+    showError(error);
+  }
+}
+
+function renderPairModal(detail) {
+  const nameA = esc(labelForDeckId(deckIdOf(detail.deckA)));
+  const nameB = esc(labelForDeckId(deckIdOf(detail.deckB)));
+  const totalWins = (detail.pairs || []).reduce((sum, p) => sum + p.wins, 0);
+  const winRate = detail.totalGames > 0 ? totalWins / detail.totalGames : 0;
+  // Expected/Δ only exist in the dashboard's synergy list (needs solo win rates).
+  const rowMatch = (current?.synergy || []).find((s) =>
+    (s.deckA === detail.deckA && s.deckB === detail.deckB) || (s.deckA === detail.deckB && s.deckB === detail.deckA));
+  const extra = rowMatch
+    ? ` · expected ${pct(rowMatch.expectedWinRate)} · Δ ${signedPct(rowMatch.delta)}`
+    : '';
+
+  els.modalRoot.innerHTML = `
+    <div class="modal-overlay" data-overlay>
+      <div class="modal" data-screen-label="Synergy pair" role="dialog" aria-modal="true">
+        <div class="modal-head">
+          <div style="flex:1">
+            <div class="modal-title">${nameA} + ${nameB}</div>
+            <div class="modal-sub">2v2 pair · ${number(detail.totalGames)} games together${extra}</div>
+          </div>
+          <div class="modal-wr" style="color:${wrColor(winRate)}">${pct(winRate)}</div>
+          <button class="modal-close" data-close type="button" aria-label="Close">✕</button>
+        </div>
+        <div class="modal-section" style="padding-bottom:22px" data-pair-body></div>
+      </div>
+    </div>`;
+  renderPairBody(els.modalRoot.querySelector('[data-pair-body]'), detail, 'pairs');
+
+  els.modalRoot.querySelector('[data-overlay]')?.addEventListener('click', (event) => {
+    if (event.target === event.currentTarget) closeModal();
+  });
+  els.modalRoot.querySelector('[data-close]')?.addEventListener('click', closeModal);
+}
+
+function renderPairBody(body, detail, mode) {
+  if (!body) return;
   const list = mode === 'decks' ? (detail.decks || []) : (detail.pairs || []);
   const label = (x) => mode === 'decks'
     ? esc(labelForDeckId(deckIdOf(x.deck)))
@@ -594,27 +630,17 @@ function renderSynPanel(panel, detail, mode) {
     ${arr.length ? arr.map(oppRow).join('') : `<div class="empty">none</div>`}
   </div>`;
 
-  panel.innerHTML = `<div class="syn-panel">
+  body.innerHTML = `
     <div class="syn-toggle">
       <button class="syn-tab${mode === 'pairs' ? ' active' : ''}" data-mode="pairs" type="button">Vs pairs</button>
-      <button class="syn-tab${mode === 'decks' ? ' active' : ''}" data-mode="decks" type="button">Vs decks</button>
-      <span class="kicker" style="margin-left:auto">${number(detail.totalGames)} games as this pair</span>
+      <button class="syn-tab${mode === 'decks' ? ' active' : ''}" data-mode="decks" type="button">Vs individual decks</button>
     </div>
     ${detail.totalGames > 0
       ? `<div class="syn-cols">${section('Beating', beating, 'good')}${section('Losing', losing, 'bad')}</div>`
-      : empty('No games for this pair under the current filters.')}
-  </div>`;
-  panel.querySelectorAll('.syn-tab').forEach((btn) => {
-    btn.addEventListener('click', (event) => {
-      event.stopPropagation();
-      renderSynPanel(panel, detail, btn.dataset.mode);
-    });
+      : empty('No games for this pair under the current filters.')}`;
+  body.querySelectorAll('.syn-tab').forEach((btn) => {
+    btn.addEventListener('click', () => renderPairBody(body, detail, btn.dataset.mode));
   });
-}
-
-// Opponent rows carry full deck ids (`id@version`); labelForDeckId keys on the id.
-function deckIdOf(deck) {
-  return String(deck || '').split('@')[0];
 }
 
 function labelForDeckId(deckId) {
@@ -631,6 +657,7 @@ async function openDeck(deck) {
     const detail = await fetchJson(`/v1/stats/deck?${params}`);
     clearStatus();
     state.deck = deck;
+    state.pair = null;
     writeStateToUrl();
     renderModal(detail);
   } catch (error) {
@@ -692,7 +719,7 @@ function renderModal(d) {
 
 function closeModal() {
   els.modalRoot.innerHTML = '';
-  if (state.deck) { state.deck = null; writeStateToUrl(); }
+  if (state.deck || state.pair) { state.deck = null; state.pair = null; writeStateToUrl(); }
 }
 
 // Real deck make-up from the pushed registry: the mock's "30 cards" panel.

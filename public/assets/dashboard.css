@@ -350,13 +350,10 @@ body {
 .delta-down { background: rgba(224, 121, 106, 0.2); color: #e89286; }
 .delta-flat { background: rgba(255, 255, 255, 0.08); color: var(--muted); }
 
-/* expandable synergy rows */
+/* clickable synergy rows + pair-modal opponent breakdown */
 .syn-row { cursor: pointer; }
 .syn-row:hover { background: var(--hover); }
-.syn-caret { display: inline-block; width: 12px; color: var(--muted-2); font-size: 10px; }
-.syn-expand[hidden] { display: none; }
-.syn-panel { padding: 4px 20px 16px; background: rgba(0, 0, 0, 0.12); border-bottom: 1px solid var(--border); }
-.syn-toggle { display: flex; align-items: center; gap: 6px; padding: 10px 0 12px; }
+.syn-toggle { display: flex; align-items: center; gap: 6px; padding: 6px 0 14px; }
 .syn-tab {
   border: 1px solid rgba(255, 255, 255, 0.15);
   background: transparent;
