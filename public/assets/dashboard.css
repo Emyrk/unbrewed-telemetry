@@ -463,6 +463,39 @@ body {
 .card-infl-row .plays { font-size: 11px; color: var(--muted); text-align: right; font-family: var(--font-mono); }
 .infl-badge { font: 600 11px var(--font-mono); padding: 2px 7px; border-radius: 4px; text-align: right; }
 
+/* ---------- Footer FAQ ---------- */
+.dash-footer { max-width: 1240px; margin: 0 auto; padding: 4px 28px 64px; }
+.footer-inner { border-top: 1px solid var(--border); padding-top: 20px; }
+.footer-title {
+  font: 600 13px var(--font-head);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+.faq { border-bottom: 1px solid var(--border); }
+.faq > summary {
+  cursor: pointer;
+  padding: 10px 0;
+  font: 500 13px var(--font-body);
+  color: var(--text);
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.faq > summary::-webkit-details-marker { display: none; }
+.faq > summary::before { content: '+'; width: 12px; color: var(--muted-2); font-family: var(--font-mono); }
+.faq[open] > summary::before { content: '\2013'; }
+.faq > summary:hover { color: var(--accent); }
+.faq p { margin: 0 0 12px 20px; font-size: 12.5px; line-height: 1.55; color: var(--muted); max-width: 900px; }
+.faq p strong { color: #d8c9dd; font-weight: 600; }
+.faq p em { color: var(--muted); }
+.footer-note { margin-top: 16px; font-size: 11.5px; color: var(--muted-2); }
+
+/* Spice-remix flair on display names */
+.spice { font-size: 0.9em; cursor: help; margin-left: 1px; }
+
 /* ---------- Responsive ---------- */
 @media (max-width: 900px) {
   .grid-4 { grid-template-columns: repeat(2, 1fr); }

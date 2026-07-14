@@ -261,7 +261,7 @@ function renderOverview(data, decks) {
 function flagRow(deck) {
   return `<div class="flag" ${deckClick(deck)}>
     <span class="badge ${deck.flag}">${deck.flag === 'over' ? 'OVER' : 'UNDER'}</span>
-    <span class="flag-name">${esc(deck.label)}</span>
+    <span class="flag-name">${labelHtml(deck.label, deck.deckId)}</span>
     <span class="flag-games">${number(deck.games)} games</span>
     <span class="mono" style="color:${wrColor(deck.winRate)}">${pct(deck.winRate)}</span>
     <span class="flag-ci">CI ${pct(deck.ciLow, 0)}–${pct(deck.ciHigh, 0)}</span>
@@ -271,7 +271,7 @@ function flagRow(deck) {
 function extremeRow(deck) {
   const w = Math.round(deck.winRate * 100);
   return `<div class="extreme" ${deckClick(deck)}>
-    <span class="name">${esc(deck.label)}</span>
+    <span class="name">${labelHtml(deck.label, deck.deckId)}</span>
     <span class="bar-track"><span class="bar-fill" style="width:${w}%;background:${deck.winRate >= 0.5 ? COLORS.green : COLORS.red}"></span></span>
     <span class="wr" style="color:${wrColor(deck.winRate)}">${pct(deck.winRate)}</span>
   </div>`;
@@ -325,7 +325,7 @@ function sortDecks(decks) {
 
 function deckRow(deck) {
   return `<div class="deck-grid deck-row" ${deckClick(deck)}>
-    <div><div class="deck-name">${esc(deck.label)}</div><div class="deck-tag">${esc(deckTag(deck))}</div></div>
+    <div><div class="deck-name">${labelHtml(deck.label, deck.deckId)}</div><div class="deck-tag">${esc(deckTag(deck))}</div></div>
     <div class="num">${number(deck.games)}</div>
     <div class="num">${pct(deck.pickRate)}</div>
     ${ciCell(deck)}
@@ -399,7 +399,7 @@ function renderMatchups(data, decks) {
   const cols = `<div class="matrix-line"><div class="matrix-corner"></div>${top.map((d) => `<div class="matrix-colhead" title="${esc(d.label)}">${esc(code(d.deckId))}</div>`).join('')}</div>`;
   const rows = top.map((rowDeck) => {
     const cells = top.map((colDeck) => matrixCell(rowDeck, colDeck, lookup)).join('');
-    return `<div class="matrix-line"><div class="matrix-rowlabel" ${deckClick(rowDeck)} title="${esc(rowDeck.label)}">${esc(rowDeck.label)}</div>${cells}</div>`;
+    return `<div class="matrix-line"><div class="matrix-rowlabel" ${deckClick(rowDeck)} title="${esc(rowDeck.label)}${isSpice(rowDeck.deckId) ? ' (spice)' : ''}">${labelHtml(rowDeck.label, rowDeck.deckId)}</div>${cells}</div>`;
   }).join('');
 
   els.view.innerHTML = `<div class="card panel">
@@ -449,7 +449,7 @@ function renderScatter(data, decks) {
     const color = deck.flag === 'over' ? COLORS.red : deck.flag === 'under' ? COLORS.blue : COLORS.violet;
     return `<div class="dot-wrap" style="left:${left}%;top:${top}%" ${deckClick(deck)}>
       <div class="dot" style="width:${size}px;height:${size}px;background:${color}"></div>
-      <div class="dot-label">${esc(deck.label)}</div>
+      <div class="dot-label">${labelHtml(deck.label, deck.deckId)}</div>
     </div>`;
   }).join('');
 
@@ -543,7 +543,7 @@ function renderSynergy(data) {
 function synergyRow(row) {
   const cls = row.delta > 0.03 ? 'delta-up' : row.delta < -0.03 ? 'delta-down' : 'delta-flat';
   return `<div class="syn-grid syn-row" data-deck-a="${esc(row.deckA)}" data-deck-b="${esc(row.deckB)}">
-    <span style="font-weight:600;font-size:13px">${esc(labelForDeckId(row.deckAId))} + ${esc(labelForDeckId(row.deckBId))}</span>
+    <span style="font-weight:600;font-size:13px">${heroLabelHtml(row.deckAId)} + ${heroLabelHtml(row.deckBId)}</span>
     <span class="num">${number(row.games)}</span>
     <span class="mono" style="text-align:right">${pct(row.winRate)}</span>
     <span class="num">${pct(row.expectedWinRate)}</span>
@@ -582,8 +582,8 @@ async function openPair(deckA, deckB) {
 }
 
 function renderPairModal(detail) {
-  const nameA = esc(labelForDeckId(deckIdOf(detail.deckA)));
-  const nameB = esc(labelForDeckId(deckIdOf(detail.deckB)));
+  const nameA = heroLabelHtml(deckIdOf(detail.deckA));
+  const nameB = heroLabelHtml(deckIdOf(detail.deckB));
   const totalWins = (detail.pairs || []).reduce((sum, p) => sum + p.wins, 0);
   const winRate = detail.totalGames > 0 ? totalWins / detail.totalGames : 0;
   // Expected/Δ only exist in the dashboard's synergy list (needs solo win rates).
@@ -619,8 +619,8 @@ function renderPairBody(body, detail, mode) {
   if (!body) return;
   const list = mode === 'decks' ? (detail.decks || []) : (detail.pairs || []);
   const label = (x) => mode === 'decks'
-    ? esc(labelForDeckId(deckIdOf(x.deck)))
-    : `${esc(labelForDeckId(deckIdOf(x.deckA)))} + ${esc(labelForDeckId(deckIdOf(x.deckB)))}`;
+    ? heroLabelHtml(deckIdOf(x.deck))
+    : `${heroLabelHtml(deckIdOf(x.deckA))} + ${heroLabelHtml(deckIdOf(x.deckB))}`;
   const beating = list.filter((x) => x.winRate >= 0.5).sort((a, b) => b.winRate - a.winRate || b.games - a.games);
   const losing = list.filter((x) => x.winRate < 0.5).sort((a, b) => a.winRate - b.winRate || b.games - a.games);
   const oppRow = (x) => `<div class="syn-opp">
@@ -649,6 +649,23 @@ function renderPairBody(body, detail, mode) {
 function labelForDeckId(deckId) {
   const match = (current?.decks || []).find((deck) => deck.deckId === deckId);
   return match ? match.label : deckId;
+}
+
+// `-spice` decks share their base hero's display name, so tag them with a chili
+// flair to disambiguate at a glance. deckId ends with '-spice'.
+function isSpice(deckId) {
+  return String(deckId || '').endsWith('-spice');
+}
+function spiceFlair(deckId) {
+  return isSpice(deckId) ? ' <span class="spice" title="Spice remix">🌶️</span>' : '';
+}
+// Escaped display name plus the spice flair when applicable (returns HTML).
+function labelHtml(label, deckId) {
+  return esc(label) + spiceFlair(deckId);
+}
+// deckId → escaped label + flair, for deckId-keyed contexts.
+function heroLabelHtml(deckId) {
+  return labelHtml(labelForDeckId(deckId), deckId);
 }
 
 // ---------- deck detail modal ----------
@@ -682,7 +699,7 @@ function renderModal(d) {
       <div class="modal" data-screen-label="Deck detail" role="dialog" aria-modal="true">
         <div class="modal-head">
           <div style="flex:1">
-            <div class="modal-title">${esc(d.label)}</div>
+            <div class="modal-title">${labelHtml(d.label, d.deckId)}</div>
             <div class="modal-sub">${esc(d.deck)} · ${number(d.games)} games · pick rate ${pct(d.pickRate)}</div>
           </div>
           <div class="modal-wr" style="color:${wrColor(d.winRate)}">${pct(d.winRate)}</div>
@@ -802,7 +819,7 @@ function matchupHighlights(matchups) {
 function matchupRow(m) {
   return `<div class="matchup-row">
     <span class="tag" style="color:${m.tag === 'BEST' ? COLORS.green : '#e89286'}">${m.tag}</span>
-    <span class="name">${esc(m.label)}</span>
+    <span class="name">${labelHtml(m.label, m.deckId)}</span>
     <span class="g">${number(m.games)}g</span>
     <span class="mono" style="color:${wrColor(m.winRate)}">${pct(m.winRate)}</span>
   </div>`;

@@ -34,6 +34,49 @@
       <section id="status" class="status" hidden></section>
       <section id="view" class="view"></section>
     </main>
+
+    <footer class="dash-footer">
+      <div class="footer-inner">
+        <div class="footer-title">About these numbers</div>
+
+        <details class="faq">
+          <summary>What is the win-rate bar &amp; the 95% CI band?</summary>
+          <p>The pill is the deck's <strong>win-rate point estimate</strong> (green ≥55%, red ≤45%, cream in the neutral 45–55% zone); the faint vertical line is 50% (even). The translucent band around it is the <strong>95% confidence interval</strong> — the range the deck's true win rate is likely in, given its number of games. Fewer games → wider band → less certain. The axis runs 25–75%; values past the ends sit at the edge. Hover any bar for the exact figures.</p>
+        </details>
+
+        <details class="faq">
+          <summary>How is the confidence interval calculated?</summary>
+          <p>It's a <strong>Wilson score interval</strong> at 95% (z = 1.96), chosen because it stays within 0–100% and stays accurate for small samples and lopsided win rates. With <em>p</em> = wins / games and <em>n</em> = games: center = (p + z²/2n) / (1 + z²/n), margin = z·√(p(1−p)/n + z²/4n²) / (1 + z²/n). Example: 28 wins in 39 games ≈ 71.8% → 95% CI ≈ 56%–83%.</p>
+        </details>
+
+        <details class="faq">
+          <summary>How are balance flags decided?</summary>
+          <p>A deck is flagged <strong>OVER</strong> only when its <em>entire</em> 95% CI is above 55%, and <strong>UNDER</strong> only when the entire CI is below 45% — and only with at least <strong>30 games</strong>. Using the whole interval (not just the win rate) prevents small, noisy samples from looking falsely extreme.</p>
+        </details>
+
+        <details class="faq">
+          <summary>What is pick rate?</summary>
+          <p>How often a deck appears, as a share of the games in the current view. The format and pilot filters change it.</p>
+        </details>
+
+        <details class="faq">
+          <summary>What is the deck profile / play mix?</summary>
+          <p>How a deck's cards split across <strong>Attack / Defense / Versatile / Scheme</strong>. When the deck registry has the real card list, these are exact card counts (with Σ values on the deck page); otherwise it's a <em>play mix</em> derived from card telemetry, labeled as such.</p>
+        </details>
+
+        <details class="faq">
+          <summary>What does the 2v2 synergy Δ mean?</summary>
+          <p>Δ = the pair's actual 2v2 win rate minus its <em>expected</em> win rate (the average of each deck's solo 2v2 win rate). A big positive Δ means the duo is more than the sum of its parts. Click a pair to see the opponents it beats and loses to.</p>
+        </details>
+
+        <details class="faq">
+          <summary>How do I read the matchup matrix &amp; pilot filters?</summary>
+          <p><strong>Matrix:</strong> each cell is the row deck's 1v1 win rate vs the column deck (green favors the row), needing at least 3 games — “·” means not enough data. <strong>Pilots:</strong> the chips restrict to games where every seat is one of the selected pilot types (human or a specific bot); with all on, there's no filter.</p>
+        </details>
+
+        <p class="footer-note">Aggregate statistics only — no per-player or raw game data is shown.</p>
+      </div>
+    </footer>
   </div>
 
   <div id="modal-root"></div>
