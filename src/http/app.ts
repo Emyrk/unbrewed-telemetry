@@ -75,6 +75,16 @@ async function handleRequest(
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/v1/admin/decks') {
+    await handleAdminListDecks(req, res, repo, config);
+    return;
+  }
+
+  if (req.method === 'DELETE' && url.pathname === '/v1/admin/deck') {
+    await handleAdminDeleteDeck(req, url, res, repo, config);
+    return;
+  }
+
   sendJson(res, 404, { ok: false, code: 'NOT_FOUND', message: 'Not found' });
 }
 
@@ -291,6 +301,50 @@ async function readBody(req: IncomingMessage, maxBytes: number): Promise<BodyRes
     chunks.push(buffer);
   }
   return { ok: true, body: Buffer.concat(chunks) };
+}
+
+function verifyAdminAuth(req: IncomingMessage, config: AppConfig): boolean {
+  if (!config.telemetrySecret) return false;
+  const authHeader = header(req, 'authorization');
+  if (!authHeader) return false;
+  const match = authHeader.match(/^Bearer\s+(.+)$/i);
+  if (!match) return false;
+  return match[1] === config.telemetrySecret;
+}
+
+async function handleAdminListDecks(
+  req: IncomingMessage,
+  res: ServerResponse,
+  repo: PgTelemetryRepository,
+  config: AppConfig,
+): Promise<void> {
+  if (!verifyAdminAuth(req, config)) {
+    sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Invalid admin secret' });
+    return;
+  }
+  const data = await repo.adminListDecks();
+  sendJson(res, 200, { ok: true, ...data });
+}
+
+async function handleAdminDeleteDeck(
+  req: IncomingMessage,
+  url: URL,
+  res: ServerResponse,
+  repo: PgTelemetryRepository,
+  config: AppConfig,
+): Promise<void> {
+  if (!verifyAdminAuth(req, config)) {
+    sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Invalid admin secret' });
+    return;
+  }
+  const deck = blankToNull(url.searchParams.get('deck'));
+  if (!deck) {
+    sendJson(res, 400, { ok: false, code: 'MISSING_DECK', message: 'deck query parameter is required' });
+    return;
+  }
+  const result = await repo.adminDeleteDeck(deck);
+  console.log(`[admin] deleted deck ${deck}: ${result.deletedDefinitions} definitions, ${result.deletedGames} games`);
+  sendJson(res, 200, { ok: true, ...result });
 }
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {

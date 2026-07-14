@@ -972,6 +972,107 @@ export class PgTelemetryRepository {
     const totalGames = pairs.reduce((sum, p) => sum + p.games, 0);
     return { found: totalGames > 0, deckA: pair[0]!, deckB: pair[1]!, totalGames, pairs, decks };
   }
+
+  /** List all deck definitions grouped by deck_id, with game counts. */
+  async adminListDecks(): Promise<AdminDeckList> {
+    const [defRows, gameCountRows, totalGamesRow] = await Promise.all([
+      this.pool.query<{ deck_id: string; version: string; name: string | null }>(
+        `SELECT deck_id, version, name FROM deck_definitions ORDER BY deck_id, version`,
+      ),
+      this.pool.query<{ deck_id: string; game_count: string }>(
+        `SELECT s.deck_id, COUNT(DISTINCT s.game_id)::text AS game_count
+         FROM game_seats s
+         GROUP BY s.deck_id`,
+      ),
+      this.pool.query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM games`),
+    ]);
+
+    const gameCounts = new Map<string, number>();
+    for (const row of gameCountRows.rows) {
+      const existing = gameCounts.get(row.deck_id) ?? 0;
+      gameCounts.set(row.deck_id, existing + Number(row.game_count));
+    }
+
+    const grouped = new Map<string, { name: string | null; versions: string[] }>();
+    for (const row of defRows.rows) {
+      const entry = grouped.get(row.deck_id);
+      if (entry) {
+        entry.versions.push(row.version);
+        if (!entry.name && row.name) entry.name = row.name;
+      } else {
+        grouped.set(row.deck_id, { name: row.name, versions: [row.version] });
+      }
+    }
+
+    const decks: AdminDeckList['decks'] = [];
+    for (const [deckId, { name, versions }] of grouped) {
+      decks.push({ deckId, name, versions, gameCount: gameCounts.get(deckId) ?? 0 });
+    }
+
+    return {
+      totalDecks: defRows.rows.length,
+      totalGames: Number(totalGamesRow.rows[0]?.count ?? 0),
+      decks,
+    };
+  }
+
+  /**
+   * Delete a deck: remove all deck_definitions for the given deck_id,
+   * then cascade-delete all games where any seat used that deck.
+   * Returns counts of deleted definitions and games.
+   */
+  async adminDeleteDeck(deckId: string): Promise<{ deletedDefinitions: number; deletedGames: number }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Step 1: Find game IDs and their submission IDs before deleting
+      const gamesInfo = await client.query<{ id: string; submission_id: string }>(
+        `SELECT DISTINCT g.id, g.submission_id FROM games g
+         JOIN game_seats s ON s.game_id = g.id
+         WHERE s.deck_id = $1`,
+        [deckId],
+      );
+      const affectedGameIds = gamesInfo.rows.map((r) => r.id);
+      const affectedSubmissionIds = gamesInfo.rows.map((r) => r.submission_id);
+
+      // Step 2: Delete games (cascades to game_teams, game_seats, game_cards)
+      let deletedGames = 0;
+      if (affectedGameIds.length > 0) {
+        const del = await client.query(`DELETE FROM games WHERE id = ANY($1)`, [affectedGameIds]);
+        deletedGames = del.rowCount ?? 0;
+
+        // Step 3: Delete orphaned submissions
+        await client.query(`DELETE FROM game_submissions WHERE id = ANY($1)`, [affectedSubmissionIds]);
+      }
+
+      // Step 4: Delete deck definitions
+      const defDel = await client.query(
+        `DELETE FROM deck_definitions WHERE deck_id = $1`,
+        [deckId],
+      );
+      const deletedDefinitions = defDel.rowCount ?? 0;
+
+      await client.query('COMMIT');
+      return { deletedDefinitions, deletedGames };
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+}
+
+export interface AdminDeckList {
+  totalDecks: number;
+  totalGames: number;
+  decks: Array<{
+    deckId: string;
+    name: string | null;
+    versions: string[];
+    gameCount: number;
+  }>;
 }
 
 interface DeckDefinitionRow {
