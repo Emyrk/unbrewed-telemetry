@@ -56,6 +56,7 @@ const els = {
 
 let current = null;
 let allPilots = [];
+let matrixFocus = null; // full deck id of the focused row on the Matchups tab, or null for the grid
 
 renderTabs();
 loadDashboard().catch(showError);
@@ -202,6 +203,7 @@ function renderView(data) {
     els.view.innerHTML = card(empty('No completed games match these filters yet. Submit sample data or run local simulations to populate the dashboard.'));
     return;
   }
+  if (state.tab !== 'matchups') matrixFocus = null;
   const decks = decorateDecks(data.decks);
   if (state.tab === 'heroes') renderHeroes(data, decks);
   else if (state.tab === 'matchups') renderMatchups(data, decks);
@@ -388,18 +390,24 @@ function profileBar(deck) {
 
 // ---------- matchups ----------
 function renderMatchups(data, decks) {
-  const top = decks.filter((deck) => deck.games > 0).slice(0, MATRIX_MAX_DECKS);
-  const lookup = new Map((data.matchups || []).map((row) => [`${row.rowDeck}|${row.colDeck}`, row]));
-
-  if (top.length < 2) {
+  const withGames = decks.filter((deck) => deck.games > 0);
+  if (withGames.length < 2) {
     els.view.innerHTML = card(empty('Need at least two decks with duel games for a matchup matrix.'), 'panel');
     return;
   }
+  if (matrixFocus && withGames.some((deck) => deck.deck === matrixFocus)) {
+    renderMatchupFocus(data, decks);
+    return;
+  }
+  matrixFocus = null;
 
-  const cols = `<div class="matrix-line"><div class="matrix-corner"></div>${top.map((d) => `<div class="matrix-colhead" title="${esc(d.label)}">${esc(code(d.deckId))}</div>`).join('')}</div>`;
+  const top = withGames.slice(0, MATRIX_MAX_DECKS);
+  const lookup = new Map((data.matchups || []).map((row) => [`${row.rowDeck}|${row.colDeck}`, row]));
+  const cols = `<div class="matrix-line"><div class="matrix-corner"></div>${top.map((d) => `<div class="matrix-colhead" title="${esc(d.label)}${isSpice(d.deckId) ? ' (spice)' : ''}">${esc(code(d.deckId))}</div>`).join('')}</div>`;
   const rows = top.map((rowDeck) => {
     const cells = top.map((colDeck) => matrixCell(rowDeck, colDeck, lookup)).join('');
-    return `<div class="matrix-line"><div class="matrix-rowlabel" ${deckClick(rowDeck)} title="${esc(rowDeck.label)}${isSpice(rowDeck.deckId) ? ' (spice)' : ''}">${labelHtml(rowDeck.label, rowDeck.deckId)}</div>${cells}</div>`;
+    const id = registerHandler(() => focusMatchup(rowDeck.deck));
+    return `<div class="matrix-line"><div class="matrix-rowlabel" data-handler="${id}" title="Focus ${esc(rowDeck.label)}${isSpice(rowDeck.deckId) ? ' (spice)' : ''}">${labelHtml(rowDeck.label, rowDeck.deckId)}</div>${cells}</div>`;
   }).join('');
 
   els.view.innerHTML = `<div class="card panel">
@@ -412,7 +420,63 @@ function renderMatchups(data, decks) {
       ${legendSwatch('rgba(224,121,106,0.65)', 'Row loses')}
       ${legendSwatch('rgba(255,255,255,0.1)', 'Even')}
       ${legendSwatch('rgba(126,203,143,0.65)', 'Row wins')}
-      <span class="legend-spacer">Click a row deck for its full detail page</span>
+      <span class="legend-spacer">Click a row to focus that deck's matchups</span>
+    </div>
+  </div>`;
+}
+
+function focusMatchup(deckFull) {
+  matrixFocus = deckFull;
+  if (current) renderView(current);
+}
+
+// Focused, transposed view: one deck vs each opponent, full names down a single
+// column with win rate, favorability bar, record, and average game length.
+function renderMatchupFocus(data, decks) {
+  const deck = decks.find((d) => d.deck === matrixFocus);
+  const deckName = deck ? labelHtml(deck.label, deck.deckId) : esc(matrixFocus);
+  const deckPlain = deck ? deck.label : matrixFocus;
+  const opponents = (data.matchups || [])
+    .filter((m) => m.rowDeck === matrixFocus)
+    .map((m) => ({ deck: m.colDeck, deckId: m.colDeckId, games: m.games, wins: m.wins, winRate: m.winRate, avgTurns: m.avgTurns }))
+    .sort((a, b) => b.winRate - a.winRate || b.games - a.games);
+
+  const backId = registerHandler(() => { matrixFocus = null; if (current) renderView(current); });
+
+  const oppRow = (o) => {
+    const losses = o.games - o.wins;
+    const good = o.winRate >= 0.5;
+    const fill = good
+      ? `<span class="mx-fill" style="left:50%;width:${((o.winRate - 0.5) * 100).toFixed(1)}%;background:${COLORS.green}"></span>`
+      : `<span class="mx-fill" style="left:${(o.winRate * 100).toFixed(1)}%;width:${((0.5 - o.winRate) * 100).toFixed(1)}%;background:${COLORS.red}"></span>`;
+    const id = registerHandler(() => focusMatchup(o.deck));
+    const low = o.games < MATRIX_MIN_GAMES ? ' mx-low' : '';
+    return `<div class="mx-row${low}" data-handler="${id}" title="${esc(deckPlain)} vs ${esc(labelForDeckId(o.deckId))}: ${o.wins}-${losses} over ${number(o.games)} games">
+      <span class="mx-name">${labelHtml(labelForDeckId(o.deckId), o.deckId)}</span>
+      <span class="mx-bar"><span class="mx-mid"></span>${fill}</span>
+      <span class="mx-wr" style="color:${wrColor(o.winRate)}">${pct(o.winRate, 0)}</span>
+      <span class="mx-rec">${o.wins}-${losses}</span>
+      <span class="mx-turns">${o.avgTurns == null ? '—' : o.avgTurns.toFixed(1)}</span>
+    </div>`;
+  };
+
+  els.view.innerHTML = `<div class="card panel">
+    <div class="section-head">
+      <div>
+        <button class="mx-back" data-handler="${backId}" type="button">◀ All matchups</button>
+        <div class="section-title" style="margin-top:10px">${deckName}<span class="kicker" style="text-transform:none;letter-spacing:0;margin-left:8px">1v1 vs each opponent</span></div>
+      </div>
+      <div class="kicker">Bar diverges from 50% · green favors ${esc(deckPlain)} · faded rows are under ${MATRIX_MIN_GAMES} games</div>
+    </div>
+    <div class="mx-list">
+      <div class="mx-row mx-headrow">
+        <span class="mx-name">Opponent</span>
+        <span class="mx-legend">← opponent favored · ${esc(deckPlain)} favored →</span>
+        <span class="mx-wr">Win</span>
+        <span class="mx-rec">W–L</span>
+        <span class="mx-turns">Avg turns</span>
+      </div>
+      ${opponents.length ? opponents.map(oppRow).join('') : empty('No 1v1 opponents with data for this deck under the current filters.')}
     </div>
   </div>`;
 }

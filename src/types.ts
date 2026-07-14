@@ -270,6 +270,7 @@ export interface DashboardMatchupStat {
   games: number;
   wins: number;
   winRate: number;
+  avgTurns: number | null;
 }
 
 export interface DashboardSynergyStat {

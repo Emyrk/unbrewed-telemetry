@@ -537,6 +537,7 @@ export class PgTelemetryRepository {
       col_deck_id: string;
       games: number;
       wins: number;
+      avg_turns: number | null;
     }>(
       `
         WITH duel_games AS (
@@ -551,7 +552,8 @@ export class PgTelemetryRepository {
             row_seat.deck_id AS row_deck_id,
             col_seat.deck AS col_deck,
             col_seat.deck_id AS col_deck_id,
-            row_seat.won
+            row_seat.won,
+            g.turns
           FROM duel_games g
           JOIN game_seats row_seat ON row_seat.game_id = g.id
           JOIN game_seats col_seat ON col_seat.game_id = g.id AND col_seat.team_index <> row_seat.team_index
@@ -563,7 +565,8 @@ export class PgTelemetryRepository {
           col_deck,
           col_deck_id,
           COUNT(*)::int AS games,
-          COUNT(*) FILTER (WHERE won)::int AS wins
+          COUNT(*) FILTER (WHERE won)::int AS wins,
+          AVG(turns)::float8 AS avg_turns
         FROM oriented
         GROUP BY row_deck, row_deck_id, col_deck, col_deck_id
         ORDER BY games DESC, row_deck ASC, col_deck ASC
@@ -581,6 +584,7 @@ export class PgTelemetryRepository {
         games,
         wins,
         winRate: games > 0 ? wins / games : 0,
+        avgTurns: row.avg_turns,
       };
     });
   }

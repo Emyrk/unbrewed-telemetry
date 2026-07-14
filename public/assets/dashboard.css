@@ -286,6 +286,41 @@ body {
   color: #f7f1e6;
 }
 
+/* Focused matchup view (one deck vs each opponent) */
+.mx-back {
+  background: none;
+  border: 1px solid var(--border-strong);
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font: 500 11px var(--font-body);
+  cursor: pointer;
+}
+.mx-back:hover { color: var(--text); border-color: rgba(255, 255, 255, 0.3); }
+.mx-list { margin-top: 14px; }
+.mx-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.5fr) 1.3fr 48px 58px 72px;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 8px;
+  border-bottom: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.mx-row:hover { background: var(--hover); }
+.mx-row.mx-low { opacity: 0.5; }
+.mx-headrow, .mx-headrow:hover { cursor: default; background: none; border-bottom: 1px solid var(--border-strong); }
+.mx-headrow span { font: 600 10.5px var(--font-body); color: var(--muted-2); text-transform: uppercase; letter-spacing: 0.05em; }
+.mx-headrow .mx-legend { text-transform: none; letter-spacing: 0; text-align: center; color: var(--muted-2); }
+.mx-name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mx-bar { position: relative; height: 10px; background: var(--track); border-radius: 5px; }
+.mx-mid { position: absolute; left: 50%; top: -2px; bottom: -2px; width: 1px; background: rgba(255, 255, 255, 0.3); }
+.mx-fill { position: absolute; top: 0; bottom: 0; border-radius: 5px; }
+.mx-wr { text-align: right; font: 600 12.5px var(--font-mono); }
+.mx-rec { text-align: right; font: 500 11.5px var(--font-mono); color: var(--muted); }
+.mx-turns { text-align: right; font: 500 11.5px var(--font-mono); color: var(--muted); }
+
 /* ---------- Scatter ---------- */
 .scatter-plot {
   position: relative;
