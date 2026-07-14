@@ -223,6 +223,31 @@ describeDb('telemetry api with postgres', () => {
     expect(await response.json()).toMatchObject({ ok: false, code: 'VALIDATION_FAILED' });
   });
 
+  it('reports 2v2 synergy pair matchups (opposing pairs and decks)', async () => {
+    // alpha+bravo win both games, vs charlie+delta and vs echo+foxtrot.
+    await postGame(baseUrl, secret, twoVtwoGame('syn-a', ['alpha', 'bravo', 'charlie', 'delta']), 'syn-a');
+    await postGame(baseUrl, secret, twoVtwoGame('syn-b', ['alpha', 'bravo', 'echo', 'foxtrot']), 'syn-b');
+
+    const response = await fetch(`${baseUrl}/v1/stats/synergy?deckA=alpha@1.0.0&deckB=bravo@1.0.0`);
+    expect(response.status).toBe(200);
+    const json = await response.json() as {
+      totalGames: number;
+      pairs: { deckA: string; deckB: string; games: number; wins: number; winRate: number }[];
+      decks: { deck: string; games: number; winRate: number }[];
+    };
+    expect(json.totalGames).toBe(2);
+    expect(json.pairs).toContainEqual(expect.objectContaining({ deckA: 'charlie@1.0.0', deckB: 'delta@1.0.0', games: 1, wins: 1, winRate: 1 }));
+    expect(json.pairs).toContainEqual(expect.objectContaining({ deckA: 'echo@1.0.0', deckB: 'foxtrot@1.0.0', games: 1, wins: 1 }));
+    expect(json.decks).toContainEqual(expect.objectContaining({ deck: 'echo@1.0.0', games: 1, winRate: 1 }));
+    expect(json.decks.find((d) => d.deck === 'charlie@1.0.0')).toMatchObject({ games: 1, winRate: 1 });
+  });
+
+  it('400s synergy matchups without a pair', async () => {
+    const response = await fetch(`${baseUrl}/v1/stats/synergy?deckA=alpha@1.0.0`);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ ok: false, code: 'MISSING_PAIR' });
+  });
+
   it('stores invalid submissions and returns validation errors', async () => {
     const response = await postRaw(baseUrl, secret, { schemaVersion: 1, format: 'duel', map: 'mended-drum', teams: [], winner: 0 }, 'bad-game-001');
     expect(response.status).toBe(400);
@@ -267,6 +292,21 @@ async function postDecks(baseUrl: string, secret: string, payload: unknown): Pro
       'x-unbrewed-signature': signature,
     },
     body,
+  });
+}
+
+function twoVtwoGame(id: string, decks: [string, string, string, string]): unknown {
+  const seat = (deck: string, player: string) => ({ deck: `${deck}@1.0.0`, pilot: 'bot:hard', runtimePlayerId: player, heroId: deck });
+  return sampleGame({
+    gameId: id,
+    stateHash: id,
+    format: 'team-2v2',
+    formatLabel: '2v2',
+    teams: [
+      { seats: [seat(decks[0], 'p1'), seat(decks[1], 'p2')] },
+      { seats: [seat(decks[2], 'p3'), seat(decks[3], 'p4')] },
+    ],
+    winner: 0,
   });
 }
 

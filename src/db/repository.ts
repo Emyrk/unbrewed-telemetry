@@ -20,6 +20,7 @@ import type {
   NormalizedGame,
   NormalizedSeat,
   NormalizedTeam,
+  SynergyPairMatchupsResponse,
 } from '../types.js';
 
 export interface IngestArgs {
@@ -898,6 +899,74 @@ export class PgTelemetryRepository {
         winRateWith: gamesWith > 0 ? winsWith / gamesWith : 0,
       };
     });
+  }
+
+  /**
+   * For one 2v2 pair, how it fares against opponents — both as full opposing
+   * pairs and as individual opposing decks. Powers the expandable synergy row.
+   * Honors format + pilot filters.
+   */
+  async synergyPairMatchups(
+    deckA: string,
+    deckB: string,
+    filters: DeckStatsFilters,
+  ): Promise<SynergyPairMatchupsResponse> {
+    const pilotFilter = filters.pilots.length > 0 ? filters.pilots : null;
+    const pair = [deckA, deckB].sort();
+    // Shared CTE: `opp` = one row per game our pair played, carrying whether our
+    // pair won and the opposing team's two decks (sorted).
+    const cte = `
+      WITH twos AS (
+        SELECT g.* FROM games g
+        WHERE g.format IN ('team-2v2', '2v2')
+          AND ($1::text IS NULL OR g.format = $1)
+          AND ${pilotFilterSql()}
+      ), team_decks AS (
+        SELECT s.game_id, s.team_index,
+               array_agg(s.deck ORDER BY s.deck) AS decks,
+               bool_or(s.won) AS won
+        FROM game_seats s
+        JOIN twos g ON g.id = s.game_id
+        GROUP BY s.game_id, s.team_index
+        HAVING count(*) = 2
+      ), our AS (
+        SELECT game_id, team_index, won FROM team_decks WHERE decks = $3::text[]
+      ), opp AS (
+        SELECT o.won, t.decks AS opp_decks
+        FROM our o
+        JOIN team_decks t ON t.game_id = o.game_id AND t.team_index <> o.team_index
+      )`;
+
+    const pairsResult = await this.pool.query<{ deck_a: string; deck_b: string; games: number; wins: number }>(
+      `${cte}
+        SELECT opp_decks[1] AS deck_a, opp_decks[2] AS deck_b,
+               count(*)::int AS games, count(*) FILTER (WHERE won)::int AS wins
+        FROM opp
+        GROUP BY opp_decks
+        ORDER BY games DESC, deck_a ASC`,
+      [filters.format, pilotFilter, pair],
+    );
+    const decksResult = await this.pool.query<{ deck: string; games: number; wins: number }>(
+      `${cte}
+        SELECT d AS deck, count(*)::int AS games, count(*) FILTER (WHERE won)::int AS wins
+        FROM opp, unnest(opp_decks) AS d
+        GROUP BY d
+        ORDER BY games DESC, deck ASC`,
+      [filters.format, pilotFilter, pair],
+    );
+
+    const pairs = pairsResult.rows.map((row) => {
+      const games = Number(row.games);
+      const wins = Number(row.wins);
+      return { deckA: row.deck_a, deckB: row.deck_b, games, wins, winRate: games > 0 ? wins / games : 0 };
+    });
+    const decks = decksResult.rows.map((row) => {
+      const games = Number(row.games);
+      const wins = Number(row.wins);
+      return { deck: row.deck, games, wins, winRate: games > 0 ? wins / games : 0 };
+    });
+    const totalGames = pairs.reduce((sum, p) => sum + p.games, 0);
+    return { found: totalGames > 0, deckA: pair[0]!, deckB: pair[1]!, totalGames, pairs, decks };
   }
 }
 

@@ -517,24 +517,104 @@ function renderSynergy(data) {
   els.view.innerHTML = `<div class="card">
     <div class="panel" style="padding-bottom:4px">
       <div class="section-title">2v2 synergy pairs</div>
-      <div class="kicker" style="margin-top:3px">Δ = pair win rate minus expected (average of each deck's solo 2v2 win rate). Big positive Δ = more than the sum of its parts.</div>
+      <div class="kicker" style="margin-top:3px">Δ = pair win rate minus expected (average of each deck's solo 2v2 win rate). Big positive Δ = more than the sum of its parts. Click a pair to see who it beats and loses to.</div>
     </div>
     <div class="syn-grid syn-head">
       <span>Pair</span><span class="right">Games</span><span class="right">Win rate</span><span class="right">Expected</span><span class="right">Δ</span>
     </div>
-    ${rows.length ? rows.map(synergyRow).join('') : `<div class="panel">${empty('No pairs with enough games under the current filters. Include more pilot types or log more 2v2 games.')}</div>`}
+    ${rows.length ? rows.map(synItem).join('') : `<div class="panel">${empty('No pairs with enough games under the current filters. Include more pilot types or log more 2v2 games.')}</div>`}
+  </div>`;
+  els.view.querySelectorAll('.syn-row[data-syn]').forEach((rowEl) => {
+    rowEl.addEventListener('click', () => toggleSynergy(rowEl));
+  });
+}
+
+function synItem(row) {
+  const cls = row.delta > 0.03 ? 'delta-up' : row.delta < -0.03 ? 'delta-down' : 'delta-flat';
+  return `<div class="syn-item">
+    <div class="syn-grid syn-row" data-syn="${esc(row.deckA + '|' + row.deckB)}" data-deck-a="${esc(row.deckA)}" data-deck-b="${esc(row.deckB)}">
+      <span style="font-weight:600;font-size:13px"><span class="syn-caret">▸</span> ${esc(labelForDeckId(row.deckAId))} + ${esc(labelForDeckId(row.deckBId))}</span>
+      <span class="num">${number(row.games)}</span>
+      <span class="mono" style="text-align:right">${pct(row.winRate)}</span>
+      <span class="num">${pct(row.expectedWinRate)}</span>
+      <span style="text-align:right"><span class="delta-badge ${cls}">${signedPct(row.delta)}</span></span>
+    </div>
+    <div class="syn-expand" hidden></div>
   </div>`;
 }
 
-function synergyRow(row) {
-  const cls = row.delta > 0.03 ? 'delta-up' : row.delta < -0.03 ? 'delta-down' : 'delta-flat';
-  return `<div class="syn-grid syn-row">
-    <span style="font-weight:600;font-size:13px">${esc(labelForDeckId(row.deckAId))} + ${esc(labelForDeckId(row.deckBId))}</span>
-    <span class="num">${number(row.games)}</span>
-    <span class="mono" style="text-align:right">${pct(row.winRate)}</span>
-    <span class="num">${pct(row.expectedWinRate)}</span>
-    <span style="text-align:right"><span class="delta-badge ${cls}">${signedPct(row.delta)}</span></span>
+const synCache = new Map();
+
+async function toggleSynergy(rowEl) {
+  const panel = rowEl.nextElementSibling;
+  const caret = rowEl.querySelector('.syn-caret');
+  if (!panel) return;
+  if (panel.dataset.open === '1') {
+    panel.hidden = true;
+    panel.dataset.open = '';
+    if (caret) caret.textContent = '▸';
+    return;
+  }
+  panel.hidden = false;
+  panel.dataset.open = '1';
+  if (caret) caret.textContent = '▼';
+
+  const key = rowEl.dataset.syn;
+  let detail = synCache.get(key);
+  if (!detail) {
+    panel.innerHTML = `<div class="syn-panel"><div class="empty">Loading…</div></div>`;
+    try {
+      const params = statsQuery();
+      params.set('deckA', rowEl.dataset.deckA);
+      params.set('deckB', rowEl.dataset.deckB);
+      detail = await fetchJson(`/v1/stats/synergy?${params}`);
+      synCache.set(key, detail);
+    } catch (error) {
+      panel.innerHTML = `<div class="syn-panel">${empty('Failed to load matchups: ' + (error.message || ''))}</div>`;
+      return;
+    }
+  }
+  renderSynPanel(panel, detail, 'pairs');
+}
+
+function renderSynPanel(panel, detail, mode) {
+  const list = mode === 'decks' ? (detail.decks || []) : (detail.pairs || []);
+  const label = (x) => mode === 'decks'
+    ? esc(labelForDeckId(deckIdOf(x.deck)))
+    : `${esc(labelForDeckId(deckIdOf(x.deckA)))} + ${esc(labelForDeckId(deckIdOf(x.deckB)))}`;
+  const beating = list.filter((x) => x.winRate >= 0.5).sort((a, b) => b.winRate - a.winRate || b.games - a.games);
+  const losing = list.filter((x) => x.winRate < 0.5).sort((a, b) => a.winRate - b.winRate || b.games - a.games);
+  const oppRow = (x) => `<div class="syn-opp">
+    <span class="name">${label(x)}</span>
+    <span class="g">${number(x.games)}g</span>
+    <span class="mono" style="color:${wrColor(x.winRate)}">${pct(x.winRate)}</span>
   </div>`;
+  const section = (title, arr, kind) => `<div class="syn-opp-col">
+    <div class="syn-opp-title ${kind}">${title} <span class="kicker">(${arr.length})</span></div>
+    ${arr.length ? arr.map(oppRow).join('') : `<div class="empty">none</div>`}
+  </div>`;
+
+  panel.innerHTML = `<div class="syn-panel">
+    <div class="syn-toggle">
+      <button class="syn-tab${mode === 'pairs' ? ' active' : ''}" data-mode="pairs" type="button">Vs pairs</button>
+      <button class="syn-tab${mode === 'decks' ? ' active' : ''}" data-mode="decks" type="button">Vs decks</button>
+      <span class="kicker" style="margin-left:auto">${number(detail.totalGames)} games as this pair</span>
+    </div>
+    ${detail.totalGames > 0
+      ? `<div class="syn-cols">${section('Beating', beating, 'good')}${section('Losing', losing, 'bad')}</div>`
+      : empty('No games for this pair under the current filters.')}
+  </div>`;
+  panel.querySelectorAll('.syn-tab').forEach((btn) => {
+    btn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      renderSynPanel(panel, detail, btn.dataset.mode);
+    });
+  });
+}
+
+// Opponent rows carry full deck ids (`id@version`); labelForDeckId keys on the id.
+function deckIdOf(deck) {
+  return String(deck || '').split('@')[0];
 }
 
 function labelForDeckId(deckId) {

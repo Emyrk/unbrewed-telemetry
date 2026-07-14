@@ -284,6 +284,30 @@ export interface DashboardSynergyStat {
   delta: number;
 }
 
+export interface SynergyOpponentPair {
+  deckA: string;
+  deckB: string;
+  games: number;
+  wins: number;
+  winRate: number;
+}
+
+export interface SynergyOpponentDeck {
+  deck: string;
+  games: number;
+  wins: number;
+  winRate: number;
+}
+
+export interface SynergyPairMatchupsResponse {
+  found: boolean;
+  deckA: string;
+  deckB: string;
+  totalGames: number;
+  pairs: SynergyOpponentPair[];
+  decks: SynergyOpponentDeck[];
+}
+
 export interface DashboardFirstPlayerStat {
   games: number;
   wins: number;

@@ -70,6 +70,11 @@ async function handleRequest(
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/v1/stats/synergy') {
+    await handleSynergyMatchups(url, res, repo);
+    return;
+  }
+
   sendJson(res, 404, { ok: false, code: 'NOT_FOUND', message: 'Not found' });
 }
 
@@ -195,6 +200,17 @@ async function handleDeckIngest(
 
   const result = await repo.upsertDeckDefinitions(parsed as DeckDefinitionSubmission, config.now());
   sendJson(res, 200, { ok: true, upserted: result.upserted });
+}
+
+async function handleSynergyMatchups(url: URL, res: ServerResponse, repo: PgTelemetryRepository): Promise<void> {
+  const deckA = blankToNull(url.searchParams.get('deckA'));
+  const deckB = blankToNull(url.searchParams.get('deckB'));
+  if (!deckA || !deckB) {
+    sendJson(res, 400, { ok: false, code: 'MISSING_PAIR', message: 'deckA and deckB query parameters are required' });
+    return;
+  }
+  const result = await repo.synergyPairMatchups(deckA, deckB, statsFiltersFromUrl(url));
+  sendJson(res, 200, { ok: true, ...result });
 }
 
 async function handleDashboardStats(
