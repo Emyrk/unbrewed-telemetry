@@ -6,3 +6,6 @@ dist/
 coverage/
 *.log
 .DS_Store
+
+# direnv (local env, may hold DB creds / secrets)
+.envrc
