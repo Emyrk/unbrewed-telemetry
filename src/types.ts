@@ -271,6 +271,8 @@ export interface DashboardMatchupStat {
   wins: number;
   winRate: number;
   avgTurns: number | null;
+  avgFinalHealth: number | null;
+  avgCardsLeft: number | null;
 }
 
 export interface DashboardSynergyStat {
@@ -338,6 +340,18 @@ export interface DeckStatsResponse {
   decks: DeckStat[];
 }
 
+export interface SplitStat {
+  games: number;
+  wins: number;
+  winRate: number | null;
+}
+
+/** A deck's win rate when it took the first turn vs when it went second. */
+export interface DeckFirstPlayerSplit {
+  first: SplitStat;
+  second: SplitStat;
+}
+
 export interface DeckFormatWinRate {
   format: string;
   label: string;
@@ -390,6 +404,8 @@ export interface DeckDetailResponse {
   ciHigh: number;
   profile: DeckProfile | null;
   composition: DeckComposition | null;
+  avgFinalHealth: number | null;
+  firstPlayer: DeckFirstPlayerSplit;
   formats: DeckFormatWinRate[];
   maps: DeckMapWinRate[];
   matchups: DeckMatchupWinRate[];

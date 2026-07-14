@@ -20,6 +20,7 @@ import type {
   NormalizedGame,
   NormalizedSeat,
   NormalizedTeam,
+  SplitStat,
   SynergyPairMatchupsResponse,
 } from '../types.js';
 
@@ -538,6 +539,8 @@ export class PgTelemetryRepository {
       games: number;
       wins: number;
       avg_turns: number | null;
+      avg_final_health: number | null;
+      avg_cards_left: number | null;
     }>(
       `
         WITH duel_games AS (
@@ -553,7 +556,9 @@ export class PgTelemetryRepository {
             col_seat.deck AS col_deck,
             col_seat.deck_id AS col_deck_id,
             row_seat.won,
-            g.turns
+            g.turns,
+            row_seat.final_health,
+            row_seat.final_deck_count
           FROM duel_games g
           JOIN game_seats row_seat ON row_seat.game_id = g.id
           JOIN game_seats col_seat ON col_seat.game_id = g.id AND col_seat.team_index <> row_seat.team_index
@@ -566,7 +571,9 @@ export class PgTelemetryRepository {
           col_deck_id,
           COUNT(*)::int AS games,
           COUNT(*) FILTER (WHERE won)::int AS wins,
-          AVG(turns)::float8 AS avg_turns
+          AVG(turns)::float8 AS avg_turns,
+          AVG(final_health)::float8 AS avg_final_health,
+          AVG(final_deck_count)::float8 AS avg_cards_left
         FROM oriented
         GROUP BY row_deck, row_deck_id, col_deck, col_deck_id
         ORDER BY games DESC, row_deck ASC, col_deck ASC
@@ -585,6 +592,8 @@ export class PgTelemetryRepository {
         wins,
         winRate: games > 0 ? wins / games : 0,
         avgTurns: row.avg_turns,
+        avgFinalHealth: row.avg_final_health,
+        avgCardsLeft: row.avg_cards_left,
       };
     });
   }
@@ -691,6 +700,11 @@ export class PgTelemetryRepository {
       hero_name: string | null;
       games: number;
       wins: number;
+      avg_final_health: number | null;
+      first_games: number;
+      first_wins: number;
+      second_games: number;
+      second_wins: number;
     }>(
       `
         WITH selected_games AS (
@@ -702,18 +716,29 @@ export class PgTelemetryRepository {
           MAX(s.hero_id) FILTER (WHERE s.hero_id IS NOT NULL) AS hero_id,
           MAX(s.hero_name) FILTER (WHERE s.hero_name IS NOT NULL) AS hero_name,
           COUNT(*)::int AS games,
-          COUNT(*) FILTER (WHERE s.won)::int AS wins
+          COUNT(*) FILTER (WHERE s.won)::int AS wins,
+          AVG(s.final_health)::float8 AS avg_final_health,
+          COUNT(*) FILTER (WHERE g.first_player_team = s.team_index)::int AS first_games,
+          COUNT(*) FILTER (WHERE g.first_player_team = s.team_index AND s.won)::int AS first_wins,
+          COUNT(*) FILTER (WHERE g.first_player_team IS NOT NULL AND g.first_player_team <> s.team_index)::int AS second_games,
+          COUNT(*) FILTER (WHERE g.first_player_team IS NOT NULL AND g.first_player_team <> s.team_index AND s.won)::int AS second_wins
         FROM game_seats s
         JOIN selected_games g ON g.id = s.game_id
         WHERE s.deck = $3
       `,
       [filters.format, pilotFilter, deck],
     );
-    const selGames = Number(baseSel.rows[0]?.games ?? 0);
-    const selWins = Number(baseSel.rows[0]?.wins ?? 0);
+    const base = baseSel.rows[0];
+    const selGames = Number(base?.games ?? 0);
+    const selWins = Number(base?.wins ?? 0);
     const interval = wilson(selWins, selGames);
-    const heroId = baseSel.rows[0]?.hero_id ?? null;
-    const heroName = baseSel.rows[0]?.hero_name ?? null;
+    const heroId = base?.hero_id ?? null;
+    const heroName = base?.hero_name ?? null;
+    const split = (games: number, wins: number): SplitStat => ({ games, wins, winRate: games > 0 ? wins / games : null });
+    const firstPlayer = {
+      first: split(Number(base?.first_games ?? 0), Number(base?.first_wins ?? 0)),
+      second: split(Number(base?.second_games ?? 0), Number(base?.second_wins ?? 0)),
+    };
 
     const [profiles, compositions] = await Promise.all([
       this.deckProfileMap(filters.format, pilotFilter),
@@ -756,6 +781,8 @@ export class PgTelemetryRepository {
       ciHigh: interval.hi,
       profile: profiles.get(deck) ?? null,
       composition: pickComposition(compositions, deckId, deckVersion),
+      avgFinalHealth: base?.avg_final_health ?? null,
+      firstPlayer,
       formats,
       maps,
       matchups,

@@ -145,6 +145,9 @@ body {
 
 /* ---------- Overview ---------- */
 .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+.stat-cards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; }
+@media (max-width: 1080px) { .stat-cards { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 620px) { .stat-cards { grid-template-columns: repeat(2, 1fr); } }
 .stat { padding: 16px 18px; }
 .stat .subtle {
   font-size: 11.5px;
@@ -300,14 +303,15 @@ body {
 .mx-list { margin-top: 14px; }
 .mx-row {
   display: grid;
-  grid-template-columns: minmax(150px, 1.5fr) 1.3fr 48px 58px 72px;
+  grid-template-columns: minmax(140px, 1.4fr) 1fr 46px 54px 56px 58px 56px;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
   padding: 8px 8px;
   border-bottom: 1px solid var(--border);
   border-radius: 6px;
   cursor: pointer;
 }
+.mx-turns, .mx-hp, .mx-cards { text-align: right; font: 500 11.5px var(--font-mono); color: var(--muted); }
 .mx-row:hover { background: var(--hover); }
 .mx-row.mx-low { opacity: 0.5; }
 .mx-headrow, .mx-headrow:hover { cursor: default; background: none; border-bottom: 1px solid var(--border-strong); }
@@ -319,7 +323,23 @@ body {
 .mx-fill { position: absolute; top: 0; bottom: 0; border-radius: 5px; }
 .mx-wr { text-align: right; font: 600 12.5px var(--font-mono); }
 .mx-rec { text-align: right; font: 500 11.5px var(--font-mono); color: var(--muted); }
-.mx-turns { text-align: right; font: 500 11.5px var(--font-mono); color: var(--muted); }
+
+/* Dedicated deck page */
+.deck-page { animation: fadeUp 0.25s ease; }
+.deck-head { display: flex; align-items: center; gap: 12px; }
+.deck-stats {
+  display: flex;
+  gap: 30px;
+  flex-wrap: wrap;
+  margin: 16px 0 4px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.deck-stat .subtle { font-size: 10.5px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.deck-stat .val { font: 600 20px var(--font-mono); margin-top: 3px; }
+.deck-page .modal-section, .deck-page .modal-cols { padding-left: 0; padding-right: 0; }
+.deck-page .modal-section:first-of-type { padding-top: 6px; }
 
 /* ---------- Scatter ---------- */
 .scatter-plot {

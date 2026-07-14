@@ -122,14 +122,11 @@ async function loadDashboard() {
   els.heroSubtitle.innerHTML = `<span class="sub"> · ${number(json.totalSubmissions)} submissions, ${number(json.invalidSubmissions)} invalid${esc(fp)}</span>`;
   renderControls(json);
   renderTabs();
-  renderView(json);
+  renderView(json); // routes to the deck page when state.deck is set
   clearStatus();
-  if (!els.modalRoot.hasChildNodes()) {
-    if (state.deck) openDeck(state.deck);
-    else if (state.pair) {
-      const [a, b] = state.pair.split('|');
-      if (a && b) openPair(a, b);
-    }
+  if (state.pair && !els.modalRoot.hasChildNodes()) {
+    const [a, b] = state.pair.split('|');
+    if (a && b) openPair(a, b);
   }
 }
 
@@ -190,6 +187,8 @@ function renderTabs() {
   els.tabs.querySelectorAll('[data-tab]').forEach((button) => {
     button.addEventListener('click', () => {
       state.tab = button.dataset.tab;
+      state.deck = null; // leaving the full-page deck view
+      state.pair = null;
       writeStateToUrl();
       renderTabs();
       if (current) renderView(current);
@@ -199,6 +198,7 @@ function renderTabs() {
 
 // ---------- view routing ----------
 function renderView(data) {
+  if (state.deck) { renderDeckPage(); return; }
   if (data.totalGames === 0) {
     els.view.innerHTML = card(empty('No completed games match these filters yet. Submit sample data or run local simulations to populate the dashboard.'));
     return;
@@ -236,11 +236,17 @@ function renderOverview(data, decks) {
     ? [...eligible.slice(0, 3), ...eligible.slice(-3)]
     : eligible;
 
+  const fp = data.firstPlayer || {};
+  const fpWr = fp.winRate;
+  const fpColor = fpWr == null ? COLORS.text : Math.abs(fpWr - 0.5) > 0.05 ? '#e89286' : COLORS.green;
+  const fpSub = fpWr == null ? 'no first-player data yet' : `${signedPct(fpWr - 0.5)} edge · ${number(fp.games || 0)} games`;
+
   els.view.innerHTML = `
-    <div class="grid-4">
+    <div class="stat-cards">
       ${statCard('Games (' + esc(selectedFormatLabel(data)) + ')', number(data.totalGames), pilotSummary(), COLORS.text)}
       ${statCard('Decks tracked', number(decks.length), 'active in this pool', COLORS.text)}
       ${statCard('Avg game length', data.avgTurns == null ? 'n/a' : data.avgTurns.toFixed(1), 'turns per game', COLORS.text)}
+      ${statCard('First player', fpWr == null ? 'n/a' : pct(fpWr), fpSub, fpColor)}
       ${statCard('Balance flags', String(flags.length), 'outside CI threshold', flags.length ? '#e89286' : COLORS.green)}
     </div>
     <div class="two-col">
@@ -438,7 +444,7 @@ function renderMatchupFocus(data, decks) {
   const deckPlain = deck ? deck.label : matrixFocus;
   const opponents = (data.matchups || [])
     .filter((m) => m.rowDeck === matrixFocus)
-    .map((m) => ({ deck: m.colDeck, deckId: m.colDeckId, games: m.games, wins: m.wins, winRate: m.winRate, avgTurns: m.avgTurns }))
+    .map((m) => ({ deck: m.colDeck, deckId: m.colDeckId, games: m.games, wins: m.wins, winRate: m.winRate, avgTurns: m.avgTurns, avgFinalHealth: m.avgFinalHealth, avgCardsLeft: m.avgCardsLeft }))
     .sort((a, b) => b.winRate - a.winRate || b.games - a.games);
 
   const backId = registerHandler(() => { matrixFocus = null; if (current) renderView(current); });
@@ -457,6 +463,8 @@ function renderMatchupFocus(data, decks) {
       <span class="mx-wr" style="color:${wrColor(o.winRate)}">${pct(o.winRate, 0)}</span>
       <span class="mx-rec">${o.wins}-${losses}</span>
       <span class="mx-turns">${o.avgTurns == null ? '—' : o.avgTurns.toFixed(1)}</span>
+      <span class="mx-hp">${o.avgFinalHealth == null ? '—' : o.avgFinalHealth.toFixed(1)}</span>
+      <span class="mx-cards">${o.avgCardsLeft == null ? '—' : o.avgCardsLeft.toFixed(1)}</span>
     </div>`;
   };
 
@@ -474,7 +482,9 @@ function renderMatchupFocus(data, decks) {
         <span class="mx-legend">← opponent favored · ${esc(deckPlain)} favored →</span>
         <span class="mx-wr">Win</span>
         <span class="mx-rec">W–L</span>
-        <span class="mx-turns">Avg turns</span>
+        <span class="mx-turns">Turns</span>
+        <span class="mx-hp">HP left</span>
+        <span class="mx-cards">Cards</span>
       </div>
       ${opponents.length ? opponents.map(oppRow).join('') : empty('No 1v1 opponents with data for this deck under the current filters.')}
     </div>
@@ -733,77 +743,96 @@ function heroLabelHtml(deckId) {
 }
 
 // ---------- deck detail modal ----------
-async function openDeck(deck) {
-  setStatus('Loading deck detail…');
-  try {
-    const params = statsQuery();
-    params.set('deck', deck);
-    const detail = await fetchJson(`/v1/stats/deck?${params}`);
-    clearStatus();
-    state.deck = deck;
-    state.pair = null;
-    writeStateToUrl();
-    renderModal(detail);
-  } catch (error) {
-    showError(error);
-  }
+// Deck detail is a full page (not a modal), deep-linkable via ?deck=. Opening
+// just sets state + URL; renderView routes to renderDeckPage which fetches.
+function openDeck(deck) {
+  state.deck = deck;
+  state.pair = null;
+  writeStateToUrl();
+  renderDeckPage();
 }
 
-function renderModal(d) {
+function exitDeckPage() {
+  state.deck = null;
+  writeStateToUrl();
+  if (current) renderView(current);
+}
+
+async function renderDeckPage() {
+  els.view.innerHTML = card(empty('Loading deck…'));
+  let d;
+  try {
+    const params = statsQuery();
+    params.set('deck', state.deck);
+    d = await fetchJson(`/v1/stats/deck?${params}`);
+  } catch (error) {
+    els.view.innerHTML = card(empty('Failed to load deck: ' + (error.message || '')));
+    return;
+  }
+
   const comp = d.composition && d.composition.cardCount > 0
     ? compositionSection(d.composition)
-    : d.profile
-      ? playMixSection(d.profile)
-      : `<div class="modal-section"><div class="empty">No card data for this deck yet.</div></div>`;
-
+    : d.profile ? playMixSection(d.profile) : `<div class="modal-section"><div class="empty">No card data for this deck yet.</div></div>`;
   const matchups = matchupHighlights(d.matchups || []);
+  const fp = d.firstPlayer || { first: {}, second: {} };
+  const splitStat = (label, s) => {
+    const wr = s && s.winRate != null ? s.winRate : null;
+    return `<div class="deck-stat">
+      <div class="subtle">${label}</div>
+      <div class="val mono" style="color:${wr == null ? 'var(--text)' : wrColor(wr)}">${wr == null ? '—' : pct(wr, 0)}</div>
+      <div class="subtle" style="font-weight:400">${number((s && s.games) || 0)} games</div>
+    </div>`;
+  };
+  const backId = registerHandler(exitDeckPage);
 
-  els.modalRoot.innerHTML = `
-    <div class="modal-overlay" data-overlay>
-      <div class="modal" data-screen-label="Deck detail" role="dialog" aria-modal="true">
-        <div class="modal-head">
-          <div style="flex:1">
-            <div class="modal-title">${labelHtml(d.label, d.deckId)}</div>
-            <div class="modal-sub">${esc(d.deck)} · ${number(d.games)} games · pick rate ${pct(d.pickRate)}</div>
-          </div>
-          <div class="modal-wr" style="color:${wrColor(d.winRate)}">${pct(d.winRate)}</div>
-          <button class="modal-close" data-close type="button" aria-label="Close">✕</button>
+  els.view.innerHTML = `<div class="deck-page">
+    <button class="mx-back" data-handler="${backId}" type="button">◀ Back</button>
+    <div class="card panel" style="margin-top:12px">
+      <div class="deck-head">
+        <div style="flex:1">
+          <div class="modal-title">${labelHtml(d.label, d.deckId)}</div>
+          <div class="modal-sub">${esc(d.deck)} · ${number(d.games)} games · pick rate ${pct(d.pickRate)}</div>
         </div>
-        <div class="modal-ci">95% CI ${pct(d.ciLow, 0)}–${pct(d.ciHigh, 0)}</div>
-        ${comp}
-        <div class="modal-cols">
-          <div>
-            <div class="sub-title" style="margin-top:0">Win rate by format</div>
-            <div class="list tight">${(d.formats || []).map(formatBarRow).join('') || empty('No format data.')}</div>
-          </div>
-          <div>
-            <div class="sub-title" style="margin-top:0">1v1 matchups (min 5 games)</div>
-            <div class="list tight">${matchups.length ? matchups.map(matchupRow).join('') : empty('Not enough duel data.')}</div>
-          </div>
+        <div class="modal-wr" style="color:${wrColor(d.winRate)}">${pct(d.winRate)}</div>
+      </div>
+      <div class="deck-stats">
+        <div class="deck-stat"><div class="subtle">95% CI</div><div class="val mono" style="font-size:16px">${pct(d.ciLow, 0)}–${pct(d.ciHigh, 0)}</div></div>
+        <div class="deck-stat"><div class="subtle">Avg HP left</div><div class="val mono">${d.avgFinalHealth == null ? '—' : d.avgFinalHealth.toFixed(1)}</div></div>
+        ${splitStat('Going first', fp.first)}
+        ${splitStat('Going second', fp.second)}
+      </div>
+      ${comp}
+      <div class="modal-cols">
+        <div>
+          <div class="sub-title" style="margin-top:0">Win rate by format</div>
+          <div class="list tight">${(d.formats || []).map(formatBarRow).join('') || empty('No format data.')}</div>
         </div>
-        <div class="modal-section">
-          <div class="sub-title" style="margin-top:0">Win rate by map</div>
-          <div class="map-grid">${(d.maps || []).map(mapLine).join('') || empty('No map data.')}</div>
-        </div>
-        <div class="modal-section" style="padding-bottom:22px">
-          <div class="section-head">
-            <div class="sub-title" style="margin-top:0">Card influence</div>
-            <div class="kicker">Δ win rate when the card is played vs the deck's baseline</div>
-          </div>
-          <div class="list tight" style="margin-top:9px;gap:0">${(d.cards || []).map(cardInflRow).join('') || empty('No card telemetry for this deck.')}</div>
+        <div>
+          <div class="sub-title" style="margin-top:0">1v1 matchups (min 5 games)</div>
+          <div class="list tight">${matchups.length ? matchups.map(matchupRow).join('') : empty('Not enough duel data.')}</div>
         </div>
       </div>
-    </div>`;
-
-  els.modalRoot.querySelector('[data-overlay]')?.addEventListener('click', (event) => {
-    if (event.target === event.currentTarget) closeModal();
-  });
-  els.modalRoot.querySelector('[data-close]')?.addEventListener('click', closeModal);
+      <div class="modal-section">
+        <div class="sub-title" style="margin-top:0">Win rate by map</div>
+        <div class="map-grid">${(d.maps || []).map(mapLine).join('') || empty('No map data.')}</div>
+      </div>
+      <div class="modal-section" style="padding-bottom:6px">
+        <div class="section-head">
+          <div class="sub-title" style="margin-top:0">Card influence</div>
+          <div class="kicker">Δ win rate when the card is played vs the deck's baseline</div>
+        </div>
+        <div class="list tight" style="margin-top:9px;gap:0">${(d.cards || []).map(cardInflRow).join('') || empty('No card telemetry for this deck.')}</div>
+      </div>
+    </div>
+  </div>`;
+  bindHandlers(els.view);
 }
 
 function closeModal() {
   els.modalRoot.innerHTML = '';
+  const wasDeckPage = !!state.deck;
   if (state.deck || state.pair) { state.deck = null; state.pair = null; writeStateToUrl(); }
+  if (wasDeckPage && current) renderView(current); // exit the full-page deck view
 }
 
 // Real deck make-up from the pushed registry: the mock's "30 cards" panel.

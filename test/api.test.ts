@@ -119,7 +119,7 @@ describeDb('telemetry api with postgres', () => {
     expect(king).toMatchObject({ label: 'king-kong', games: 1, wins: 1 });
     // king-kong played 2 attack / 1 defense / 1 scheme -> attack-leaning play mix.
     expect(king?.profile).toMatchObject({ attack: 0.5, lean: 'Offensive' });
-    expect(json.matchups).toContainEqual(expect.objectContaining({ rowDeck: 'king-kong@0.1.0', colDeck: 'the-mandalorian@0.1.0', games: 1, wins: 1, avgTurns: 13 }));
+    expect(json.matchups).toContainEqual(expect.objectContaining({ rowDeck: 'king-kong@0.1.0', colDeck: 'the-mandalorian@0.1.0', games: 1, wins: 1, avgTurns: 13, avgFinalHealth: 7 }));
     expect(json.firstPlayer).toMatchObject({ games: 1, wins: 1, winRate: 1 });
   });
 
@@ -133,12 +133,18 @@ describeDb('telemetry api with postgres', () => {
       games: number;
       winRate: number;
       profile: { lean: string } | null;
+      avgFinalHealth: number | null;
+      firstPlayer: { first: { games: number; wins: number; winRate: number | null }; second: { games: number; winRate: number | null } };
       formats: { format: string; winRate: number }[];
       matchups: { deck: string; games: number; winRate: number }[];
       cards: { card: string; contextBucket: string; influence: number; baselineWinRate: number }[];
     };
     expect(json).toMatchObject({ deck: 'king-kong@0.1.0', games: 1, winRate: 1 });
     expect(json.profile?.lean).toBe('Offensive');
+    // fixture: king-kong final health 7, went first (firstPlayerTeam 0) and won.
+    expect(json.avgFinalHealth).toBe(7);
+    expect(json.firstPlayer.first).toMatchObject({ games: 1, wins: 1, winRate: 1 });
+    expect(json.firstPlayer.second).toMatchObject({ games: 0, winRate: null });
     expect(json.formats).toContainEqual(expect.objectContaining({ format: 'duel', winRate: 1 }));
     expect(json.matchups).toContainEqual(expect.objectContaining({ deck: 'the-mandalorian@0.1.0', games: 1, winRate: 1 }));
     const crushing = json.cards.find((card) => card.card === 'crushing-blow');
