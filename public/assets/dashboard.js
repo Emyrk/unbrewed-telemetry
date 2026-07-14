@@ -344,12 +344,15 @@ function ciCell(deck) {
   const dot = scaleCi(deck.winRate);
   const band = deck.flag === 'over' ? COLORS.overCi : deck.flag === 'under' ? COLORS.underCi : COLORS.neutralCi;
   const color = wrColor(deck.winRate);
-  return `<div class="ci-cell">
-    <div class="ci-track"></div>
-    <div class="ci-mid"></div>
-    <div class="ci-band" style="left:${left.toFixed(1)}%;width:${width.toFixed(1)}%;background:${band}"></div>
-    <div class="ci-dot" style="left:${dot.toFixed(1)}%;background:${color}"></div>
-    <div class="ci-label" style="color:${color}">${pct(deck.winRate)}</div>
+  const title = `Win rate ${pct(deck.winRate)} · 95% CI ${pct(deck.ciLow, 0)}–${pct(deck.ciHigh, 0)} · ${number(deck.games)} games`;
+  return `<div class="ci-cell" title="${esc(title)}">
+    <div class="ci-bar">
+      <div class="ci-track"></div>
+      <div class="ci-mid"></div>
+      <div class="ci-band" style="left:${left.toFixed(1)}%;width:${width.toFixed(1)}%;background:${band}"></div>
+      <div class="ci-dot" style="left:${dot.toFixed(1)}%;background:${color}"></div>
+    </div>
+    <div class="ci-num" style="color:${color}">${pct(deck.winRate)}</div>
   </div>`;
 }
 

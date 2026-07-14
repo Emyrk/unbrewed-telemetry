@@ -215,12 +215,21 @@ body {
 .deck-tag { font-size: 11px; color: var(--muted); }
 .num { font: 500 12.5px var(--font-mono); text-align: right; color: #d8c9dd; }
 
-.ci-cell { position: relative; height: 24px; }
+.ci-cell { display: flex; align-items: center; gap: 10px; height: 24px; }
+.ci-bar { position: relative; flex: 1; height: 24px; }
 .ci-track { position: absolute; inset: 8px 0; background: var(--track); border-radius: 4px; }
 .ci-mid { position: absolute; top: 2px; bottom: 2px; left: 50%; width: 1px; background: rgba(255, 255, 255, 0.25); }
 .ci-band { position: absolute; top: 8px; height: 8px; border-radius: 4px; }
-.ci-dot { position: absolute; top: 5px; width: 6px; height: 14px; border-radius: 3px; margin-left: -3px; }
-.ci-label { position: absolute; right: 0; top: -1px; font: 600 11.5px var(--font-mono); }
+.ci-dot {
+  position: absolute;
+  top: 3px;
+  width: 6px;
+  height: 18px;
+  border-radius: 3px;
+  margin-left: -3px;
+  box-shadow: 0 0 0 1.5px rgba(46, 27, 51, 0.8);
+}
+.ci-num { flex: none; width: 44px; text-align: right; font: 600 11.5px var(--font-mono); }
 
 .profile-bar {
   display: flex;
