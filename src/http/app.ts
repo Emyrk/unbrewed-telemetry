@@ -1,8 +1,9 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { validateGameSubmission } from '../ingest/schema.js';
+import { validateDeckDefinitions } from '../ingest/deck-schema.js';
 import type { PgTelemetryRepository } from '../db/repository.js';
-import type { GameSubmission } from '../types.js';
+import type { DeckDefinitionSubmission, GameSubmission } from '../types.js';
 import { verifyIngestAuth } from './auth.js';
 import { serveDashboardAsset } from './static.js';
 
@@ -46,6 +47,11 @@ async function handleRequest(
 
   if (req.method === 'POST' && url.pathname === '/v1/games') {
     await handleGameIngest(req, res, repo, config);
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/v1/decks') {
+    await handleDeckIngest(req, res, repo, config);
     return;
   }
 
@@ -142,6 +148,53 @@ async function handleGameIngest(
     return;
   }
   sendJson(res, 201, { ok: true, duplicate: false, submissionId: result.submissionId, gameId: result.gameId });
+}
+
+async function handleDeckIngest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  repo: PgTelemetryRepository,
+  config: AppConfig,
+): Promise<void> {
+  const contentType = req.headers['content-type'];
+  if (contentType && !String(contentType).toLowerCase().includes('application/json')) {
+    sendJson(res, 415, { ok: false, code: 'UNSUPPORTED_MEDIA_TYPE', message: 'Content-Type must be application/json' });
+    return;
+  }
+
+  const body = await readBody(req, config.bodyLimitBytes);
+  if (!body.ok) {
+    sendJson(res, body.status, { ok: false, code: body.code, message: body.message });
+    return;
+  }
+
+  const auth = verifyIngestAuth(req.headers, body.body, {
+    secret: config.telemetrySecret,
+    allowUnauthenticated: config.allowUnauthenticatedIngest,
+    toleranceMs: 5 * 60 * 1000,
+    nowMs: () => config.now().getTime(),
+  });
+  if (!auth.ok) {
+    sendJson(res, auth.status, { ok: false, code: auth.code, message: auth.message });
+    return;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body.body.toString('utf8'));
+  } catch {
+    sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Request body is not valid JSON' });
+    return;
+  }
+
+  const validation = validateDeckDefinitions(parsed);
+  if (!validation.ok) {
+    sendJson(res, 400, { ok: false, code: 'VALIDATION_FAILED', errors: validation.errors });
+    return;
+  }
+
+  const result = await repo.upsertDeckDefinitions(parsed as DeckDefinitionSubmission, config.now());
+  sendJson(res, 200, { ok: true, upserted: result.upserted });
 }
 
 async function handleDashboardStats(

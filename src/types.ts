@@ -157,6 +157,47 @@ export interface IngestInvalid {
 
 export type IngestResult = IngestCreated | IngestDuplicate | IngestInvalid;
 
+export interface DeckDefinitionCard {
+  id?: string;
+  title?: string;
+  type: 'attack' | 'defense' | 'versatile' | 'scheme';
+  value?: number | null;
+  boost?: number | null;
+  quantity: number;
+}
+
+export interface DeckDefinitionSubmission {
+  schemaVersion: 1;
+  source?: string;
+  contentVersion?: string;
+  decks: {
+    deckId: string;
+    version: string;
+    name?: string;
+    tier?: string;
+    cards: DeckDefinitionCard[];
+  }[];
+}
+
+/**
+ * Authoritative deck make-up from the pushed deck registry (`deck_definitions`),
+ * i.e. the real printed card list — distinct from the play-derived DeckProfile.
+ * The dashboard prefers this when present and falls back to the profile.
+ */
+export interface DeckComposition {
+  version: string;
+  name: string | null;
+  tier: string | null;
+  cardCount: number;
+  attack: number;
+  defense: number;
+  versatile: number;
+  scheme: number;
+  attackValue: number;
+  defenseValue: number;
+  lean: 'Offensive' | 'Defensive' | 'Balanced' | null;
+}
+
 /**
  * How a deck actually spends its cards, derived from telemetry.cardsPlayed.
  * Shares sum to ~1 across the buckets. Replaces the static deck composition
@@ -186,6 +227,7 @@ export interface DeckStat {
   ciLow: number;
   ciHigh: number;
   profile: DeckProfile | null;
+  composition: DeckComposition | null;
 }
 
 export interface DashboardBossStat {
@@ -322,6 +364,7 @@ export interface DeckDetailResponse {
   ciLow: number;
   ciHigh: number;
   profile: DeckProfile | null;
+  composition: DeckComposition | null;
   formats: DeckFormatWinRate[];
   maps: DeckMapWinRate[];
   matchups: DeckMatchupWinRate[];

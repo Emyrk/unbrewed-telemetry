@@ -14,7 +14,7 @@ This service should become the data backend for the balance dashboard prototyped
 - `MockDashboard/mock-data.js` is synthetic dashboard data. Use it to understand required aggregates, not as production data shape.
 - `MockDashboard/game-submission.schema.json` is the prototype submission schema. Treat it as a draft. The active v1 ingest schema is `schemas/game-submission.v1.schema.json`.
 - `public/dashboard.html` and `public/assets/dashboard.*` are the production dashboard, implemented from the `MockDashboard/Balance Dashboard.dc.html` design. They intentionally use plain static HTML/CSS/JS served by the Node process, with no frontend build step yet. The dashboard renders all six views (overview, heroes, matchups, scatter, formats, synergy) plus a deck-detail modal, and reads `/v1/stats/dashboard` and `/v1/stats/deck`. Deck detail deep-links via `?deck=<deck>` (plus `tab`, `format`, `exclude`).
-- The design mock shows a static 30-card deck composition. Production has no deck registry, so the "deck profile" bar is derived instead from real `telemetry.cardsPlayed` context play-mix (attack/defense/scheme/boost shares) and a lean label. Hero archetype "tags" from the mock are shown as this derived lean.
+- The design mock shows a static 30-card deck composition. This now comes from a **versioned deck registry** (`deck_definitions`) that content producers push via `POST /v1/decks`; the dashboard shows real card counts + Σ values + lean when a deck version is registered, and falls back to a play-mix derived from `telemetry.cardsPlayed` (attack/defense/scheme/boost shares) otherwise. The registry keys on `(deck_id, version)`, so historical games keep their exact composition; unknown versions fall back to the latest pushed version, then to the play-mix. The engine publishes its `HEROES` registry to this endpoint on startup when `TELEMETRY_PUSH_DECKS=1` (deck-push client lives in `unbrewed-engine`).
 
 Mock format labels may differ from production ids. The current Unbrewed Pro content registry uses ids such as `duel`, `team-2v2`, `two-v-one-boss`, and `ffa-3`; dashboard labels can still render as `1v1`, `2v2`, `2v1`, and `3FFA`.
 
@@ -65,6 +65,7 @@ Recommended endpoints:
 
 - `GET /healthz` returns 200 with `{ ok: true }` for Railway health checks.
 - `POST /v1/games` ingests one completed game.
+- `POST /v1/decks` upserts a batch of deck definitions into the versioned registry (same HMAC auth as `/v1/games`). Payload schema: `schemas/deck-definitions.v1.schema.json`.
 - `GET /v1/stats/dashboard?format=&pilots=` returns all aggregates the dashboard needs (decks with deck profiles, formats with boss-side win rate + by-boss breakdown, maps, pilots, matchups, synergy, first-player).
 - `GET /v1/stats/decks?format=&pilots=` returns just the deck table slice.
 - `GET /v1/stats/deck?deck=&format=&pilots=` returns one deck's detail: play-mix profile, win rate by format and map, 1v1 matchups, and per-card influence. 404s when the deck has no games under the filters.
@@ -98,6 +99,7 @@ Suggested relational tables:
 - `games`: one row per completed game. Include format, map, winner team, draw flag, end condition, turn count, duration, engine versions, replay hash, and timestamps.
 - `game_teams`: one row per team, including team index and side role, such as boss side.
 - `game_seats`: one row per player seat. Include team index, seat index, runtime player id, deck id, deck version, hero id, pilot kind, bot id or difficulty, pseudonymous player id, first-player flag, winner flag, final health, final deck count, final hand count, and final discard count where available.
+- `deck_definitions`: versioned deck registry pushed via `POST /v1/decks` (migration `003_deck_definitions.sql`). One row per `(deck_id, version)` with precomputed per-type card counts + Σ values and the raw `cards` jsonb.
 - `game_cards`: per-card-play facts derived from `telemetry.cardsPlayed` (migration `002_card_events.sql`). One row per play event, carrying the seat's deck, a normalized context bucket (attack/defense/scheme/boost/discard/other), and the seat's win flag. Powers deck play-mix profiles and card influence.
 - `game_actions`: optional detailed action rows derived from replay logs. Use for card and turn analytics.
 - `game_events`: optional detailed event rows derived from engine events or replay expansion. Use for combat, damage, movement, and card influence analytics.

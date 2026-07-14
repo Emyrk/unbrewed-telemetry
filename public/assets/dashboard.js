@@ -321,13 +321,13 @@ function deckRow(deck) {
     <div class="num">${number(deck.games)}</div>
     <div class="num">${pct(deck.pickRate)}</div>
     ${ciCell(deck)}
-    ${profileBar(deck.profile)}
+    ${profileBar(deck)}
   </div>`;
 }
 
 function deckTag(deck) {
-  if (deck.profile && deck.profile.lean) return `${deck.deckId} · ${deck.profile.lean}`;
-  return deck.deckId;
+  const lean = (deck.composition && deck.composition.lean) || (deck.profile && deck.profile.lean);
+  return lean ? `${deck.deckId} · ${lean}` : deck.deckId;
 }
 
 function ciCell(deck) {
@@ -345,12 +345,33 @@ function ciCell(deck) {
   </div>`;
 }
 
-function profileBar(profile) {
-  if (!profile) return `<div class="profile-none">no card data</div>`;
+// Prefer the authoritative registry composition (real card counts); fall back
+// to the play-derived profile. Returns attack/defense/versatile/scheme shares.
+function profileSegments(deck) {
+  const c = deck.composition;
+  if (c && c.cardCount > 0) {
+    const total = c.cardCount;
+    return {
+      attack: c.attack / total, defense: c.defense / total, versatile: c.versatile / total, scheme: c.scheme / total,
+      title: `Attack ${c.attack} · Defense ${c.defense} · Versatile ${c.versatile} · Scheme ${c.scheme} (${total} cards)`,
+    };
+  }
+  const p = deck.profile;
+  if (p) {
+    return {
+      attack: p.attack, defense: p.defense, versatile: p.boost + p.other, scheme: p.scheme,
+      title: `Play mix — Attack ${pct(p.attack, 0)} · Defense ${pct(p.defense, 0)} · Boost/other ${pct(p.boost + p.other, 0)} · Scheme ${pct(p.scheme, 0)}`,
+    };
+  }
+  return null;
+}
+
+function profileBar(deck) {
+  const s = profileSegments(deck);
+  if (!s) return `<div class="profile-none">no card data</div>`;
   const seg = (share, color) => `<span style="width:${(share * 100).toFixed(1)}%;background:${color}"></span>`;
-  const other = profile.boost + profile.other;
-  return `<div class="profile-bar" title="Attack ${pct(profile.attack, 0)} · Defense ${pct(profile.defense, 0)} · Scheme ${pct(profile.scheme, 0)} · Boost/other ${pct(other, 0)}">
-    ${seg(profile.attack, '#d9705c')}${seg(profile.defense, '#7aa3d4')}${seg(other, '#d4ab4f')}${seg(profile.scheme, '#a78bc9')}
+  return `<div class="profile-bar" title="${esc(s.title)}">
+    ${seg(s.attack, '#d9705c')}${seg(s.defense, '#7aa3d4')}${seg(s.versatile, '#d4ab4f')}${seg(s.scheme, '#a78bc9')}
   </div>`;
 }
 
@@ -538,25 +559,11 @@ async function openDeck(deck) {
 }
 
 function renderModal(d) {
-  const profile = d.profile;
-  const other = profile ? profile.boost + profile.other : 0;
-  const comp = profile ? `
-    <div class="modal-section">
-      <div class="sub-title" style="margin-top:0">Play mix — ${number(profile.plays)} card plays</div>
-      <div class="deck-comp-bar">
-        <span style="width:${(profile.attack * 100).toFixed(1)}%;background:#d9705c"></span>
-        <span style="width:${(profile.defense * 100).toFixed(1)}%;background:#7aa3d4"></span>
-        <span style="width:${(other * 100).toFixed(1)}%;background:#d4ab4f"></span>
-        <span style="width:${(profile.scheme * 100).toFixed(1)}%;background:#a78bc9"></span>
-      </div>
-      <div class="deck-cells">
-        ${compCell('Attack', profile.attack, '#d9705c')}
-        ${compCell('Defense', profile.defense, '#7aa3d4')}
-        ${compCell('Boost / other', other, '#d4ab4f')}
-        ${compCell('Scheme', profile.scheme, '#a78bc9')}
-      </div>
-      <div class="lean-line"><span>Lean: <b>${esc(profile.lean || '—')}</b></span></div>
-    </div>` : `<div class="modal-section"><div class="empty">No card telemetry for this deck yet.</div></div>`;
+  const comp = d.composition && d.composition.cardCount > 0
+    ? compositionSection(d.composition)
+    : d.profile
+      ? playMixSection(d.profile)
+      : `<div class="modal-section"><div class="empty">No card data for this deck yet.</div></div>`;
 
   const matchups = matchupHighlights(d.matchups || []);
 
@@ -608,7 +615,56 @@ function closeModal() {
   if (state.deck) { state.deck = null; writeStateToUrl(); }
 }
 
-function compCell(label, share, color) {
+// Real deck make-up from the pushed registry: the mock's "30 cards" panel.
+function compositionSection(c) {
+  const seg = (n, color) => `<span style="width:${c.cardCount ? (n / c.cardCount * 100).toFixed(1) : 0}%;background:${color}"></span>`;
+  return `<div class="modal-section">
+    <div class="sub-title" style="margin-top:0">Deck composition — ${number(c.cardCount)} cards</div>
+    <div class="deck-comp-bar">
+      ${seg(c.attack, '#d9705c')}${seg(c.defense, '#7aa3d4')}${seg(c.versatile, '#d4ab4f')}${seg(c.scheme, '#a78bc9')}
+    </div>
+    <div class="deck-cells">
+      ${countCell('Attack', c.attack, `Σ value ${c.attackValue}`, '#d9705c')}
+      ${countCell('Defense', c.defense, `Σ value ${c.defenseValue}`, '#7aa3d4')}
+      ${countCell('Versatile', c.versatile, 'atk or def', '#d4ab4f')}
+      ${countCell('Scheme', c.scheme, 'effects', '#a78bc9')}
+    </div>
+    <div class="lean-line">
+      <span>Total offense value: <b class="mono">${c.attackValue}</b></span>
+      <span>Total defense value: <b class="mono">${c.defenseValue}</b></span>
+      <span>Lean: <b>${esc(c.lean || '—')}</b></span>
+    </div>
+  </div>`;
+}
+
+// Fallback when no registry composition: the play-derived mix from card telemetry.
+function playMixSection(p) {
+  const other = p.boost + p.other;
+  const seg = (share, color) => `<span style="width:${(share * 100).toFixed(1)}%;background:${color}"></span>`;
+  return `<div class="modal-section">
+    <div class="sub-title" style="margin-top:0">Play mix — ${number(p.plays)} card plays <span class="kicker">(no registry composition)</span></div>
+    <div class="deck-comp-bar">
+      ${seg(p.attack, '#d9705c')}${seg(p.defense, '#7aa3d4')}${seg(other, '#d4ab4f')}${seg(p.scheme, '#a78bc9')}
+    </div>
+    <div class="deck-cells">
+      ${shareCell('Attack', p.attack, '#d9705c')}
+      ${shareCell('Defense', p.defense, '#7aa3d4')}
+      ${shareCell('Boost / other', other, '#d4ab4f')}
+      ${shareCell('Scheme', p.scheme, '#a78bc9')}
+    </div>
+    <div class="lean-line"><span>Lean: <b>${esc(p.lean || '—')}</b></span></div>
+  </div>`;
+}
+
+function countCell(label, count, sub, color) {
+  return `<div class="deck-cell">
+    <div class="cell-head"><span class="dot-swatch" style="background:${color}"></span><span class="cell-label">${esc(label)}</span></div>
+    <div class="cell-count">${number(count)}</div>
+    <div class="cell-sub">${esc(sub)}</div>
+  </div>`;
+}
+
+function shareCell(label, share, color) {
   return `<div class="deck-cell">
     <div class="cell-head"><span class="dot-swatch" style="background:${color}"></span><span class="cell-label">${esc(label)}</span></div>
     <div class="cell-count">${pct(share, 0)}</div>

@@ -37,7 +37,7 @@ describeDb('telemetry api with postgres', () => {
   });
 
   beforeEach(async () => {
-    await pool.query('TRUNCATE game_submissions CASCADE');
+    await pool.query('TRUNCATE game_submissions, deck_definitions CASCADE');
   });
 
   afterAll(async () => {
@@ -180,6 +180,49 @@ describeDb('telemetry api with postgres', () => {
     expect(bossFormat?.bosses).toContainEqual(expect.objectContaining({ boss: 'marrow-king', winRate: 1 }));
   });
 
+  it('requires a signature to push deck definitions', async () => {
+    const response = await fetch(`${baseUrl}/v1/decks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(sampleDeckBatch()),
+    });
+    expect(response.status).toBe(401);
+  });
+
+  it('ingests deck definitions and exposes real composition on the dashboard', async () => {
+    const push = await postDecks(baseUrl, secret, sampleDeckBatch());
+    expect(push.status).toBe(200);
+    expect(await push.json()).toMatchObject({ ok: true, upserted: 1 });
+
+    await postGame(baseUrl, secret, sampleGame({ gameId: 'comp-game-001', stateHash: 'comp-state-001' }), 'comp-game-001');
+
+    const dash = await fetch(`${baseUrl}/v1/stats/dashboard?format=duel&pilots=bot:hard`);
+    const dashJson = await dash.json() as { decks: { deck: string; composition: { cardCount: number; attack: number; lean: string } | null }[] };
+    const king = dashJson.decks.find((deck) => deck.deck === 'king-kong@0.1.0');
+    expect(king?.composition).toMatchObject({ cardCount: 30, attack: 12, lean: 'Offensive' });
+
+    const detail = await fetch(`${baseUrl}/v1/stats/deck?deck=king-kong@0.1.0&format=duel&pilots=bot:hard`);
+    const detailJson = await detail.json() as { composition: { cardCount: number; defenseValue: number } | null };
+    expect(detailJson.composition).toMatchObject({ cardCount: 30 });
+  });
+
+  it('falls back to the latest version when the exact deck version is unknown', async () => {
+    await postDecks(baseUrl, secret, sampleDeckBatch({ version: '9.9.9' }));
+    await postGame(baseUrl, secret, sampleGame({ gameId: 'ver-game-001', stateHash: 'ver-state-001' }), 'ver-game-001');
+
+    const dash = await fetch(`${baseUrl}/v1/stats/dashboard?format=duel&pilots=bot:hard`);
+    const dashJson = await dash.json() as { decks: { deck: string; composition: { version: string } | null }[] };
+    const king = dashJson.decks.find((deck) => deck.deck === 'king-kong@0.1.0');
+    // game deck is @0.1.0, registry only has @9.9.9 -> latest fallback.
+    expect(king?.composition?.version).toBe('9.9.9');
+  });
+
+  it('rejects malformed deck definitions', async () => {
+    const response = await postDecks(baseUrl, secret, { schemaVersion: 1, decks: [{ deckId: 'x', version: '1', cards: [{ type: 'bogus', quantity: 1 }] }] });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ ok: false, code: 'VALIDATION_FAILED' });
+  });
+
   it('stores invalid submissions and returns validation errors', async () => {
     const response = await postRaw(baseUrl, secret, { schemaVersion: 1, format: 'duel', map: 'mended-drum', teams: [], winner: 0 }, 'bad-game-001');
     expect(response.status).toBe(400);
@@ -190,6 +233,42 @@ describeDb('telemetry api with postgres', () => {
     expect(stored.rows[0]?.validation_status).toBe('invalid');
   });
 });
+
+function sampleDeckBatch(overrides: { version?: string } = {}): unknown {
+  return {
+    schemaVersion: 1,
+    source: 'test',
+    contentVersion: '0.1.0',
+    decks: [
+      {
+        deckId: 'king-kong',
+        version: overrides.version ?? '0.1.0',
+        name: 'King Kong',
+        tier: 'community',
+        cards: [
+          { id: 'king-kong/a', title: 'A', type: 'attack', value: 5, boost: 2, quantity: 12 },
+          { id: 'king-kong/d', title: 'D', type: 'defense', value: 2, boost: 2, quantity: 6 },
+          { id: 'king-kong/v', title: 'V', type: 'versatile', value: 3, boost: 2, quantity: 8 },
+          { id: 'king-kong/s', title: 'S', type: 'scheme', value: null, boost: 2, quantity: 4 },
+        ],
+      },
+    ],
+  };
+}
+
+async function postDecks(baseUrl: string, secret: string, payload: unknown): Promise<Response> {
+  const body = JSON.stringify(payload);
+  const { timestamp, signature } = signBody(secret, body, '2026-07-14T16:30:00.000Z');
+  return fetch(`${baseUrl}/v1/decks`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-unbrewed-timestamp': timestamp,
+      'x-unbrewed-signature': signature,
+    },
+    body,
+  });
+}
 
 async function postGame(baseUrl: string, secret: string, payload: unknown, idempotencyKey: string): Promise<Response> {
   return postRaw(baseUrl, secret, payload, idempotencyKey);

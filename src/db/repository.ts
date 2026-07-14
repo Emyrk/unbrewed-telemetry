@@ -3,9 +3,12 @@ import type { Pool, PoolClient } from 'pg';
 import { normalizeSubmission } from '../ingest/normalize.js';
 import { wilson } from '../stats/wilson.js';
 import { buildDeckProfile, type CardBucketCounts } from '../stats/profile.js';
+import { countCards, leanFrom } from '../stats/composition.js';
 import type {
   CardContextBucket,
   DashboardStatsResponse,
+  DeckComposition,
+  DeckDefinitionSubmission,
   DeckDetailResponse,
   DeckProfile,
   DeckStatsResponse,
@@ -105,6 +108,66 @@ export class PgTelemetryRepository {
       await client.query('COMMIT');
       if (duplicate) return { kind: 'duplicate', submissionId: duplicate.id, gameId: duplicate.game_id };
       return { kind: 'invalid', submissionId, errors: args.errors };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Upsert a batch of pushed deck definitions into the versioned registry. */
+  async upsertDeckDefinitions(payload: DeckDefinitionSubmission, receivedAt: Date): Promise<{ upserted: number }> {
+    const source = payload.source ?? 'unknown';
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const deck of payload.decks) {
+        const counts = countCards(deck.cards);
+        await client.query(
+          `
+            INSERT INTO deck_definitions (
+              deck_id, version, name, tier, source, content_version,
+              card_count, attack_count, defense_count, versatile_count, scheme_count,
+              attack_value, defense_value, cards, received_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15)
+            ON CONFLICT (deck_id, version) DO UPDATE SET
+              name = EXCLUDED.name,
+              tier = EXCLUDED.tier,
+              source = EXCLUDED.source,
+              content_version = EXCLUDED.content_version,
+              card_count = EXCLUDED.card_count,
+              attack_count = EXCLUDED.attack_count,
+              defense_count = EXCLUDED.defense_count,
+              versatile_count = EXCLUDED.versatile_count,
+              scheme_count = EXCLUDED.scheme_count,
+              attack_value = EXCLUDED.attack_value,
+              defense_value = EXCLUDED.defense_value,
+              cards = EXCLUDED.cards,
+              received_at = EXCLUDED.received_at
+          `,
+          [
+            deck.deckId,
+            deck.version,
+            deck.name ?? null,
+            deck.tier ?? null,
+            source,
+            payload.contentVersion ?? null,
+            counts.cardCount,
+            counts.attack,
+            counts.defense,
+            counts.versatile,
+            counts.scheme,
+            counts.attackValue,
+            counts.defenseValue,
+            JSON.stringify(deck.cards),
+            receivedAt,
+          ],
+        );
+      }
+      await client.query('COMMIT');
+      return { upserted: payload.decks.length };
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
@@ -243,7 +306,10 @@ export class PgTelemetryRepository {
       [format, pilotFilter],
     );
 
-    const profiles = await this.deckProfileMap(format, pilotFilter);
+    const [profiles, compositions] = await Promise.all([
+      this.deckProfileMap(format, pilotFilter),
+      this.deckCompositionMap(),
+    ]);
 
     return rows.rows.map((row) => {
       const games = Number(row.games);
@@ -264,8 +330,37 @@ export class PgTelemetryRepository {
         ciLow: interval.lo,
         ciHigh: interval.hi,
         profile: profiles.get(row.deck) ?? null,
+        composition: pickComposition(compositions, row.deck_id, row.deck_version),
       };
     });
+  }
+
+  /**
+   * Registry compositions keyed by deck id. Each entry keeps every pushed
+   * version plus the most recently received one as `latest`, so a game's exact
+   * deck version resolves when known and otherwise falls back to latest.
+   */
+  private async deckCompositionMap(): Promise<Map<string, DeckCompositionEntry>> {
+    const rows = await this.pool.query<DeckDefinitionRow>(
+      `
+        SELECT deck_id, version, name, tier, card_count, attack_count, defense_count,
+               versatile_count, scheme_count, attack_value, defense_value
+        FROM deck_definitions
+        ORDER BY deck_id ASC, received_at DESC
+      `,
+    );
+    const map = new Map<string, DeckCompositionEntry>();
+    for (const row of rows.rows) {
+      const composition = compositionFromRow(row);
+      let entry = map.get(row.deck_id);
+      if (!entry) {
+        // rows are ordered received_at DESC, so the first per deck is latest.
+        entry = { byVersion: new Map(), latest: composition };
+        map.set(row.deck_id, entry);
+      }
+      entry.byVersion.set(row.version, composition);
+    }
+    return map;
   }
 
   /** Per-deck play-mix profile derived from game_cards, keyed by full deck id (`<deck>@<version>`). */
@@ -615,7 +710,10 @@ export class PgTelemetryRepository {
     const heroId = baseSel.rows[0]?.hero_id ?? null;
     const heroName = baseSel.rows[0]?.hero_name ?? null;
 
-    const profiles = await this.deckProfileMap(filters.format, pilotFilter);
+    const [profiles, compositions] = await Promise.all([
+      this.deckProfileMap(filters.format, pilotFilter),
+      this.deckCompositionMap(),
+    ]);
 
     const [formats, maps, matchups, cards, broadBase] = await Promise.all([
       this.deckFormatRows(deck, pilotFilter),
@@ -652,6 +750,7 @@ export class PgTelemetryRepository {
       ciLow: interval.lo,
       ciHigh: interval.hi,
       profile: profiles.get(deck) ?? null,
+      composition: pickComposition(compositions, deckId, deckVersion),
       formats,
       maps,
       matchups,
@@ -800,6 +899,56 @@ export class PgTelemetryRepository {
       };
     });
   }
+}
+
+interface DeckDefinitionRow {
+  deck_id: string;
+  version: string;
+  name: string | null;
+  tier: string | null;
+  card_count: number;
+  attack_count: number;
+  defense_count: number;
+  versatile_count: number;
+  scheme_count: number;
+  attack_value: number;
+  defense_value: number;
+}
+
+interface DeckCompositionEntry {
+  byVersion: Map<string, DeckComposition>;
+  latest: DeckComposition;
+}
+
+function compositionFromRow(row: DeckDefinitionRow): DeckComposition {
+  const attackValue = Number(row.attack_value);
+  const defenseValue = Number(row.defense_value);
+  const cardCount = Number(row.card_count);
+  return {
+    version: row.version,
+    name: row.name,
+    tier: row.tier,
+    cardCount,
+    attack: Number(row.attack_count),
+    defense: Number(row.defense_count),
+    versatile: Number(row.versatile_count),
+    scheme: Number(row.scheme_count),
+    attackValue,
+    defenseValue,
+    lean: cardCount > 0 ? leanFrom(attackValue, defenseValue) : null,
+  };
+}
+
+// Exact version when the registry has it, else the latest pushed version.
+function pickComposition(
+  map: Map<string, DeckCompositionEntry>,
+  deckId: string,
+  version: string | null,
+): DeckComposition | null {
+  const entry = map.get(deckId);
+  if (!entry) return null;
+  if (version && entry.byVersion.has(version)) return entry.byVersion.get(version)!;
+  return entry.latest;
 }
 
 function splitDeckId(deck: string): { deckId: string; deckVersion: string | null } {
