@@ -745,6 +745,10 @@ function card(inner, extra = 'panel') {
   return `<div class="card ${extra}">${inner}</div>`;
 }
 
+function empty(message) {
+  return `<div class="empty">${esc(message)}</div>`;
+}
+
 function deckClick(deck) {
   const id = registerHandler(() => openDeck(deck.deck));
   return `data-handler="${id}"`;
