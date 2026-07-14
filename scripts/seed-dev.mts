@@ -16,6 +16,10 @@ loadEnvFile();
 const databaseUrl = process.env.DATABASE_URL ?? LOCAL_COMPOSE_DATABASE_URL;
 const count = Number(process.env.SEED_GAMES ?? 800);
 const seed = Number(process.env.SEED ?? 1337);
+// Deck ids/version match the engine's shipped HEROES registry so games join the
+// pushed deck_definitions and the dashboard shows real composition. Keep in sync
+// with CONTENT_VERSION used by scripts/push-decks.mts in unbrewed-engine.
+const DECK_VERSION = process.env.DECK_VERSION ?? '0.10.0';
 
 interface Hero {
   id: string;
@@ -27,18 +31,19 @@ interface Hero {
 }
 
 const HEROES: Hero[] = [
-  { id: 'vex', name: 'Vex the Cartographer', str: 0.52, pop: 1.3, boss: false, deck: { attack: 9, defense: 10, scheme: 4, boost: 7 } },
-  { id: 'iron-matron', name: 'Iron Matron', str: 0.55, pop: 1.1, boss: true, deck: { attack: 14, defense: 8, scheme: 4, boost: 4 } },
-  { id: 'whisperfang', name: 'Whisperfang', str: 0.57, pop: 1.6, boss: false, deck: { attack: 15, defense: 5, scheme: 4, boost: 6 } },
-  { id: 'tidecaller', name: 'The Tidecaller', str: 0.48, pop: 0.9, boss: false, deck: { attack: 8, defense: 12, scheme: 4, boost: 6 } },
-  { id: 'grim-halloway', name: 'Grim Halloway', str: 0.51, pop: 1.0, boss: false, deck: { attack: 11, defense: 9, scheme: 3, boost: 7 } },
-  { id: 'sister-cinder', name: 'Sister Cinder', str: 0.53, pop: 1.2, boss: false, deck: { attack: 13, defense: 6, scheme: 4, boost: 7 } },
-  { id: 'marrow-king', name: 'Marrow King', str: 0.63, pop: 1.8, boss: true, deck: { attack: 13, defense: 9, scheme: 2, boost: 6 } },
-  { id: 'the-lamplighter', name: 'The Lamplighter', str: 0.47, pop: 0.7, boss: false, deck: { attack: 7, defense: 11, scheme: 4, boost: 8 } },
-  { id: 'old-sallow', name: 'Old Sallow', str: 0.5, pop: 0.8, boss: true, deck: { attack: 9, defense: 11, scheme: 4, boost: 6 } },
-  { id: 'captain-meridian', name: 'Captain Meridian', str: 0.54, pop: 1.4, boss: false, deck: { attack: 12, defense: 9, scheme: 3, boost: 6 } },
-  { id: 'the-red-auditor', name: 'The Red Auditor', str: 0.58, pop: 1.1, boss: false, deck: { attack: 10, defense: 10, scheme: 2, boost: 8 } },
-  { id: 'fenwick', name: 'Fenwick the Unlucky', str: 0.41, pop: 0.7, boss: false, deck: { attack: 9, defense: 8, scheme: 4, boost: 9 } },
+  { id: 'king-kong', name: 'King Kong', str: 0.63, pop: 1.8, boss: true, deck: { attack: 15, defense: 5, scheme: 3, boost: 7 } },
+  { id: 'the-mandalorian', name: 'The Mandalorian', str: 0.54, pop: 1.4, boss: false, deck: { attack: 12, defense: 6, scheme: 3, boost: 9 } },
+  { id: 'thrall', name: 'Thrall', str: 0.5, pop: 1.0, boss: false, deck: { attack: 9, defense: 6, scheme: 5, boost: 10 } },
+  { id: 'r2-d2', name: 'R2-D2', str: 0.47, pop: 0.9, boss: false, deck: { attack: 10, defense: 6, scheme: 4, boost: 10 } },
+  { id: 'king-taranis', name: 'King Taranis', str: 0.51, pop: 1.0, boss: true, deck: { attack: 8, defense: 3, scheme: 5, boost: 14 } },
+  { id: 'thetis', name: 'Thetis', str: 0.49, pop: 0.9, boss: false, deck: { attack: 7, defense: 4, scheme: 6, boost: 13 } },
+  { id: 'gingerbread-man', name: 'Gingerbread Man', str: 0.57, pop: 1.5, boss: false, deck: { attack: 12, defense: 2, scheme: 3, boost: 13 } },
+  { id: 'piper-of-the-underroads', name: 'The Piper of the Underroads', str: 0.52, pop: 1.0, boss: false, deck: { attack: 11, defense: 6, scheme: 4, boost: 9 } },
+  { id: 'hollow-oak', name: 'The Hollow Oak', str: 0.55, pop: 1.1, boss: false, deck: { attack: 8, defense: 2, scheme: 5, boost: 15 } },
+  { id: 'triceratops', name: 'Triceratops', str: 0.53, pop: 1.2, boss: true, deck: { attack: 9, defense: 12, scheme: 3, boost: 6 } },
+  { id: 'baba-yaga', name: 'Baba Yaga', str: 0.48, pop: 0.8, boss: false, deck: { attack: 6, defense: 6, scheme: 4, boost: 14 } },
+  { id: 'buster-keaton', name: 'Buster Keaton', str: 0.44, pop: 0.7, boss: false, deck: { attack: 4, defense: 8, scheme: 6, boost: 12 } },
+  { id: 'general-grievous', name: 'General Grievous', str: 0.58, pop: 1.3, boss: false, deck: { attack: 13, defense: 4, scheme: 3, boost: 10 } },
 ];
 
 const CARD_NAMES: Record<string, string[]> = {
@@ -221,7 +226,7 @@ function buildGame(index: number): GameSubmission {
     teams: teams.map((team, teamIndex) => ({
       ...(format === 'two-v-one-boss' ? { role: teamIndex === 0 ? 'boss' : 'challengers' } : {}),
       seats: team.map((s, seatIndex) => ({
-        deck: `${s.hero.id}@1.0.0`,
+        deck: `${s.hero.id}@${DECK_VERSION}`,
         pilot: s.pilot,
         runtimePlayerId: `p${seatIndex + 1}`,
         heroId: s.hero.id,
