@@ -141,6 +141,7 @@ describeDb('telemetry api with postgres', () => {
       formats: { format: string; winRate: number }[];
       matchups: { deck: string; games: number; winRate: number }[];
       cards: { card: string; contextBucket: string; influence: number; baselineWinRate: number }[];
+      startingCards: { card: string; influence: number; baselineWinRate: number; gamesWith: number }[];
     };
     expect(json).toMatchObject({ deck: 'king-kong@0.1.0', games: 1, winRate: 1 });
     expect(json.profile?.lean).toBe('Offensive');
@@ -152,6 +153,8 @@ describeDb('telemetry api with postgres', () => {
     expect(json.matchups).toContainEqual(expect.objectContaining({ deck: 'the-mandalorian@0.1.0', games: 1, winRate: 1 }));
     const crushing = json.cards.find((card) => card.card === 'crushing-blow');
     expect(crushing).toMatchObject({ contextBucket: 'attack', baselineWinRate: 1, influence: 0 });
+    const openingCrushing = json.startingCards.find((card) => card.card === 'crushing-blow');
+    expect(openingCrushing).toMatchObject({ gamesWith: 1, baselineWinRate: 1, influence: 0 });
   });
 
   it('404s deck detail for an unknown deck', async () => {
