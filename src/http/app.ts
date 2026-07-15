@@ -75,6 +75,11 @@ async function handleRequest(
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/v1/stats/scenario') {
+    await handleScenarioExplorer(url, res, repo);
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/v1/stats/recent') {
     await handleRecentGames(url, res, repo);
     return;
@@ -215,6 +220,20 @@ async function handleDeckIngest(
 
   const result = await repo.upsertDeckDefinitions(parsed as DeckDefinitionSubmission, config.now());
   sendJson(res, 200, { ok: true, upserted: result.upserted });
+}
+
+async function handleScenarioExplorer(url: URL, res: ServerResponse, repo: PgTelemetryRepository): Promise<void> {
+  const filters = statsFiltersFromUrl(url);
+  const result = await repo.scenarioExplorer({
+    format: filters.format,
+    map: blankToNull(url.searchParams.get('map')),
+    deck: blankToNull(url.searchParams.get('deck')),
+    partner: blankToNull(url.searchParams.get('partner')),
+    enemyA: blankToNull(url.searchParams.get('enemyA')),
+    enemyB: blankToNull(url.searchParams.get('enemyB')),
+    pilots: filters.pilots,
+  });
+  sendJson(res, 200, { ok: true, ...result });
 }
 
 async function handleRecentGames(url: URL, res: ServerResponse, repo: PgTelemetryRepository): Promise<void> {

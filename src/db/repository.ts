@@ -23,6 +23,7 @@ import type {
   NormalizedTeam,
   RecentGame,
   RecentGamesResponse,
+  ScenarioExplorerResponse,
   SplitStat,
   SynergyPairMatchupsResponse,
 } from '../types.js';
@@ -212,6 +213,124 @@ export class PgTelemetryRepository {
       avgTurns,
       decks,
     };
+  }
+
+  /** Scenario explorer: recommend 2v2 partners for a selected deck under optional map/opponent constraints. */
+  async scenarioExplorer(args: {
+    format: string | null;
+    map: string | null;
+    deck: string | null;
+    partner: string | null;
+    enemyA: string | null;
+    enemyB: string | null;
+    pilots: string[];
+  }): Promise<ScenarioExplorerResponse> {
+    const pilotFilter = args.pilots.length > 0 ? args.pilots : null;
+    if (!args.deck) return { totalGames: 0, partners: [] };
+
+    const result = await this.pool.query<{
+      partner_deck: string;
+      partner_deck_id: string;
+      hero_name: string | null;
+      hero_id: string | null;
+      games: number;
+      wins: number;
+      expected_win_rate: number;
+      adjusted_delta: number;
+    }>(
+      `
+        WITH twos AS (
+          SELECT g.*
+          FROM games g
+          WHERE g.format IN ('team-2v2', '2v2')
+            AND ($1::text IS NULL OR g.format = $1)
+            AND ($2::text IS NULL OR g.map = $2)
+            AND ${pilotFilterSql(3)}
+        ), strength_games AS (
+          SELECT g.*
+          FROM games g
+          WHERE g.format IN ('team-2v2', '2v2')
+            AND ($1::text IS NULL OR g.format = $1)
+            AND ${pilotFilterSql(3)}
+        ), selected_games AS (
+          SELECT
+            g.id AS game_id,
+            me.team_index,
+            me.won,
+            partner.deck AS partner_deck,
+            partner.deck_id AS partner_deck_id,
+            partner.hero_name,
+            partner.hero_id,
+            CASE WHEN MIN(opp.deck_id) <= MAX(opp.deck_id) THEN MIN(opp.deck_id) ELSE MAX(opp.deck_id) END AS opp_a_id,
+            CASE WHEN MIN(opp.deck_id) <= MAX(opp.deck_id) THEN MAX(opp.deck_id) ELSE MIN(opp.deck_id) END AS opp_b_id
+          FROM twos g
+          JOIN game_seats me ON me.game_id = g.id AND me.deck = $4
+          JOIN game_seats partner ON partner.game_id = g.id
+            AND partner.team_index = me.team_index
+            AND partner.seat_index <> me.seat_index
+          JOIN game_seats opp ON opp.game_id = g.id AND opp.team_index <> me.team_index
+          WHERE ($5::text IS NULL OR partner.deck = $5)
+          GROUP BY g.id, me.team_index, me.seat_index, me.won, partner.deck, partner.deck_id, partner.hero_name, partner.hero_id
+          HAVING ($6::text IS NULL OR BOOL_OR(opp.deck = $6))
+             AND ($7::text IS NULL OR BOOL_OR(opp.deck = $7))
+        ), team_pairs AS (
+          SELECT
+            g.id AS game_id,
+            team.team_index,
+            team.won,
+            CASE WHEN MIN(seat.deck_id) <= MAX(seat.deck_id) THEN MIN(seat.deck_id) ELSE MAX(seat.deck_id) END AS pair_a_id,
+            CASE WHEN MIN(seat.deck_id) <= MAX(seat.deck_id) THEN MAX(seat.deck_id) ELSE MIN(seat.deck_id) END AS pair_b_id
+          FROM strength_games g
+          JOIN game_teams team ON team.game_id = g.id
+          JOIN game_seats seat ON seat.game_id = team.game_id AND seat.team_index = team.team_index
+          GROUP BY g.id, team.team_index, team.won
+          HAVING COUNT(*) = 2
+        ), pair_strength AS (
+          SELECT
+            pair_a_id,
+            pair_b_id,
+            ((COUNT(*) FILTER (WHERE won)::float8 + 5.0) / (COUNT(*)::float8 + 10.0))::float8 AS strength
+          FROM team_pairs
+          GROUP BY pair_a_id, pair_b_id
+        ), scored AS (
+          SELECT
+            s.*,
+            (1.0 - COALESCE(ps.strength, 0.5))::float8 AS expected_win_rate,
+            ((CASE WHEN s.won THEN 1.0 ELSE 0.0 END) - (1.0 - COALESCE(ps.strength, 0.5)))::float8 AS adjusted_score
+          FROM selected_games s
+          LEFT JOIN pair_strength ps ON ps.pair_a_id = s.opp_a_id AND ps.pair_b_id = s.opp_b_id
+        )
+        SELECT
+          MODE() WITHIN GROUP (ORDER BY partner_deck) AS partner_deck,
+          partner_deck_id,
+          MAX(hero_name) FILTER (WHERE hero_name IS NOT NULL) AS hero_name,
+          MAX(hero_id) FILTER (WHERE hero_id IS NOT NULL) AS hero_id,
+          COUNT(*)::int AS games,
+          COUNT(*) FILTER (WHERE won)::int AS wins,
+          AVG(expected_win_rate)::float8 AS expected_win_rate,
+          AVG(adjusted_score)::float8 AS adjusted_delta
+        FROM scored
+        GROUP BY partner_deck_id
+        ORDER BY adjusted_delta DESC, games DESC, partner_deck_id ASC
+      `,
+      [args.format, args.map, pilotFilter, args.deck, args.partner, args.enemyA, args.enemyB],
+    );
+
+    const partners = result.rows.map((row) => {
+      const games = Number(row.games);
+      const wins = Number(row.wins);
+      return {
+        deck: row.partner_deck,
+        deckId: row.partner_deck_id,
+        label: row.hero_name ?? row.hero_id ?? row.partner_deck_id,
+        games,
+        wins,
+        winRate: games > 0 ? wins / games : 0,
+        expectedWinRate: Number(row.expected_win_rate ?? 0.5),
+        adjustedDelta: Number(row.adjusted_delta ?? 0),
+      };
+    });
+    return { totalGames: partners.reduce((sum, row) => sum + row.games, 0), partners };
   }
 
   /** The most recently received games (filtered), with their teams/seats for a feed. */

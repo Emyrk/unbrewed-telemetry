@@ -29,6 +29,7 @@ const TABS = [
   ['scatter', 'Pick vs Win'],
   ['formats', 'Formats'],
   ['synergy', '2v2 Synergy'],
+  ['scenario', 'Scenario'],
   ['recent', 'Recents'],
 ];
 
@@ -87,6 +88,14 @@ function readStateFromUrl() {
     hasExplicitExclusions,
     deck: params.get('deck') || null,
     pair: params.get('pair') || null,
+    scenario: {
+      format: normalizedParam(params.get('scFormat')),
+      map: normalizedParam(params.get('scMap')),
+      deck: params.get('scDeck') || null,
+      partner: params.get('scPartner') || null,
+      enemyA: params.get('scEnemyA') || null,
+      enemyB: params.get('scEnemyB') || null,
+    },
   };
 }
 
@@ -97,6 +106,12 @@ function writeStateToUrl() {
   if (state.excluded.size) params.set('exclude', [...state.excluded].join(','));
   if (state.deck) params.set('deck', state.deck);
   if (state.pair) params.set('pair', state.pair);
+  if (state.scenario?.format) params.set('scFormat', state.scenario.format);
+  if (state.scenario?.map) params.set('scMap', state.scenario.map);
+  if (state.scenario?.deck) params.set('scDeck', state.scenario.deck);
+  if (state.scenario?.partner) params.set('scPartner', state.scenario.partner);
+  if (state.scenario?.enemyA) params.set('scEnemyA', state.scenario.enemyA);
+  if (state.scenario?.enemyB) params.set('scEnemyB', state.scenario.enemyB);
   const next = `${location.pathname}${params.toString() ? `?${params}` : ''}`;
   history.replaceState(null, '', next);
 }
@@ -271,6 +286,7 @@ function renderView(data) {
   else if (state.tab === 'scatter') renderScatter(data, decks);
   else if (state.tab === 'formats') renderFormats(data);
   else if (state.tab === 'synergy') renderSynergy(data);
+  else if (state.tab === 'scenario') { renderScenario(data); return; }
   else renderOverview(data, decks);
   bindHandlers(els.view);
 }
@@ -702,6 +718,100 @@ function formatCard(row) {
     </div>
     ${boss}
   </article>`;
+}
+
+// ---------- scenario explorer ----------
+const scenarioCache = new Map();
+
+async function renderScenario(data) {
+  const decks = [...(data.decks || [])].sort((a, b) => a.label.localeCompare(b.label));
+  const maps = [...(data.maps || [])].sort((a, b) => a.map.localeCompare(b.map));
+  const formats = (data.formats || []).filter((f) => f.format === 'team-2v2' || f.format === '2v2' || f.label.includes('2v2'));
+  const scenario = state.scenario || (state.scenario = {});
+  els.view.innerHTML = `<div class="card panel scenario-panel">
+    <div class="section-head">
+      <div>
+        <div class="section-title">Scenario Explorer</div>
+        <div class="kicker" style="margin-top:3px">Pick a 2v2 format, map, your deck, and optional known seats. Suggestions use opponent-adjusted partner performance.</div>
+      </div>
+      <div class="kicker">Pilot filter: ${esc(pilotSummary())}</div>
+    </div>
+    <div class="scenario-controls">
+      ${scenarioSelect('Format', 'format', scenario.format || '', [['', 'All 2v2 formats'], ...formats.map((f) => [f.format, f.label])])}
+      ${scenarioSelect('Map', 'map', scenario.map || '', [['', 'Any map'], ...maps.map((m) => [m.map, m.map])])}
+      ${scenarioSelect('Your deck', 'deck', scenario.deck || '', [['', 'Choose deck…'], ...decks.map((d) => [d.deck, d.label])])}
+      ${scenarioSelect('Partner', 'partner', scenario.partner || '', [['', 'Suggest partner'], ...decks.map((d) => [d.deck, d.label])])}
+      ${scenarioSelect('Enemy 1', 'enemyA', scenario.enemyA || '', [['', 'Any enemy'], ...decks.map((d) => [d.deck, d.label])])}
+      ${scenarioSelect('Enemy 2', 'enemyB', scenario.enemyB || '', [['', 'Any enemy'], ...decks.map((d) => [d.deck, d.label])])}
+    </div>
+    <div class="scenario-body">${scenario.deck ? empty('Loading scenario…') : empty('Choose your deck to start seeing partner suggestions.')}</div>
+  </div>`;
+  bindScenarioControls();
+  if (!scenario.deck) return;
+
+  const body = els.view.querySelector('.scenario-body');
+  try {
+    const detail = await fetchScenario(scenario);
+    const rows = detail.partners || [];
+    body.innerHTML = rows.length ? scenarioTable(detail, scenario) : empty('No 2v2 games match this scenario yet. Try removing map or enemy filters.');
+  } catch (error) {
+    body.innerHTML = empty('Failed to load scenario: ' + (error.message || ''));
+  }
+}
+
+function scenarioSelect(label, field, value, options) {
+  const opts = options.map(([v, text]) => `<option value="${esc(v)}"${v === value ? ' selected' : ''}>${esc(text)}</option>`).join('');
+  return `<label class="scenario-field"><span>${esc(label)}</span><select data-scenario-field="${esc(field)}">${opts}</select></label>`;
+}
+
+function bindScenarioControls() {
+  els.view.querySelectorAll('[data-scenario-field]').forEach((select) => {
+    select.addEventListener('change', () => {
+      state.scenario[select.dataset.scenarioField] = select.value || null;
+      writeStateToUrl();
+      if (current) renderScenario(current);
+    });
+  });
+}
+
+async function fetchScenario(scenario) {
+  const params = new URLSearchParams();
+  if (scenario.format) params.set('format', scenario.format);
+  if (scenario.map) params.set('map', scenario.map);
+  if (scenario.deck) params.set('deck', scenario.deck);
+  if (scenario.partner) params.set('partner', scenario.partner);
+  if (scenario.enemyA) params.set('enemyA', scenario.enemyA);
+  if (scenario.enemyB) params.set('enemyB', scenario.enemyB);
+  const pilots = includedPilots();
+  if (pilots.length) params.set('pilots', pilots.join(','));
+  const key = params.toString();
+  const cached = scenarioCache.get(key);
+  if (cached && Date.now() - cached.at < DASH_TTL_MS) return cached.json;
+  const json = await fetchJson(`/v1/stats/scenario?${key}`);
+  scenarioCache.set(key, { at: Date.now(), json });
+  return json;
+}
+
+function scenarioTable(detail, scenario) {
+  const rows = [...(detail.partners || [])].sort((a, b) => b.adjustedDelta - a.adjustedDelta || b.games - a.games);
+  const summary = [scenario.format || 'all 2v2 formats', scenario.map || 'any map', scenario.enemyA ? `enemy ${labelForDeckId(deckIdOf(scenario.enemyA))}` : null, scenario.enemyB ? `enemy ${labelForDeckId(deckIdOf(scenario.enemyB))}` : null]
+    .filter(Boolean).join(' · ');
+  return `<div>
+    <div class="scenario-summary">${number(detail.totalGames)} matching team games · ${esc(summary)}</div>
+    <div class="scenario-grid scenario-head"><span>Suggested partner</span><span class="right">Games</span><span class="right">WR</span><span class="right">Expected</span><span class="right">Adj Δ</span></div>
+    ${rows.map(scenarioRow).join('')}
+  </div>`;
+}
+
+function scenarioRow(row) {
+  const cls = row.adjustedDelta > 0.03 ? 'delta-up' : row.adjustedDelta < -0.03 ? 'delta-down' : 'delta-flat';
+  return `<div class="scenario-grid scenario-row">
+    <span class="name">${labelHtml(row.label, row.deckId)}</span>
+    <span class="num">${number(row.games)}</span>
+    <span class="mono" style="text-align:right;color:${wrColor(row.winRate)}">${pct(row.winRate)}</span>
+    <span class="num">${pct(row.expectedWinRate)}</span>
+    <span style="text-align:right"><span class="delta-badge ${cls}">${signedPct(row.adjustedDelta)}</span></span>
+  </div>`;
 }
 
 // ---------- synergy ----------
