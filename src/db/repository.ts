@@ -193,12 +193,7 @@ export class PgTelemetryRepository {
           SELECT g.*
           FROM games g
           WHERE ($1::text IS NULL OR g.format = $1)
-            AND ($2::text[] IS NULL OR NOT EXISTS (
-              SELECT 1
-              FROM game_seats s2
-              WHERE s2.game_id = g.id
-                AND NOT (s2.pilot = ANY($2) OR s2.pilot_kind = ANY($2))
-            ))
+            AND ${pilotFilterSql()}
         )
         SELECT COUNT(*)::int AS total_games, AVG(turns)::float8 AS avg_turns
         FROM filtered_games
@@ -1741,11 +1736,34 @@ function splitDeckId(deck: string): { deckId: string; deckVersion: string | null
 }
 
 function pilotFilterSql(paramIndex = 2): string {
-  return `($${paramIndex}::text[] IS NULL OR NOT EXISTS (
-              SELECT 1
-              FROM game_seats s2
-              WHERE s2.game_id = g.id
-                AND NOT (s2.pilot = ANY($${paramIndex}) OR s2.pilot_kind = ANY($${paramIndex}))
+  return `($${paramIndex}::text[] IS NULL OR (
+              (
+                NOT EXISTS (
+                  SELECT 1 FROM unnest($${paramIndex}::text[]) AS allowed(pilot)
+                  WHERE allowed.pilot NOT LIKE 'must:%'
+                )
+                OR NOT EXISTS (
+                  SELECT 1
+                  FROM game_seats s2
+                  WHERE s2.game_id = g.id
+                    AND NOT EXISTS (
+                      SELECT 1 FROM unnest($${paramIndex}::text[]) AS allowed(pilot)
+                      WHERE allowed.pilot NOT LIKE 'must:%'
+                        AND (s2.pilot = allowed.pilot OR s2.pilot_kind = allowed.pilot)
+                    )
+                )
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM unnest($${paramIndex}::text[]) AS required(pilot)
+                WHERE required.pilot LIKE 'must:%'
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM game_seats s3
+                    WHERE s3.game_id = g.id
+                      AND (s3.pilot = substring(required.pilot from 6) OR s3.pilot_kind = substring(required.pilot from 6))
+                  )
+              )
             ))`;
 }
 
