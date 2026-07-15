@@ -229,6 +229,27 @@ describeDb('telemetry api with postgres', () => {
     expect(await response.json()).toMatchObject({ ok: false, code: 'VALIDATION_FAILED' });
   });
 
+  it('serves 2v2 overall and partner performance on deck detail', async () => {
+    await postGame(baseUrl, secret, twoVtwoGame('deck-2v2-a', ['alpha', 'bravo', 'charlie', 'delta']), 'deck-2v2-a');
+    await postGame(baseUrl, secret, twoVtwoGame('deck-2v2-b', ['alpha', 'bravo', 'echo', 'foxtrot']), 'deck-2v2-b');
+    await postGame(baseUrl, secret, twoVtwoGame('deck-2v2-c', ['alpha', 'charlie', 'bravo', 'delta'], 1), 'deck-2v2-c');
+    await postGame(baseUrl, secret, twoVtwoGame('deck-2v2-d', ['alpha', 'charlie', 'echo', 'foxtrot'], 1), 'deck-2v2-d');
+
+    const response = await fetch(`${baseUrl}/v1/stats/deck?deck=alpha@1.0.0&pilots=bot:hard`);
+    expect(response.status).toBe(200);
+    const json = await response.json() as {
+      twoVTwo: {
+        games: number;
+        wins: number;
+        winRate: number;
+        partners: { deck: string; games: number; wins: number; winRate: number; delta: number }[];
+      };
+    };
+    expect(json.twoVTwo).toMatchObject({ games: 4, wins: 2, winRate: 0.5 });
+    expect(json.twoVTwo.partners.find((p) => p.deck === 'bravo@1.0.0')).toMatchObject({ games: 2, wins: 2, winRate: 1, delta: 0.5 });
+    expect(json.twoVTwo.partners.find((p) => p.deck === 'charlie@1.0.0')).toMatchObject({ games: 2, wins: 0, winRate: 0, delta: -0.5 });
+  });
+
   it('reports 2v2 synergy pair matchups (opposing pairs and decks)', async () => {
     // alpha+bravo win both games, vs charlie+delta and vs echo+foxtrot.
     await postGame(baseUrl, secret, twoVtwoGame('syn-a', ['alpha', 'bravo', 'charlie', 'delta']), 'syn-a');
@@ -317,7 +338,7 @@ async function postDecks(baseUrl: string, secret: string, payload: unknown): Pro
   });
 }
 
-function twoVtwoGame(id: string, decks: [string, string, string, string]): unknown {
+function twoVtwoGame(id: string, decks: [string, string, string, string], winner = 0): unknown {
   const seat = (deck: string, player: string) => ({ deck: `${deck}@1.0.0`, pilot: 'bot:hard', runtimePlayerId: player, heroId: deck });
   return sampleGame({
     gameId: id,
@@ -328,7 +349,7 @@ function twoVtwoGame(id: string, decks: [string, string, string, string]): unkno
       { seats: [seat(decks[0], 'p1'), seat(decks[1], 'p2')] },
       { seats: [seat(decks[2], 'p3'), seat(decks[3], 'p4')] },
     ],
-    winner: 0,
+    winner,
   });
 }
 

@@ -924,6 +924,7 @@ async function renderDeckPage() {
         ${splitStat('Going first', fp.first)}
         ${splitStat('Going second', fp.second)}
       </div>
+      ${twoVTwoSection(d.twoVTwo)}
       ${comp}
       <div class="modal-cols">
         <div>
@@ -956,6 +957,50 @@ function closeModal() {
   const wasDeckPage = !!state.deck;
   if (state.deck || state.pair) { state.deck = null; state.pair = null; writeStateToUrl(); }
   if (wasDeckPage && current) renderView(current); // exit the full-page deck view
+}
+
+function twoVTwoSection(two) {
+  const summary = two || { games: 0, wins: 0, winRate: null, partners: [] };
+  const partners = summary.partners || [];
+  const ranked = [...partners].sort((a, b) => b.delta - a.delta || b.games - a.games);
+  const best = ranked.filter((p) => p.delta >= 0).slice(0, 5);
+  const worst = ranked.filter((p) => p.delta < 0).sort((a, b) => a.delta - b.delta || b.games - a.games).slice(0, 5);
+  const row = (p) => `<div class="partner-row">
+    <span class="name">${labelHtml(p.label, p.deckId)}</span>
+    <span class="g">${number(p.games)}g</span>
+    <span class="mono" style="color:${wrColor(p.winRate)}">${pct(p.winRate)}</span>
+    <span style="text-align:right"><span class="delta-badge ${p.delta > 0.03 ? 'delta-up' : p.delta < -0.03 ? 'delta-down' : 'delta-flat'}">${signedPct(p.delta)}</span></span>
+  </div>`;
+  const col = (title, arr, kind) => `<div>
+    <div class="syn-opp-title ${kind}">${title} <span class="kicker">(${arr.length})</span></div>
+    ${arr.length ? arr.map(row).join('') : `<div class="empty">none yet</div>`}
+  </div>`;
+  return `<div class="modal-section two-v-two-detail">
+    <div class="section-head">
+      <div class="sub-title" style="margin-top:0">2v2 performance</div>
+      <div class="kicker">Partner Δ is compared to this deck's overall 2v2 win rate.</div>
+    </div>
+    <div class="deck-stats compact">
+      <div class="deck-stat">
+        <div class="subtle">2v2 overall</div>
+        <div class="val mono" style="color:${summary.winRate == null ? 'var(--text)' : wrColor(summary.winRate)}">${summary.winRate == null ? '—' : pct(summary.winRate)}</div>
+        <div class="subtle" style="font-weight:400">${number(summary.games)} games</div>
+      </div>
+      <div class="deck-stat">
+        <div class="subtle">Record</div>
+        <div class="val mono">${number(summary.wins)}–${number(Math.max(0, summary.games - summary.wins))}</div>
+        <div class="subtle" style="font-weight:400">team games</div>
+      </div>
+      <div class="deck-stat">
+        <div class="subtle">Partners seen</div>
+        <div class="val mono">${number(partners.length)}</div>
+        <div class="subtle" style="font-weight:400">unique decks</div>
+      </div>
+    </div>
+    ${summary.games > 0
+      ? `<div class="partner-cols">${col('Pairs well with', best, 'good')}${col('Pairs poorly with', worst, 'bad')}</div>`
+      : empty('No 2v2 games for this deck yet.')}
+  </div>`;
 }
 
 // Real deck make-up from the pushed registry: the mock's "30 cards" panel.
