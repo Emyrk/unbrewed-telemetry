@@ -61,6 +61,10 @@ const els = {
 
 let cardInfluenceMode = readStoredCardInfluenceMode();
 let twoVTwoMode = readStoredTwoVTwoMode();
+let deckFormatTab = null;
+let deckDuelOpponent = null;
+let deckTwoVTwoPartner = null;
+let currentDeckDetail = null;
 let current = null;
 let allPilots = [];
 let matrixFocus = null; // full deck id of the focused row on the Matchups tab, or null for the grid
@@ -70,6 +74,8 @@ let matrixSampleTarget = 50; // games needed for full-confidence color in 'games
 // hammering the (multi-query) dashboard endpoint. Data still refreshes within TTL.
 const dashCache = new Map();
 const DASH_TTL_MS = 15000;
+const DECK_DETAIL_TTL_MS = 60000;
+const deckDetailCache = new Map();
 
 renderTabs();
 loadDashboard().catch(showError);
@@ -180,6 +186,24 @@ function statsQuery() {
   const pilots = includedPilots();
   if (pilots.length) params.set('pilots', pilots.join(','));
   return params;
+}
+
+function deckDetailCacheKey(deck, extra = {}) {
+  const params = statsQuery();
+  params.set('deck', deck);
+  for (const [key, value] of Object.entries(extra)) {
+    if (value != null && value !== '') params.set(key, value);
+  }
+  return params.toString();
+}
+
+async function fetchDeckDetail(deck, extra = {}) {
+  const key = deckDetailCacheKey(deck, extra);
+  const cached = deckDetailCache.get(key);
+  if (cached && Date.now() - cached.at < DECK_DETAIL_TTL_MS) return cached.data;
+  const data = await fetchJson(`/v1/stats/deck?${key}`);
+  deckDetailCache.set(key, { at: Date.now(), data });
+  return data;
 }
 
 // ---------- data loading ----------
@@ -1052,39 +1076,21 @@ async function renderDeckPage() {
   els.view.innerHTML = card(empty('Loading deck…'));
   let d;
   try {
-    const params = statsQuery();
-    params.set('deck', state.deck);
-    d = await fetchJson(`/v1/stats/deck?${params}`);
+    d = await fetchDeckDetail(state.deck);
   } catch (error) {
     els.view.innerHTML = card(empty('Failed to load deck: ' + (error.message || '')));
     return;
   }
 
+  currentDeckDetail = d;
+
   const comp = d.composition && d.composition.cardCount > 0
     ? compositionSection(d.composition)
     : d.profile ? playMixSection(d.profile) : `<div class="modal-section"><div class="empty">No card data for this deck yet.</div></div>`;
-  const matchups = matchupHighlights(d.matchups || []);
-  const fp = d.firstPlayer || { first: {}, second: {} };
-  const splitStat = (label, s) => {
-    const wr = s && s.winRate != null ? s.winRate : null;
-    return `<div class="deck-stat">
-      <div class="subtle">${label}</div>
-      <div class="val mono" style="color:${wr == null ? 'var(--text)' : wrColor(wr)}">${wr == null ? '—' : pct(wr, 0)}</div>
-      <div class="subtle" style="font-weight:400">${number((s && s.games) || 0)} games</div>
-    </div>`;
-  };
   const backId = registerHandler(exitDeckPage);
-  const influenceMode = cardInfluenceMode === 'starting' ? 'starting' : 'played';
-  const playedInfluenceId = registerHandler(() => setCardInfluenceMode('played'));
-  const startingInfluenceId = registerHandler(() => setCardInfluenceMode('starting'));
-  const influenceRows = influenceMode === 'starting' ? (d.startingCards || []) : (d.cards || []);
-  const influenceKicker = influenceMode === 'starting'
-    ? "Δ win rate when the card starts in hand vs the deck's baseline"
-    : "Δ win rate when the card is played vs the deck's baseline";
-  const influenceEmpty = influenceMode === 'starting'
-    ? 'No starting-hand telemetry for this deck.'
-    : 'No played-card telemetry for this deck.';
-  const influenceLabel = influenceMode === 'starting' ? 'starts' : 'plays';
+  const formats = d.formats || [];
+  const availableTabs = deckFormatTabs(formats);
+  const activeTab = resolveDeckFormatTab(availableTabs);
 
   els.view.innerHTML = `<div class="deck-page">
     <button class="mx-back" data-handler="${backId}" type="button">◀ Back</button>
@@ -1096,48 +1102,30 @@ async function renderDeckPage() {
         </div>
         <div class="modal-wr" style="color:${wrColor(d.winRate)}">${pct(d.winRate)}</div>
       </div>
-      <div class="deck-stats">
-        <div class="deck-stat">
-          <div class="subtle">Overall</div>
-          <div class="val mono" style="color:${wrColor(d.winRate)}">${pct(d.winRate)}</div>
-          <div class="deck-stat-ci">95% CI ${pct(d.ciLow, 0)}–${pct(d.ciHigh, 0)}</div>
-        </div>
-        <div class="deck-stat"><div class="subtle">Avg HP left</div><div class="val mono">${d.avgFinalHealth == null ? '—' : d.avgFinalHealth.toFixed(1)}</div></div>
-        ${splitStat('Going first', fp.first)}
-        ${splitStat('Going second', fp.second)}
-      </div>
-      ${twoVTwoSection(d.twoVTwo)}
-      ${comp}
-      <div class="modal-cols">
-        <div>
-          <div class="sub-title" style="margin-top:0">Win rate by format</div>
-          <div class="list tight">${(d.formats || []).map(formatBarRow).join('') || empty('No format data.')}</div>
-        </div>
-        <div>
-          <div class="sub-title" style="margin-top:0">1v1 matchups (min 5 games)</div>
-          <div class="list tight">${matchups.length ? matchups.map(matchupRow).join('') : empty('Not enough duel data.')}</div>
-        </div>
-      </div>
-      <div class="modal-section">
-        <div class="sub-title" style="margin-top:0">Win rate by map</div>
-        <div class="map-grid">${(d.maps || []).map(mapLine).join('') || empty('No map data.')}</div>
-      </div>
-      <div class="modal-section" style="padding-bottom:6px">
-        <div class="section-head">
-          <div>
-            <div class="sub-title" style="margin-top:0">Card influence</div>
-            <div class="kicker">${esc(influenceKicker)}</div>
+      <div class="deck-overall-grid">
+        <section class="deck-overall-main">
+          <div class="sub-title" style="margin-top:0">Overall in current filters</div>
+          <div class="deck-stats compact scenario-stats">
+            ${deckStat('Overall win %', pct(d.winRate), `${number(d.wins)}-${number(Math.max(0, d.games - d.wins))} · 95% CI ${pct(d.ciLow, 0)}-${pct(d.ciHigh, 0)}`, wrColor(d.winRate))}
+            ${deckStat('Avg HP on wins', d.avgWinFinalHealth == null ? '—' : d.avgWinFinalHealth.toFixed(1), `${number(d.wins)} wins`)}
+            ${deckStat('Cards left on wins', d.avgWinCardsLeft == null ? '—' : d.avgWinCardsLeft.toFixed(1), 'final deck count')}
+            ${deckStat('Cards left on losses', d.avgLossCardsLeft == null ? '—' : d.avgLossCardsLeft.toFixed(1), 'final deck count')}
+            ${deckStat('Turns on wins', d.avgWinTurns == null ? '—' : d.avgWinTurns.toFixed(1), 'avg game turns')}
+            ${deckStat('Turns on losses', d.avgLossTurns == null ? '—' : d.avgLossTurns.toFixed(1), 'avg game turns')}
           </div>
-          <div class="syn-tabs">
-            <button class="syn-tab${influenceMode === 'played' ? ' active' : ''}" data-handler="${playedInfluenceId}" type="button">Played</button>
-            <button class="syn-tab${influenceMode === 'starting' ? ' active' : ''}" data-handler="${startingInfluenceId}" type="button">Starting hand</button>
-          </div>
-        </div>
-        <div class="list tight" style="margin-top:9px;gap:0">${influenceRows.map((row) => cardInflRow(row, influenceLabel)).join('') || empty(influenceEmpty)}</div>
+          <div class="sub-title">Win rate by format</div>
+          <div class="list tight">${formats.map(formatBarRow).join('') || empty('No format data.')}</div>
+        </section>
+        <section class="deck-overall-comp">${comp}</section>
+      </div>
+      <div class="deck-format-shell" data-deck-format-shell>
+        ${deckFormatShellContent(availableTabs, activeTab, d)}
       </div>
     </div>
   </div>`;
   bindHandlers(els.view);
+  bindDeckScenarioControls(els.view);
+  updateDeckFormatShell().catch(showError);
 }
 
 function closeModal() {
@@ -1145,6 +1133,221 @@ function closeModal() {
   const wasDeckPage = !!state.deck;
   if (state.deck || state.pair) { state.deck = null; state.pair = null; writeStateToUrl(); }
   if (wasDeckPage && current) renderView(current); // exit the full-page deck view
+}
+
+function setDeckFormatTab(key) {
+  deckFormatTab = key;
+  updateDeckFormatShell().catch(showError);
+}
+
+function setDeckScenario(field, value) {
+  if (field === 'duelOpponent') deckDuelOpponent = value || null;
+  if (field === 'twoPartner') deckTwoVTwoPartner = value || null;
+  updateDeckFormatShell().catch(showError);
+}
+
+async function updateDeckFormatShell() {
+  const shell = els.view.querySelector('[data-deck-format-shell]');
+  if (!shell || !currentDeckDetail) {
+    renderDeckPage().catch(showError);
+    return;
+  }
+  const tabs = deckFormatTabs(currentDeckDetail.formats || []);
+  const activeTab = resolveDeckFormatTab(tabs);
+  let scopedDetail = null;
+  const scenario = deckFormatScenario(activeTab);
+  if (scenario) {
+    shell.innerHTML = deckFormatShellContent(tabs, activeTab, currentDeckDetail, null, true);
+    bindHandlers(shell);
+    bindDeckScenarioControls(shell);
+    scopedDetail = await fetchDeckDetail(state.deck, scenario);
+  }
+  shell.innerHTML = deckFormatShellContent(tabs, activeTab, currentDeckDetail, scopedDetail);
+  bindHandlers(shell);
+  bindDeckScenarioControls(shell);
+}
+
+function deckFormatScenario(tab) {
+  if (tab.key === 'duel' && deckDuelOpponent) return { format: 'duel', opponent: deckDuelOpponent };
+  if (tab.key === 'team-2v2' && deckTwoVTwoPartner) return { format: 'team-2v2', partner: deckTwoVTwoPartner };
+  return null;
+}
+
+function bindDeckScenarioControls(root) {
+  root.querySelectorAll('[data-deck-scenario-field]').forEach((select) => {
+    if (select.dataset.bound) return;
+    select.dataset.bound = '1';
+    select.addEventListener('change', () => setDeckScenario(select.dataset.deckScenarioField, select.value));
+  });
+}
+
+function deckFormatShellContent(tabs, activeTab, d, scopedDetail = null, loading = false) {
+  return `<div class="section-head">
+    <div>
+      <div class="sub-title" style="margin-top:0">Format detail</div>
+      <div class="kicker">Detailed sections keep format-specific balance reads separate from the overall snapshot.</div>
+    </div>
+    <div class="syn-tabs deck-format-tabs">${tabs.map((tab) => deckFormatTabButton(tab, activeTab)).join('')}</div>
+  </div>
+  ${deckFormatPanel(activeTab, d, scopedDetail, loading)}`;
+}
+
+function deckFormatTabs(formats) {
+  const tabs = [];
+  const used = new Set();
+  const findRow = (predicate) => formats.find((row) => predicate(row.format, row.label));
+  const add = (key, label, row) => {
+    if (used.has(key)) return;
+    used.add(key);
+    tabs.push({ key, label, row: row || null });
+  };
+  const duel = findRow((format, label) => format === 'duel' || format === '1v1' || /(^|\b)1v1(\b|$)/i.test(label || ''));
+  const two = findRow((format, label) => format === 'team-2v2' || format === '2v2' || /2v2/i.test(`${format} ${label || ''}`));
+  add('duel', '1v1', duel);
+  add('team-2v2', '2v2', two);
+  for (const row of formats) {
+    if (row === duel || row === two) continue;
+    add(row.format, row.label || row.format, row);
+  }
+  return tabs.length ? tabs : [{ key: 'none', label: 'Formats', row: null }];
+}
+
+function resolveDeckFormatTab(tabs) {
+  const active = tabs.find((tab) => tab.key === deckFormatTab);
+  if (active) return active;
+  return tabs.find((tab) => tab.row && (tab.key === 'duel' || tab.row.format === state.format))
+    || tabs.find((tab) => tab.row)
+    || tabs[0];
+}
+
+function deckFormatTabButton(tab, activeTab) {
+  const id = registerHandler(() => setDeckFormatTab(tab.key));
+  return `<button class="syn-tab${tab.key === activeTab.key ? ' active' : ''}" data-handler="${id}" type="button">${esc(tab.label)}</button>`;
+}
+
+function deckFormatPanel(tab, d, scopedDetail = null, loading = false) {
+  const detail = scopedDetail || d;
+  const loadingMsg = loading ? scenarioLoadingSection() : '';
+  if (tab.key === 'team-2v2') {
+    return `<div class="deck-format-panel">
+      ${scenarioSelectSection('Partner', 'twoPartner', deckTwoVTwoPartner || '', [['', 'All partners'], ...(d.twoVTwo?.partners || []).map((p) => [p.deck, p.label])])}
+      ${loading ? scenarioStatsSkeleton() : formatSummarySection(tab, scopedDetail ? null : d.twoVTwo, scopedDetail)}
+      ${loadingMsg || twoVTwoSection(detail.twoVTwo)}
+    </div>`;
+  }
+  if (tab.key === 'duel') {
+    const matchups = matchupHighlights(d.matchups || []);
+    const selectedOpponent = deckDuelOpponent ? (d.matchups || []).find((m) => m.deck === deckDuelOpponent) : null;
+    return `<div class="deck-format-panel">
+      ${scenarioSelectSection('Opponent', 'duelOpponent', deckDuelOpponent || '', [['', 'All opponents'], ...(d.matchups || []).map((m) => [m.deck, m.label])])}
+      ${loading ? scenarioStatsSkeleton() : formatSummarySection(tab, null, scopedDetail)}
+      ${loadingMsg || `${selectedOpponent ? '' : `<div class="modal-section">
+        <div class="sub-title" style="margin-top:0">Best and worst duel matchups</div>
+        <div class="list tight">${matchups.length ? matchups.map(matchupRow).join('') : empty('Not enough duel data.')}</div>
+      </div>`}
+      ${mapAndInfluenceSection(detail)}`}
+    </div>`;
+  }
+  return `<div class="deck-format-panel">
+    ${formatSummarySection(tab)}
+    ${mapAndInfluenceSection(d)}
+  </div>`;
+}
+
+function formatSummarySection(tab, twoVTwo = null, scopedDetail = null) {
+  const row = scopedDetail || tab.row;
+  if (!row && !twoVTwo) {
+    return `<div class="modal-section">${empty(`No ${tab.label} games for this deck yet.`)}</div>`;
+  }
+  const games = twoVTwo ? twoVTwo.games : row.games;
+  const wins = twoVTwo ? twoVTwo.wins : row.wins;
+  const winRate = twoVTwo ? twoVTwo.winRate : row.winRate;
+  const firstPlayer = row?.firstPlayer || { first: {}, second: {} };
+  return `<div class="modal-section">
+    <div class="deck-stats compact scenario-stats">
+      ${deckStat(`${tab.label} win rate`, winRate == null ? '—' : pct(winRate), `${number(wins)}-${number(Math.max(0, games - wins))} · ${number(games)} games`, winRate == null ? undefined : wrColor(winRate))}
+      ${deckStat('Avg HP on wins', row?.avgWinFinalHealth == null ? '—' : row.avgWinFinalHealth.toFixed(1), `${number(wins)} wins`)}
+      ${deckStat('Cards left on wins', row?.avgWinCardsLeft == null ? '—' : row.avgWinCardsLeft.toFixed(1), 'final deck count')}
+      ${deckStat('Cards left on losses', row?.avgLossCardsLeft == null ? '—' : row.avgLossCardsLeft.toFixed(1), 'final deck count')}
+      ${deckStat('Turns on wins', row?.avgWinTurns == null ? '—' : row.avgWinTurns.toFixed(1), 'avg game turns')}
+      ${deckStat('Turns on losses', row?.avgLossTurns == null ? '—' : row.avgLossTurns.toFixed(1), 'avg game turns')}
+      ${splitStatCard('Going first', firstPlayer.first)}
+      ${splitStatCard('Going second', firstPlayer.second)}
+    </div>
+  </div>`;
+}
+
+function scenarioStatsSkeleton() {
+  const labels = ['Win rate', 'Avg HP on wins', 'Cards left on wins', 'Cards left on losses', 'Turns on wins', 'Turns on losses', 'Going first', 'Going second'];
+  return `<div class="modal-section">
+    <div class="deck-stats compact scenario-stats loading-stats" aria-busy="true">
+      ${labels.map((label) => `<div class="deck-stat skeleton-stat"><div class="subtle">${esc(label)}</div><div class="skeleton-line value-line"></div><div class="skeleton-line hint-line"></div></div>`).join('')}
+    </div>
+  </div>`;
+}
+
+function scenarioLoadingSection() {
+  return `<div class="modal-section scenario-loading" aria-busy="true">
+    <div class="skeleton-line title-line"></div>
+    <div class="skeleton-line wide-line"></div>
+    <div class="skeleton-line mid-line"></div>
+  </div>`;
+}
+
+function scenarioSelectSection(label, field, value, options) {
+  const opts = options.map(([optionValue, optionLabel]) => `<option value="${esc(optionValue)}"${optionValue === value ? ' selected' : ''}>${esc(optionLabel)}</option>`).join('');
+  return `<div class="modal-section deck-scenario-control"><label class="scenario-field"><span>${esc(label)}</span><select data-deck-scenario-field="${esc(field)}">${opts}</select></label></div>`;
+}
+
+function deckStat(label, value, hint, color) {
+  return `<div class="deck-stat">
+    <div class="subtle">${esc(label)}</div>
+    <div class="val mono" style="color:${color || 'var(--text)'}">${esc(value)}</div>
+    <div class="subtle" style="font-weight:400">${esc(hint || '')}</div>
+  </div>`;
+}
+
+function splitStatCard(label, s) {
+  const wr = s && s.winRate != null ? s.winRate : null;
+  return deckStat(label, wr == null ? '—' : pct(wr, 0), `${number((s && s.games) || 0)} games`, wr == null ? undefined : wrColor(wr));
+}
+
+function mapAndInfluenceSection(d) {
+  return `${mapSection(d.maps || [])}${cardInfluenceSection(d)}`;
+}
+
+function mapSection(maps) {
+  return `<div class="modal-section">
+    <div class="sub-title" style="margin-top:0">Win rate by map</div>
+    <div class="map-grid">${maps.map(mapLine).join('') || empty('No map data.')}</div>
+  </div>`;
+}
+
+function cardInfluenceSection(d) {
+  const influenceMode = cardInfluenceMode === 'starting' ? 'starting' : 'played';
+  const playedInfluenceId = registerHandler(() => setCardInfluenceMode('played'));
+  const startingInfluenceId = registerHandler(() => setCardInfluenceMode('starting'));
+  const influenceRows = influenceMode === 'starting' ? (d.startingCards || []) : (d.cards || []);
+  const influenceKicker = influenceMode === 'starting'
+    ? "Delta win rate when the card starts in hand vs the deck's baseline"
+    : "Delta win rate when the card is played vs the deck's baseline";
+  const influenceEmpty = influenceMode === 'starting'
+    ? 'No starting-hand telemetry for this deck.'
+    : 'No played-card telemetry for this deck.';
+  const influenceLabel = influenceMode === 'starting' ? 'starts' : 'plays';
+  return `<div class="modal-section" style="padding-bottom:6px">
+    <div class="section-head">
+      <div>
+        <div class="sub-title" style="margin-top:0">Card influence</div>
+        <div class="kicker">${esc(influenceKicker)}</div>
+      </div>
+      <div class="syn-tabs">
+        <button class="syn-tab${influenceMode === 'played' ? ' active' : ''}" data-handler="${playedInfluenceId}" type="button">Played</button>
+        <button class="syn-tab${influenceMode === 'starting' ? ' active' : ''}" data-handler="${startingInfluenceId}" type="button">Starting hand</button>
+      </div>
+    </div>
+    <div class="list tight" style="margin-top:9px;gap:0">${influenceRows.map((row) => cardInflRow(row, influenceLabel)).join('') || empty(influenceEmpty)}</div>
+  </div>`;
 }
 
 function twoVTwoSection(two) {
@@ -1181,29 +1384,12 @@ function twoVTwoSection(two) {
   return `<div class="modal-section two-v-two-detail" data-two-v-two-section>
     <div class="section-head">
       <div>
-        <div class="sub-title" style="margin-top:0">2v2 performance</div>
-        <div class="kicker" style="margin-top:3px">${esc(kicker)}</div>
+        <div class="sub-title" style="margin-top:0">2v2 partner performance</div>
+        <div class="kicker" style="margin-top:3px">${esc(kicker)} ${number(partners.length)} partners seen.</div>
       </div>
       <div class="syn-toggle" style="padding:0">
         <button class="syn-tab${mode === 'raw' ? ' active' : ''}" data-handler="${rawId}" type="button">Raw</button>
         <button class="syn-tab${mode === 'adjusted' ? ' active' : ''}" data-handler="${adjustedId}" type="button">Opponent-adjusted</button>
-      </div>
-    </div>
-    <div class="deck-stats compact">
-      <div class="deck-stat">
-        <div class="subtle">2v2 overall</div>
-        <div class="val mono" style="color:${summary.winRate == null ? 'var(--text)' : wrColor(summary.winRate)}">${summary.winRate == null ? '—' : pct(summary.winRate)}</div>
-        <div class="subtle" style="font-weight:400">${number(summary.games)} games</div>
-      </div>
-      <div class="deck-stat">
-        <div class="subtle">Record</div>
-        <div class="val mono">${number(summary.wins)}–${number(Math.max(0, summary.games - summary.wins))}</div>
-        <div class="subtle" style="font-weight:400">team games</div>
-      </div>
-      <div class="deck-stat">
-        <div class="subtle">Partners seen</div>
-        <div class="val mono">${number(partners.length)}</div>
-        <div class="subtle" style="font-weight:400">unique decks</div>
       </div>
     </div>
     ${summary.games > 0

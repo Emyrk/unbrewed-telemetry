@@ -423,6 +423,14 @@ export interface DeckFormatWinRate {
   games: number;
   wins: number;
   winRate: number;
+  avgFinalHealth: number | null;
+  avgWinFinalHealth: number | null;
+  avgCardsLeft: number | null;
+  avgWinCardsLeft: number | null;
+  avgLossCardsLeft: number | null;
+  avgWinTurns: number | null;
+  avgLossTurns: number | null;
+  firstPlayer: DeckFirstPlayerSplit;
 }
 
 export interface DeckMapWinRate {
@@ -492,6 +500,12 @@ export interface DeckDetailResponse {
   profile: DeckProfile | null;
   composition: DeckComposition | null;
   avgFinalHealth: number | null;
+  avgWinFinalHealth: number | null;
+  avgCardsLeft: number | null;
+  avgWinCardsLeft: number | null;
+  avgLossCardsLeft: number | null;
+  avgWinTurns: number | null;
+  avgLossTurns: number | null;
   firstPlayer: DeckFirstPlayerSplit;
   formats: DeckFormatWinRate[];
   maps: DeckMapWinRate[];
