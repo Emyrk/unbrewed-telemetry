@@ -768,8 +768,8 @@ async function renderScenario(data) {
   const body = els.view.querySelector('.scenario-body');
   try {
     const detail = await fetchScenario(scenario);
-    const rows = detail.partners || [];
-    body.innerHTML = rows.length ? scenarioTable(detail, scenario) : empty('No 2v2 games match this scenario yet. Try removing map or enemy filters.');
+    const rows = scenario.partner ? (detail.matchups || []) : (detail.partners || []);
+    body.innerHTML = rows.length ? scenarioTable(detail, scenario) : empty('No 2v2 games match this scenario yet. Try removing map, partner, or enemy filters.');
   } catch (error) {
     body.innerHTML = empty('Failed to load scenario: ' + (error.message || ''));
   }
@@ -809,20 +809,44 @@ async function fetchScenario(scenario) {
 }
 
 function scenarioTable(detail, scenario) {
-  const rows = [...(detail.partners || [])].sort((a, b) => b.adjustedDelta - a.adjustedDelta || b.games - a.games);
-  const summary = [scenario.format || 'all 2v2 formats', scenario.map || 'any map', scenario.enemyA ? `enemy ${labelForDeckId(deckIdOf(scenario.enemyA))}` : null, scenario.enemyB ? `enemy ${labelForDeckId(deckIdOf(scenario.enemyB))}` : null]
+  const summary = [scenario.format || 'all 2v2 formats', scenario.map || 'any map', scenario.partner ? `partner ${labelForDeckId(deckIdOf(scenario.partner))}` : null, scenario.enemyA ? `enemy ${labelForDeckId(deckIdOf(scenario.enemyA))}` : null, scenario.enemyB ? `enemy ${labelForDeckId(deckIdOf(scenario.enemyB))}` : null]
     .filter(Boolean).join(' · ');
+  return scenario.partner ? scenarioMatchupTable(detail, summary) : scenarioPartnerTable(detail, summary);
+}
+
+function scenarioPartnerTable(detail, summary) {
+  const rows = [...(detail.partners || [])].sort((a, b) => b.adjustedDelta - a.adjustedDelta || b.games - a.games);
   return `<div>
     <div class="scenario-summary">${number(detail.totalGames)} matching team games · ${esc(summary)}</div>
     <div class="scenario-grid scenario-head"><span>Suggested partner</span><span class="right">Games</span><span class="right">WR</span><span class="right">Expected</span><span class="right">Adj Δ</span></div>
-    ${rows.map(scenarioRow).join('')}
+    ${rows.map(scenarioPartnerRow).join('')}
   </div>`;
 }
 
-function scenarioRow(row) {
+function scenarioMatchupTable(detail, summary) {
+  const rows = [...(detail.matchups || [])].sort((a, b) => b.games - a.games || b.adjustedDelta - a.adjustedDelta);
+  return `<div>
+    <div class="scenario-summary">${number(detail.totalGames)} matching team games · enumerating opponent pairs · ${esc(summary)}</div>
+    <div class="scenario-grid scenario-head"><span>Opponent pair</span><span class="right">Games</span><span class="right">WR</span><span class="right">Expected</span><span class="right">Adj Δ</span></div>
+    ${rows.map(scenarioMatchupRow).join('')}
+  </div>`;
+}
+
+function scenarioPartnerRow(row) {
   const cls = row.adjustedDelta > 0.03 ? 'delta-up' : row.adjustedDelta < -0.03 ? 'delta-down' : 'delta-flat';
   return `<div class="scenario-grid scenario-row">
     <span class="name">${labelHtml(row.label, row.deckId)}</span>
+    <span class="num">${number(row.games)}</span>
+    <span class="mono" style="text-align:right;color:${wrColor(row.winRate)}">${pct(row.winRate)}</span>
+    <span class="num">${pct(row.expectedWinRate)}</span>
+    <span style="text-align:right"><span class="delta-badge ${cls}">${signedPct(row.adjustedDelta)}</span></span>
+  </div>`;
+}
+
+function scenarioMatchupRow(row) {
+  const cls = row.adjustedDelta > 0.03 ? 'delta-up' : row.adjustedDelta < -0.03 ? 'delta-down' : 'delta-flat';
+  return `<div class="scenario-grid scenario-row">
+    <span class="name">${labelHtml(row.opponentALabel, row.opponentAId)} + ${labelHtml(row.opponentBLabel, row.opponentBId)}</span>
     <span class="num">${number(row.games)}</span>
     <span class="mono" style="text-align:right;color:${wrColor(row.winRate)}">${pct(row.winRate)}</span>
     <span class="num">${pct(row.expectedWinRate)}</span>
