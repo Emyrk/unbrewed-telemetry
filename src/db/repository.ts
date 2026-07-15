@@ -304,46 +304,55 @@ export class PgTelemetryRepository {
 
   async dashboardStats(filters: DeckStatsFilters, generatedAt = new Date()): Promise<DashboardStatsResponse> {
     const pilotFilter = filters.pilots.length > 0 ? filters.pilots : null;
-    const summary = await this.pool.query<{
-      total_games: number;
-      avg_turns: number | null;
-      first_player_games: number;
-      first_player_wins: number;
-    }>(
-      `
-        WITH selected_games AS (
-          SELECT g.*
-          FROM games g
-          WHERE ($1::text IS NULL OR g.format = $1)
-            AND ${pilotFilterSql()}
-        )
-        SELECT
-          COUNT(*)::int AS total_games,
-          AVG(turns)::float8 AS avg_turns,
-          COUNT(*) FILTER (WHERE first_player_team IS NOT NULL AND winner_team IS NOT NULL)::int AS first_player_games,
-          COUNT(*) FILTER (WHERE first_player_team IS NOT NULL AND winner_team IS NOT NULL AND first_player_team = winner_team)::int AS first_player_wins
-        FROM selected_games g
-      `,
-      [filters.format, pilotFilter],
-    );
+
+    // Wave 1: everything independent of totalGames, fetched concurrently.
+    const [summary, submissions, formats, pilots, matchups, synergy] = await Promise.all([
+      this.pool.query<{
+        total_games: number;
+        avg_turns: number | null;
+        first_player_games: number;
+        first_player_wins: number;
+      }>(
+        `
+          WITH selected_games AS (
+            SELECT g.*
+            FROM games g
+            WHERE ($1::text IS NULL OR g.format = $1)
+              AND ${pilotFilterSql()}
+          )
+          SELECT
+            COUNT(*)::int AS total_games,
+            AVG(turns)::float8 AS avg_turns,
+            COUNT(*) FILTER (WHERE first_player_team IS NOT NULL AND winner_team IS NOT NULL)::int AS first_player_games,
+            COUNT(*) FILTER (WHERE first_player_team IS NOT NULL AND winner_team IS NOT NULL AND first_player_team = winner_team)::int AS first_player_wins
+          FROM selected_games g
+        `,
+        [filters.format, pilotFilter],
+      ),
+      this.pool.query<{ total_submissions: number; invalid_submissions: number }>(
+        `
+          SELECT
+            COUNT(*)::int AS total_submissions,
+            COUNT(*) FILTER (WHERE validation_status = 'invalid')::int AS invalid_submissions
+          FROM game_submissions
+        `,
+      ),
+      this.formatRows(pilotFilter),
+      this.pilotRows(),
+      this.matchupRows(filters.format, pilotFilter),
+      this.synergyRows(filters.format, pilotFilter),
+    ]);
+
     const totalGames = Number(summary.rows[0]?.total_games ?? 0);
     const avgTurns = summary.rows[0]?.avg_turns ?? null;
     const firstPlayerGames = Number(summary.rows[0]?.first_player_games ?? 0);
     const firstPlayerWins = Number(summary.rows[0]?.first_player_wins ?? 0);
-    const submissions = await this.pool.query<{ total_submissions: number; invalid_submissions: number }>(
-      `
-        SELECT
-          COUNT(*)::int AS total_submissions,
-          COUNT(*) FILTER (WHERE validation_status = 'invalid')::int AS invalid_submissions
-        FROM game_submissions
-      `,
-    );
-    const formats = await this.formatRows(pilotFilter);
-    const maps = await this.mapRows(filters.format, pilotFilter, totalGames);
-    const pilots = await this.pilotRows();
-    const decks = await this.deckRows(filters.format, pilotFilter, totalGames);
-    const matchups = await this.matchupRows(filters.format, pilotFilter);
-    const synergy = await this.synergyRows(filters.format, pilotFilter);
+
+    // Wave 2: these need totalGames (pick rate / map share), fetched concurrently.
+    const [maps, decks] = await Promise.all([
+      this.mapRows(filters.format, pilotFilter, totalGames),
+      this.deckRows(filters.format, pilotFilter, totalGames),
+    ]);
 
     return {
       generatedAt: generatedAt.toISOString(),
