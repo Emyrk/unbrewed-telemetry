@@ -473,6 +473,10 @@ function renderMatchupFocus(data, decks) {
       <div>
         <button class="mx-back" data-handler="${backId}" type="button">◀ All matchups</button>
         <div class="section-title" style="margin-top:10px">${deckName}<span class="kicker" style="text-transform:none;letter-spacing:0;margin-left:8px">1v1 vs each opponent</span></div>
+        ${deck ? `<div class="mx-focus-summary">
+          <span class="mx-focus-wr" style="color:${wrColor(deck.winRate)}">${pct(deck.winRate)}</span>
+          <span class="mx-focus-meta">${number(deck.wins)}–${number(deck.games - deck.wins)} · ${number(deck.games)} games · 95% CI ${pct(deck.ciLow, 0)}–${pct(deck.ciHigh, 0)}</span>
+        </div>` : ''}
       </div>
       <div class="kicker">Bar diverges from 50% · green favors ${esc(deckPlain)} · faded rows are under ${MATRIX_MIN_GAMES} games</div>
     </div>
