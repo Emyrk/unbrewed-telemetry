@@ -260,6 +260,18 @@ body {
 .legend-spacer { margin-left: auto; }
 
 /* ---------- Matrix ---------- */
+.mx-controls { display: flex; align-items: center; gap: 6px; margin-top: 14px; flex-wrap: wrap; }
+.mx-ctrl-label { font: 600 10.5px var(--font-body); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted-2); }
+.mx-sample {
+  width: 62px;
+  background: var(--panel-alt);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font: 500 12px var(--font-mono);
+}
+.mx-ctrl-hint { font-size: 11px; color: var(--muted-2); }
 .matrix-scroll { overflow-x: auto; margin-top: 16px; }
 .matrix-inner { display: inline-block; min-width: 100%; }
 .matrix-line { display: flex; gap: 2px; margin-bottom: 2px; align-items: center; }

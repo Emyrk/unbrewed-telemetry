@@ -58,6 +58,8 @@ const els = {
 let current = null;
 let allPilots = [];
 let matrixFocus = null; // full deck id of the focused row on the Matchups tab, or null for the grid
+let matrixMetric = 'wr'; // 'wr' | 'games' — what the matrix cells display
+let matrixSampleTarget = 50; // games needed for full-confidence color in 'games' mode
 
 renderTabs();
 loadDashboard().catch(showError);
@@ -418,21 +420,45 @@ function renderMatchups(data, decks) {
     return `<div class="matrix-line"><div class="matrix-rowlabel" data-handler="${id}" title="Focus ${esc(rowDeck.label)}${isSpice(rowDeck.deckId) ? ' (spice)' : ''}">${labelHtml(rowDeck.label, rowDeck.deckId)}</div>${cells}</div>`;
   }).join('');
 
+  const wrId = registerHandler(() => { matrixMetric = 'wr'; if (current) renderView(current); });
+  const gamesId = registerHandler(() => { matrixMetric = 'games'; if (current) renderView(current); });
+  const kicker = matrixMetric === 'games'
+    ? `Games played per matchup · red → green by sample size (target ${matrixSampleTarget})`
+    : `Row deck win rate vs column deck · green favors row · min ${MATRIX_MIN_GAMES} games (· = not enough data)`;
+  const legend = matrixMetric === 'games'
+    ? `${legendSwatch(sampleColor(0.1), 'Few games')}${legendSwatch(sampleColor(0.5), 'Partial')}${legendSwatch(sampleColor(1), '≥ target')}`
+    : `${legendSwatch('rgba(224,121,106,0.65)', 'Row loses')}${legendSwatch('rgba(255,255,255,0.1)', 'Even')}${legendSwatch('rgba(126,203,143,0.65)', 'Row wins')}`;
+  const legendEnd = top.length < withGames.length
+    ? `Showing top ${top.length} of ${withGames.length} decks by games · click a row to focus`
+    : `Click a row to focus that deck's matchups`;
+
   els.view.innerHTML = `<div class="card panel">
     <div class="section-head">
       <div class="section-title">1v1 Matchup Matrix</div>
-      <div class="kicker">Row deck win rate vs column deck · green favors row · min ${MATRIX_MIN_GAMES} games (· = not enough data)</div>
+      <div class="kicker">${kicker}</div>
+    </div>
+    <div class="mx-controls">
+      <span class="mx-ctrl-label">Cells</span>
+      <button class="syn-tab${matrixMetric === 'wr' ? ' active' : ''}" data-handler="${wrId}" type="button">Win rate</button>
+      <button class="syn-tab${matrixMetric === 'games' ? ' active' : ''}" data-handler="${gamesId}" type="button">Games played</button>
+      <span class="mx-ctrl-label" style="margin-left:14px">Sample target</span>
+      <input class="mx-sample" type="number" min="1" step="5" value="${matrixSampleTarget}" title="Games needed for full-confidence color" aria-label="Sample target in games">
+      <span class="mx-ctrl-hint">games</span>
     </div>
     <div class="matrix-scroll"><div class="matrix-inner">${cols}${rows}</div></div>
     <div class="legend">
-      ${legendSwatch('rgba(224,121,106,0.65)', 'Row loses')}
-      ${legendSwatch('rgba(255,255,255,0.1)', 'Even')}
-      ${legendSwatch('rgba(126,203,143,0.65)', 'Row wins')}
-      <span class="legend-spacer">${top.length < withGames.length
-        ? `Showing top ${top.length} of ${withGames.length} decks by games · click a row to focus`
-        : `Click a row to focus that deck's matchups`}</span>
+      ${legend}
+      <span class="legend-spacer">${legendEnd}</span>
     </div>
   </div>`;
+
+  const input = els.view.querySelector('.mx-sample');
+  if (input) {
+    input.addEventListener('change', () => {
+      matrixSampleTarget = Math.max(1, Math.floor(Number(input.value) || matrixSampleTarget));
+      if (current) renderView(current);
+    });
+  }
 }
 
 function focusMatchup(deckFull) {
@@ -504,13 +530,29 @@ function matrixCell(rowDeck, colDeck, lookup) {
     return `<div class="matrix-cell" style="background:transparent"></div>`;
   }
   const row = lookup.get(`${rowDeck.deck}|${colDeck.deck}`);
+  const games = row ? row.games : 0;
   const title = `${esc(rowDeck.label)} vs ${esc(colDeck.label)}`;
-  if (!row || row.games < MATRIX_MIN_GAMES) {
-    return `<div class="matrix-cell" style="background:rgba(255,255,255,0.03);color:#6d5a76" title="${title}: ${row ? row.games : 0} games (min ${MATRIX_MIN_GAMES})">·</div>`;
+
+  if (matrixMetric === 'games') {
+    if (games === 0) {
+      return `<div class="matrix-cell" style="background:rgba(255,255,255,0.03);color:#6d5a76" title="${title}: 0 games">·</div>`;
+    }
+    const ratio = clamp(games / matrixSampleTarget, 0, 1);
+    return `<div class="matrix-cell" style="background:${sampleColor(ratio)}" title="${title}: ${number(games)} of ${matrixSampleTarget} target games (${pct(ratio, 0)})">${number(games)}</div>`;
+  }
+
+  if (!row || games < MATRIX_MIN_GAMES) {
+    return `<div class="matrix-cell" style="background:rgba(255,255,255,0.03);color:#6d5a76" title="${title}: ${games} games (min ${MATRIX_MIN_GAMES})">·</div>`;
   }
   const alpha = clamp(Math.abs(row.winRate - 0.5) * 2.2, 0.1, 0.75).toFixed(2);
   const bg = row.winRate >= 0.5 ? `rgba(126,203,143,${alpha})` : `rgba(224,121,106,${alpha})`;
-  return `<div class="matrix-cell" style="background:${bg}" title="${title}: ${pct(row.winRate, 0)} over ${number(row.games)} games">${Math.round(row.winRate * 100)}</div>`;
+  return `<div class="matrix-cell" style="background:${bg}" title="${title}: ${pct(row.winRate, 0)} over ${number(games)} games">${Math.round(row.winRate * 100)}</div>`;
+}
+
+// Red (few samples) → amber → green (>= target) for the games-played heatmap.
+function sampleColor(ratio) {
+  const hue = Math.round(clamp(ratio, 0, 1) * 120); // 0=red, 120=green
+  return `hsl(${hue}, 45%, 38%)`;
 }
 
 // ---------- scatter ----------
