@@ -671,7 +671,8 @@ function recentRow(g) {
   };
   const sep = g.draw ? '<span class="recent-vs">drew</span>' : '<span class="recent-vs">vs</span>';
   const match = g.teams.map(teamHtml).join(sep);
-  const meta = [g.map, g.turns == null ? null : `${g.turns}t`, g.source].filter(Boolean).join(' · ');
+  const pilots = [...new Set(g.teams.flatMap((t) => t.seats.map((s) => s.pilot)))].map(pilotLabel).join(', ');
+  const meta = [g.map, pilots, g.turns == null ? null : `${g.turns} turns`, g.source].filter(Boolean).join(' · ');
   return `<div class="recent-row">
     <span class="recent-time" title="${esc(g.receivedAt)}">${timeAgo(g.receivedAt)}</span>
     <span class="recent-fmt">${esc(g.formatLabel)}</span>
