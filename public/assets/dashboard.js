@@ -60,6 +60,10 @@ let allPilots = [];
 let matrixFocus = null; // full deck id of the focused row on the Matchups tab, or null for the grid
 let matrixMetric = 'wr'; // 'wr' | 'games' — what the matrix cells display
 let matrixSampleTarget = 50; // games needed for full-confidence color in 'games' mode
+// Very short client cache so toggling filters back and forth is instant without
+// hammering the (multi-query) dashboard endpoint. Data still refreshes within TTL.
+const dashCache = new Map();
+const DASH_TTL_MS = 15000;
 
 renderTabs();
 loadDashboard().catch(showError);
@@ -112,11 +116,6 @@ function statsQuery() {
 }
 
 // ---------- data loading ----------
-// Very short client cache so toggling filters back and forth is instant without
-// hammering the (multi-query) dashboard endpoint. Data still refreshes within TTL.
-const dashCache = new Map();
-const DASH_TTL_MS = 15000;
-
 async function loadDashboard() {
   setStatus('Loading telemetry…');
   const params = statsQuery();
