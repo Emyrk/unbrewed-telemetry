@@ -340,6 +340,22 @@ export interface DeckStatsResponse {
   decks: DeckStat[];
 }
 
+export interface ScenarioExplorerPartner {
+  deck: string;
+  deckId: string;
+  label: string;
+  games: number;
+  wins: number;
+  winRate: number;
+  expectedWinRate: number;
+  adjustedDelta: number;
+}
+
+export interface ScenarioExplorerResponse {
+  totalGames: number;
+  partners: ScenarioExplorerPartner[];
+}
+
 export interface RecentGameSeat {
   teamIndex: number;
   seatIndex: number;

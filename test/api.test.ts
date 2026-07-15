@@ -265,6 +265,25 @@ describeDb('telemetry api with postgres', () => {
     expect(charlie?.adjustedDelta).toBeCloseTo(-0.4773, 4);
   });
 
+  it('explores 2v2 scenarios with opponent-adjusted partner suggestions', async () => {
+    await postGame(baseUrl, secret, twoVtwoGame('scenario-a', ['alpha', 'bravo', 'charlie', 'delta']), 'scenario-a');
+    await postGame(baseUrl, secret, twoVtwoGame('scenario-b', ['alpha', 'bravo', 'charlie', 'delta']), 'scenario-b');
+    await postGame(baseUrl, secret, twoVtwoGame('scenario-c', ['alpha', 'charlie', 'bravo', 'delta'], 1), 'scenario-c');
+
+    const response = await fetch(`${baseUrl}/v1/stats/scenario?format=team-2v2&deck=alpha@1.0.0&pilots=bot:hard`);
+    expect(response.status).toBe(200);
+    const json = await response.json() as {
+      totalGames: number;
+      partners: { deck: string; games: number; wins: number; winRate: number; expectedWinRate: number; adjustedDelta: number }[];
+    };
+    expect(json.totalGames).toBe(3);
+    const bravo = json.partners.find((p) => p.deck === 'bravo@1.0.0');
+    const charlie = json.partners.find((p) => p.deck === 'charlie@1.0.0');
+    expect(bravo).toMatchObject({ games: 2, wins: 2, winRate: 1 });
+    expect(charlie).toMatchObject({ games: 1, wins: 0, winRate: 0 });
+    expect(bravo!.adjustedDelta).toBeGreaterThan(charlie!.adjustedDelta);
+  });
+
   it('reports 2v2 synergy pair matchups (opposing pairs and decks)', async () => {
     // alpha+bravo win both games, vs charlie+delta and vs echo+foxtrot.
     await postGame(baseUrl, secret, twoVtwoGame('syn-a', ['alpha', 'bravo', 'charlie', 'delta']), 'syn-a');
