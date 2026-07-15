@@ -287,6 +287,24 @@ describeDb('telemetry api with postgres', () => {
     expect(bravo!.adjustedDelta).toBeGreaterThan(charlie!.adjustedDelta);
   });
 
+  it('enumerates opponent matchups when a scenario partner is selected', async () => {
+    await postGame(baseUrl, secret, twoVtwoGame('scenario-match-a', ['alpha', 'bravo', 'charlie', 'delta']), 'scenario-match-a');
+    await postGame(baseUrl, secret, twoVtwoGame('scenario-match-b', ['alpha', 'bravo', 'charlie', 'delta']), 'scenario-match-b');
+    await postGame(baseUrl, secret, twoVtwoGame('scenario-match-c', ['alpha', 'bravo', 'echo', 'foxtrot'], 1), 'scenario-match-c');
+
+    const response = await fetch(`${baseUrl}/v1/stats/scenario?format=team-2v2&deck=alpha@1.0.0&partner=bravo@1.0.0&pilots=bot:hard`);
+    expect(response.status).toBe(200);
+    const json = await response.json() as {
+      totalGames: number;
+      partners: { deck: string; games: number }[];
+      matchups: { opponentA: string; opponentB: string; games: number; wins: number; winRate: number; expectedWinRate: number; adjustedDelta: number }[];
+    };
+    expect(json.totalGames).toBe(3);
+    expect(json.partners).toContainEqual(expect.objectContaining({ deck: 'bravo@1.0.0', games: 3 }));
+    expect(json.matchups).toContainEqual(expect.objectContaining({ opponentA: 'charlie@1.0.0', opponentB: 'delta@1.0.0', games: 2, wins: 2, winRate: 1 }));
+    expect(json.matchups).toContainEqual(expect.objectContaining({ opponentA: 'echo@1.0.0', opponentB: 'foxtrot@1.0.0', games: 1, wins: 0, winRate: 0 }));
+  });
+
   it('reports 2v2 synergy pair matchups (opposing pairs and decks)', async () => {
     // alpha+bravo win both games, vs charlie+delta and vs echo+foxtrot.
     await postGame(baseUrl, secret, twoVtwoGame('syn-a', ['alpha', 'bravo', 'charlie', 'delta']), 'syn-a');

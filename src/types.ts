@@ -364,9 +364,24 @@ export interface ScenarioExplorerPartner {
   adjustedDelta: number;
 }
 
+export interface ScenarioExplorerMatchup {
+  opponentA: string;
+  opponentAId: string;
+  opponentALabel: string;
+  opponentB: string;
+  opponentBId: string;
+  opponentBLabel: string;
+  games: number;
+  wins: number;
+  winRate: number;
+  expectedWinRate: number;
+  adjustedDelta: number;
+}
+
 export interface ScenarioExplorerResponse {
   totalGames: number;
   partners: ScenarioExplorerPartner[];
+  matchups: ScenarioExplorerMatchup[];
 }
 
 export interface RecentGameSeat {
