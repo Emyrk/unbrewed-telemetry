@@ -20,6 +20,7 @@ const FLAG_THRESHOLD = 0.55;
 const FLAG_MIN_GAMES = 30;
 const MATRIX_MIN_GAMES = 3;
 const MATRIX_MAX_DECKS = 30;
+const MATCHUP_FORMATS = new Set(['duel', '1v1']);
 const DEFAULT_EXCLUDED_PILOTS = new Set(['bot:easy']);
 
 const TABS = [
@@ -513,13 +514,18 @@ function profileBar(deck) {
 
 // ---------- matchups ----------
 function renderMatchups(data, decks) {
-  const withGames = decks.filter((deck) => deck.games > 0);
+  if (state.format && !isMatchupFormat(state.format)) {
+    renderMatchupFormatWarning(data);
+    return;
+  }
+
+  const withGames = matchupDecks(data, decks);
   if (withGames.length < 2) {
-    els.view.innerHTML = card(empty('Need at least two decks with duel games for a matchup matrix.'), 'panel');
+    els.view.innerHTML = card(empty('Need at least two decks with 1v1 games for a matchup matrix.'), 'panel');
     return;
   }
   if (matrixFocus && withGames.some((deck) => deck.deck === matrixFocus)) {
-    renderMatchupFocus(data, decks);
+    renderMatchupFocus(data, withGames);
     return;
   }
   matrixFocus = null;
@@ -548,7 +554,7 @@ function renderMatchups(data, decks) {
   els.view.innerHTML = `<div class="card panel">
     <div class="section-head">
       <div class="section-title">1v1 Matchup Matrix</div>
-      <div class="kicker">${kicker}</div>
+      <div class="kicker">Only 1v1 formats are shown here. ${kicker}</div>
     </div>
     <div class="mx-controls">
       <span class="mx-ctrl-label">Cells</span>
@@ -573,6 +579,71 @@ function renderMatchups(data, decks) {
       if (current) renderView(current);
     });
   }
+}
+
+
+function isMatchupFormat(format) {
+  return MATCHUP_FORMATS.has(String(format || '').toLowerCase());
+}
+
+function matchupFormats(data) {
+  return (data.formats || []).filter((format) => isMatchupFormat(format.format));
+}
+
+function renderMatchupFormatWarning(data) {
+  matrixFocus = null;
+  const selected = esc(selectedFormatLabel(data));
+  const choices = matchupFormats(data);
+  const buttons = choices.map((format) => {
+    const id = registerHandler(() => setFormat(format.format));
+    return `<button class="syn-tab" data-handler="${id}" type="button">${esc(format.label || format.format)}</button>`;
+  }).join('');
+
+  els.view.innerHTML = `<div class="card panel matchup-warning">
+    <div class="section-head">
+      <div>
+        <div class="section-title">1v1 Matchup Matrix</div>
+        <div class="kicker">Selected format: ${selected}</div>
+      </div>
+    </div>
+    <div class="empty"><strong>Must select 1v1 formats.</strong> Only 1v1 formats are shown here because matchup cells compare one deck against one opposing deck.</div>
+    ${choices.length ? `<div class="mx-controls" style="margin-top:12px"><span class="mx-ctrl-label">Switch to</span>${buttons}</div>` : ''}
+  </div>`;
+}
+
+function matchupDecks(data, decks) {
+  const byDeck = new Map(decks.map((deck) => [deck.deck, deck]));
+  const byDeckId = new Map(decks.map((deck) => [deck.deckId, deck]));
+  const totals = new Map();
+  for (const row of data.matchups || []) {
+    const entry = totals.get(row.rowDeck) || {
+      deck: row.rowDeck,
+      deckId: row.rowDeckId,
+      label: byDeck.get(row.rowDeck)?.label || byDeckId.get(row.rowDeckId)?.label || labelForDeckId(row.rowDeckId),
+      games: 0,
+      wins: 0,
+    };
+    entry.games += Number(row.games || 0);
+    entry.wins += Number(row.wins || 0);
+    totals.set(row.rowDeck, entry);
+  }
+  return [...totals.values()]
+    .map((entry) => {
+      const decorated = byDeck.get(entry.deck) || {};
+      const games = entry.games;
+      const wins = entry.wins;
+      return {
+        ...decorated,
+        ...entry,
+        games,
+        wins,
+        winRate: games > 0 ? wins / games : 0,
+        ciLow: state.format ? decorated.ciLow ?? null : null,
+        ciHigh: state.format ? decorated.ciHigh ?? null : null,
+      };
+    })
+    .filter((deck) => deck.games > 0)
+    .sort((a, b) => b.games - a.games || a.label.localeCompare(b.label));
 }
 
 function focusMatchup(deckFull) {
