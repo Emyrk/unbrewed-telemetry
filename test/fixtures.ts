@@ -44,6 +44,10 @@ export function sampleGame(overrides: Partial<GameSubmission> = {}): GameSubmiss
     engine: { schemaVersion: 3, dslVersion: '0.18.0', protocolVersion: 12, contentVersion: 'test' },
     stateHash: 'test-state-hash-001',
     telemetry: {
+      startingHands: [
+        { seat: [0, 0], cards: ['crushing-blow', 'iron-guard', 'cruel-bargain', 'giant-slam', 'skull-island'] },
+        { seat: [1, 0], cards: ['sidestep', 'sudden-lunge', 'whistling-birds', 'jetpack', 'beskar-armor'] },
+      ],
       cardsPlayed: [
         { seat: [0, 0], card: 'crushing-blow', turn: 2, context: 'attack' },
         { seat: [0, 0], card: 'crushing-blow', turn: 5, context: 'attack' },

@@ -4,6 +4,7 @@ import type {
   NormalizedCard,
   NormalizedGame,
   NormalizedSeat,
+  NormalizedStartingCard,
   NormalizedTeam,
 } from '../types.js';
 
@@ -98,6 +99,26 @@ export function normalizeSubmission(
   const seatIndex = new Map<string, NormalizedSeat>();
   for (const seat of seats) seatIndex.set(`${seat.teamIndex}:${seat.seatIndex}`, seat);
 
+  const startingCards: NormalizedStartingCard[] = [];
+  const startingHands = submission.telemetry?.startingHands ?? [];
+  startingHands.forEach((entry) => {
+    const [teamIndex, seatIdx] = entry.seat;
+    const seat = seatIndex.get(`${teamIndex}:${seatIdx}`);
+    if (!seat) return; // semantic validation rejects unknown seats before ingest
+    entry.cards.forEach((card, cardIndex) => {
+      startingCards.push({
+        gameId,
+        teamIndex,
+        seatIndex: seatIdx,
+        cardIndex,
+        deck: seat.deck,
+        deckId: seat.deckId,
+        card,
+        seatWon: winnerTeam === teamIndex,
+      });
+    });
+  });
+
   const cards: NormalizedCard[] = [];
   const cardsPlayed = submission.telemetry?.cardsPlayed ?? [];
   cardsPlayed.forEach((event, eventIndex) => {
@@ -145,5 +166,6 @@ export function normalizeSubmission(
     teams,
     seats,
     cards,
+    startingCards,
   };
 }

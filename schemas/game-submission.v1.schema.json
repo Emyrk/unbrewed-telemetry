@@ -194,6 +194,21 @@
             }
           }
         },
+        "startingHands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["seat", "cards"],
+            "additionalProperties": false,
+            "properties": {
+              "seat": { "$ref": "#/$defs/seatRef" },
+              "cards": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        },
         "damageDealt": {
           "type": "array",
           "items": {

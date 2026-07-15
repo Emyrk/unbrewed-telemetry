@@ -41,6 +41,13 @@ function semanticErrors(submission: GameSubmission): string[] {
       errors.push(`/telemetry/cardsPlayed/${i}/seat: seat does not exist`);
     }
   }
+  const startingHands = submission.telemetry?.startingHands ?? [];
+  for (let i = 0; i < startingHands.length; i++) {
+    const entry = startingHands[i]!;
+    if (!seatExists(submission, entry.seat)) {
+      errors.push(`/telemetry/startingHands/${i}/seat: seat does not exist`);
+    }
+  }
   const damageDealt = submission.telemetry?.damageDealt ?? [];
   for (let i = 0; i < damageDealt.length; i++) {
     const event = damageDealt[i]!;
