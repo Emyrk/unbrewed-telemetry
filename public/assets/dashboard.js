@@ -19,7 +19,7 @@ const COLORS = {
 const FLAG_THRESHOLD = 0.55;
 const FLAG_MIN_GAMES = 30;
 const MATRIX_MIN_GAMES = 3;
-const MATRIX_MAX_DECKS = 16;
+const MATRIX_MAX_DECKS = 30;
 
 const TABS = [
   ['overview', 'Overview'],
@@ -428,7 +428,9 @@ function renderMatchups(data, decks) {
       ${legendSwatch('rgba(224,121,106,0.65)', 'Row loses')}
       ${legendSwatch('rgba(255,255,255,0.1)', 'Even')}
       ${legendSwatch('rgba(126,203,143,0.65)', 'Row wins')}
-      <span class="legend-spacer">Click a row to focus that deck's matchups</span>
+      <span class="legend-spacer">${top.length < withGames.length
+        ? `Showing top ${top.length} of ${withGames.length} decks by games · click a row to focus`
+        : `Click a row to focus that deck's matchups`}</span>
     </div>
   </div>`;
 }
