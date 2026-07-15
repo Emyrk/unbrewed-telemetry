@@ -112,10 +112,23 @@ function statsQuery() {
 }
 
 // ---------- data loading ----------
+// Very short client cache so toggling filters back and forth is instant without
+// hammering the (multi-query) dashboard endpoint. Data still refreshes within TTL.
+const dashCache = new Map();
+const DASH_TTL_MS = 15000;
+
 async function loadDashboard() {
   setStatus('Loading telemetry…');
   const params = statsQuery();
-  const json = await fetchJson(`/v1/stats/dashboard${params.toString() ? `?${params}` : ''}`);
+  const key = params.toString();
+  const cached = dashCache.get(key);
+  let json;
+  if (cached && Date.now() - cached.at < DASH_TTL_MS) {
+    json = cached.json;
+  } else {
+    json = await fetchJson(`/v1/stats/dashboard${key ? `?${key}` : ''}`);
+    dashCache.set(key, { at: Date.now(), json });
+  }
   current = json;
   if (allPilots.length === 0) {
     allPilots = (json.pilots || []).map((row) => row.pilot);
