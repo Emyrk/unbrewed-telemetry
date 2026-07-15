@@ -968,12 +968,13 @@ export class PgTelemetryRepository {
       this.deckCompositionMap(),
     ]);
 
-    const [formats, maps, matchups, twoVTwo, cards, broadBase] = await Promise.all([
+    const [formats, maps, matchups, twoVTwo, cards, startingCards, broadBase] = await Promise.all([
       this.deckFormatRows(deck, pilotFilter),
       this.deckMapRows(deck, pilotFilter),
       this.deckMatchupRows(deck, pilotFilter),
       this.deckTwoVTwoRows(deck, pilotFilter),
       this.deckCardRows(deck, pilotFilter),
+      this.deckStartingCardRows(deck, pilotFilter),
       this.pool.query<{ games: number; wins: number }>(
         `
           WITH broad_games AS (SELECT g.* FROM games g WHERE ${pilotFilterSql(1)})
@@ -1011,6 +1012,11 @@ export class PgTelemetryRepository {
       maps,
       matchups,
       twoVTwo,
+      startingCards: startingCards.map((card) => ({
+        ...card,
+        baselineWinRate: baseline,
+        influence: card.winRateWith - baseline,
+      })),
       cards: cards.map((card) => ({
         ...card,
         baselineWinRate: baseline,
@@ -1270,6 +1276,45 @@ export class PgTelemetryRepository {
         card: row.card,
         contextBucket: row.bucket,
         plays: Number(row.plays),
+        gamesWith,
+        winsWith,
+        winRateWith: gamesWith > 0 ? winsWith / gamesWith : 0,
+      };
+    });
+  }
+
+  private async deckStartingCardRows(
+    deck: string,
+    pilotFilter: string[] | null,
+  ): Promise<Omit<DeckDetailResponse['startingCards'][number], 'baselineWinRate' | 'influence'>[]> {
+    const rows = await this.pool.query<{
+      card: string;
+      starts: number;
+      games_with: number;
+      wins_with: number;
+    }>(
+      `
+        WITH broad_games AS (SELECT g.* FROM games g WHERE ${pilotFilterSql(1)})
+        SELECT
+          c.card,
+          COUNT(*)::int AS starts,
+          COUNT(DISTINCT c.game_id || ':' || c.team_index || ':' || c.seat_index)::int AS games_with,
+          COUNT(DISTINCT c.game_id || ':' || c.team_index || ':' || c.seat_index) FILTER (WHERE c.seat_won)::int AS wins_with
+        FROM game_starting_cards c
+        JOIN broad_games g ON g.id = c.game_id
+        WHERE c.deck = $2
+        GROUP BY c.card
+        ORDER BY starts DESC, c.card ASC
+      `,
+      [pilotFilter, deck],
+    );
+    return rows.rows.map((row) => {
+      const gamesWith = Number(row.games_with);
+      const winsWith = Number(row.wins_with);
+      return {
+        card: row.card,
+        contextBucket: 'other',
+        plays: Number(row.starts),
         gamesWith,
         winsWith,
         winRateWith: gamesWith > 0 ? winsWith / gamesWith : 0,

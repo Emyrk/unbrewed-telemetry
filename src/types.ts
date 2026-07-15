@@ -497,5 +497,6 @@ export interface DeckDetailResponse {
   maps: DeckMapWinRate[];
   matchups: DeckMatchupWinRate[];
   twoVTwo: DeckTwoVTwoSummary;
+  startingCards: DeckCardInfluence[];
   cards: DeckCardInfluence[];
 }

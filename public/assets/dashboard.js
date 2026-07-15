@@ -44,6 +44,7 @@ const BUCKET_META = {
 };
 
 const TWO_V_TWO_MODE_KEY = 'unbrewed.twoVTwoPartnerMode';
+const CARD_INFLUENCE_MODE_KEY = 'unbrewed.cardInfluenceMode';
 const state = readStateFromUrl();
 const sort = { key: 'wr', dir: -1 };
 
@@ -58,6 +59,7 @@ const els = {
   modalRoot: document.querySelector('#modal-root'),
 };
 
+let cardInfluenceMode = readStoredCardInfluenceMode();
 let twoVTwoMode = readStoredTwoVTwoMode();
 let current = null;
 let allPilots = [];
@@ -119,6 +121,20 @@ function writeStateToUrl() {
 function normalizedParam(value) {
   if (!value || value === 'all') return null;
   return value;
+}
+
+function readStoredCardInfluenceMode() {
+  try {
+    return localStorage.getItem(CARD_INFLUENCE_MODE_KEY) === 'starting' ? 'starting' : 'played';
+  } catch {
+    return 'played';
+  }
+}
+
+function setCardInfluenceMode(mode) {
+  cardInfluenceMode = mode === 'starting' ? 'starting' : 'played';
+  try { localStorage.setItem(CARD_INFLUENCE_MODE_KEY, cardInfluenceMode); } catch {}
+  renderDeckPage().catch(showError);
 }
 
 function readStoredTwoVTwoMode() {
@@ -1058,6 +1074,17 @@ async function renderDeckPage() {
     </div>`;
   };
   const backId = registerHandler(exitDeckPage);
+  const influenceMode = cardInfluenceMode === 'starting' ? 'starting' : 'played';
+  const playedInfluenceId = registerHandler(() => setCardInfluenceMode('played'));
+  const startingInfluenceId = registerHandler(() => setCardInfluenceMode('starting'));
+  const influenceRows = influenceMode === 'starting' ? (d.startingCards || []) : (d.cards || []);
+  const influenceKicker = influenceMode === 'starting'
+    ? "Δ win rate when the card starts in hand vs the deck's baseline"
+    : "Δ win rate when the card is played vs the deck's baseline";
+  const influenceEmpty = influenceMode === 'starting'
+    ? 'No starting-hand telemetry for this deck.'
+    : 'No played-card telemetry for this deck.';
+  const influenceLabel = influenceMode === 'starting' ? 'starts' : 'plays';
 
   els.view.innerHTML = `<div class="deck-page">
     <button class="mx-back" data-handler="${backId}" type="button">◀ Back</button>
@@ -1097,10 +1124,16 @@ async function renderDeckPage() {
       </div>
       <div class="modal-section" style="padding-bottom:6px">
         <div class="section-head">
-          <div class="sub-title" style="margin-top:0">Card influence</div>
-          <div class="kicker">Δ win rate when the card is played vs the deck's baseline</div>
+          <div>
+            <div class="sub-title" style="margin-top:0">Card influence</div>
+            <div class="kicker">${esc(influenceKicker)}</div>
+          </div>
+          <div class="syn-tabs">
+            <button class="syn-tab${influenceMode === 'played' ? ' active' : ''}" data-handler="${playedInfluenceId}" type="button">Played</button>
+            <button class="syn-tab${influenceMode === 'starting' ? ' active' : ''}" data-handler="${startingInfluenceId}" type="button">Starting hand</button>
+          </div>
         </div>
-        <div class="list tight" style="margin-top:9px;gap:0">${(d.cards || []).map(cardInflRow).join('') || empty('No card telemetry for this deck.')}</div>
+        <div class="list tight" style="margin-top:9px;gap:0">${influenceRows.map((row) => cardInflRow(row, influenceLabel)).join('') || empty(influenceEmpty)}</div>
       </div>
     </div>
   </div>`;
@@ -1271,17 +1304,20 @@ function mapLine(row) {
   </div>`;
 }
 
-function cardInflRow(card) {
+function cardInflRow(card, countLabel = 'plays') {
   const meta = BUCKET_META[card.contextBucket] || BUCKET_META.other;
+  const isStarting = countLabel === 'starts';
+  const typeTag = isStarting ? 'HAND' : meta.tag;
+  const contextLabel = isStarting ? 'opening hand' : card.contextBucket;
   const infl = card.influence;
   const inflColor = infl > 0.02 ? COLORS.green : infl < -0.02 ? '#e89286' : COLORS.muted;
   const inflBg = infl > 0.02 ? 'rgba(126,203,143,0.2)' : infl < -0.02 ? 'rgba(224,121,106,0.2)' : 'rgba(255,255,255,0.08)';
   const barW = Math.min(100, Math.abs(infl) / 0.1 * 100).toFixed(1);
   return `<div class="card-infl-row">
-    <span class="type" style="color:${meta.color}">${meta.tag}</span>
+    <span class="type" style="color:${meta.color}">${typeTag}</span>
     <span class="cname">${esc(card.card)}</span>
-    <span class="meta">${esc(card.contextBucket)} · ${number(card.gamesWith)}g</span>
-    <span class="plays">${number(card.plays)} pl</span>
+    <span class="meta">${esc(contextLabel)} · ${number(card.gamesWith)}g</span>
+    <span class="plays">${number(card.plays)} ${esc(countLabel)}</span>
     <span class="bar-track" style="height:6px"><span class="bar-fill" style="width:${barW}%;background:${inflColor};opacity:0.7"></span></span>
     <span style="text-align:right"><span class="infl-badge" style="background:${inflBg};color:${inflColor}">${signedPct(infl)}</span></span>
   </div>`;
