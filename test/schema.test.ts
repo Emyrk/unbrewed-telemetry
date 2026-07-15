@@ -38,6 +38,20 @@ describe('game submission schema', () => {
     expect(loser).toMatchObject({ seatWon: false, contextBucket: 'defense' });
   });
 
+  it('normalizes starting-hand telemetry into deck-attributed card rows', () => {
+    const normalized = normalizeSubmission(sampleGame(), 'idem-1');
+    expect(normalized.startingCards).toHaveLength(10);
+    expect(normalized.startingCards[0]).toMatchObject({
+      cardIndex: 0,
+      deck: 'king-kong@0.1.0',
+      deckId: 'king-kong',
+      card: 'crushing-blow',
+      seatWon: true,
+    });
+    const loser = normalized.startingCards.find((card) => card.deckId === 'the-mandalorian');
+    expect(loser).toMatchObject({ seatWon: false });
+  });
+
   it('drops card events for seats that do not exist', () => {
     const game = sampleGame();
     game.telemetry = { cardsPlayed: [{ seat: [5, 0], card: 'ghost', context: 'attack' }] };

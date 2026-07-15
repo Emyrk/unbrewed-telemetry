@@ -19,6 +19,7 @@ import type {
   NormalizedCard,
   NormalizedGame,
   NormalizedSeat,
+  NormalizedStartingCard,
   NormalizedTeam,
   RecentGame,
   RecentGamesResponse,
@@ -83,6 +84,7 @@ export class PgTelemetryRepository {
       await insertTeams(client, normalized.teams);
       await insertSeats(client, normalized.seats);
       await insertCards(client, normalized.cards);
+      await insertStartingCards(client, normalized.startingCards);
       await client.query('COMMIT');
       return { kind: 'created', submissionId, gameId: normalized.id };
     } catch (error) {
@@ -1504,6 +1506,30 @@ async function insertSeats(client: PoolClient, seats: NormalizedSeat[]): Promise
         seat.finalDeckCount,
         seat.finalHandCount,
         seat.finalDiscardCount,
+      ],
+    );
+  }
+}
+
+
+async function insertStartingCards(client: PoolClient, cards: NormalizedStartingCard[]): Promise<void> {
+  for (const card of cards) {
+    await client.query(
+      `
+        INSERT INTO game_starting_cards (
+          game_id, team_index, seat_index, card_index, deck, deck_id, card, seat_won
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `,
+      [
+        card.gameId,
+        card.teamIndex,
+        card.seatIndex,
+        card.cardIndex,
+        card.deck,
+        card.deckId,
+        card.card,
+        card.seatWon,
       ],
     );
   }

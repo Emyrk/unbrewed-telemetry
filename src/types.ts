@@ -53,6 +53,7 @@ export interface SeatSubmission {
 
 export interface TelemetrySubmission {
   cardsPlayed?: { seat: [number, number]; card: string; turn?: number; context?: string }[];
+  startingHands?: { seat: [number, number]; cards: string[] }[];
   damageDealt?: { seat: [number, number]; total: number }[];
   finalHealth?: number[][];
 }
@@ -83,6 +84,7 @@ export interface NormalizedGame {
   teams: NormalizedTeam[];
   seats: NormalizedSeat[];
   cards: NormalizedCard[];
+  startingCards: NormalizedStartingCard[];
 }
 
 export interface NormalizedTeam {
@@ -93,6 +95,17 @@ export interface NormalizedTeam {
 }
 
 export type CardContextBucket = 'attack' | 'defense' | 'scheme' | 'boost' | 'discard' | 'other';
+
+export interface NormalizedStartingCard {
+  gameId: string;
+  teamIndex: number;
+  seatIndex: number;
+  cardIndex: number;
+  deck: string;
+  deckId: string;
+  card: string;
+  seatWon: boolean;
+}
 
 export interface NormalizedCard {
   gameId: string;

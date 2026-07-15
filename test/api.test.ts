@@ -85,6 +85,9 @@ describeDb('telemetry api with postgres', () => {
     expect(duplicate.status).toBe(200);
     expect(await duplicate.json()).toMatchObject({ ok: true, duplicate: true, gameId: 'api-game-001' });
 
+    const startingRows = await pool.query<{ count: string }>('SELECT COUNT(*) AS count FROM game_starting_cards WHERE game_id = $1', ['api-game-001']);
+    expect(Number(startingRows.rows[0]?.count ?? 0)).toBe(10);
+
     const stats = await fetch(`${baseUrl}/v1/stats/decks?format=duel&pilots=bot:hard`);
     expect(stats.status).toBe(200);
     const json = await stats.json() as {
