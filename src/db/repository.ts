@@ -385,17 +385,18 @@ export class PgTelemetryRepository {
             AND ${pilotFilterSql()}
         )
         SELECT
-          s.deck,
+          -- pick the versioned deck string with the most games for composition lookups
+          MODE() WITHIN GROUP (ORDER BY s.deck) AS deck,
           s.deck_id,
-          s.deck_version,
+          MODE() WITHIN GROUP (ORDER BY s.deck_version) AS deck_version,
           MAX(s.hero_id) FILTER (WHERE s.hero_id IS NOT NULL) AS hero_id,
           MAX(s.hero_name) FILTER (WHERE s.hero_name IS NOT NULL) AS hero_name,
           COUNT(*)::int AS games,
           COUNT(*) FILTER (WHERE s.won)::int AS wins
         FROM game_seats s
         JOIN filtered_games g ON g.id = s.game_id
-        GROUP BY s.deck, s.deck_id, s.deck_version
-        ORDER BY games DESC, s.deck ASC
+        GROUP BY s.deck_id
+        ORDER BY games DESC, s.deck_id ASC
       `,
       [format, pilotFilter],
     );
@@ -657,9 +658,9 @@ export class PgTelemetryRepository {
           WHERE row_seat.seat_index = 0 AND col_seat.seat_index = 0
         )
         SELECT
-          row_deck,
+          MODE() WITHIN GROUP (ORDER BY row_deck) AS row_deck,
           row_deck_id,
-          col_deck,
+          MODE() WITHIN GROUP (ORDER BY col_deck) AS col_deck,
           col_deck_id,
           COUNT(*)::int AS games,
           COUNT(*) FILTER (WHERE won)::int AS wins,
@@ -667,8 +668,8 @@ export class PgTelemetryRepository {
           AVG(final_health)::float8 AS avg_final_health,
           AVG(final_deck_count)::float8 AS avg_cards_left
         FROM oriented
-        GROUP BY row_deck, row_deck_id, col_deck, col_deck_id
-        ORDER BY games DESC, row_deck ASC, col_deck ASC
+        GROUP BY row_deck_id, col_deck_id
+        ORDER BY games DESC, row_deck_id ASC, col_deck_id ASC
       `,
       [format, pilotFilter],
     );
@@ -709,18 +710,18 @@ export class PgTelemetryRepository {
             AND ${pilotFilterSql()}
         ), seat_stats AS (
           SELECT
-            s.deck,
+            s.deck_id,
             COUNT(*)::float8 AS games,
             COUNT(*) FILTER (WHERE s.won)::float8 AS wins
           FROM game_seats s
           JOIN twos g ON g.id = s.game_id
-          GROUP BY s.deck
+          GROUP BY s.deck_id
         ), pairs AS (
           SELECT
-            CASE WHEN a.deck <= b.deck THEN a.deck ELSE b.deck END AS deck_a,
-            CASE WHEN a.deck <= b.deck THEN a.deck_id ELSE b.deck_id END AS deck_a_id,
-            CASE WHEN a.deck <= b.deck THEN b.deck ELSE a.deck END AS deck_b,
-            CASE WHEN a.deck <= b.deck THEN b.deck_id ELSE a.deck_id END AS deck_b_id,
+            CASE WHEN a.deck_id <= b.deck_id THEN a.deck ELSE b.deck END AS deck_a,
+            CASE WHEN a.deck_id <= b.deck_id THEN a.deck_id ELSE b.deck_id END AS deck_a_id,
+            CASE WHEN a.deck_id <= b.deck_id THEN b.deck ELSE a.deck END AS deck_b,
+            CASE WHEN a.deck_id <= b.deck_id THEN b.deck_id ELSE a.deck_id END AS deck_b_id,
             a.won
           FROM twos g
           JOIN game_seats a ON a.game_id = g.id
@@ -729,18 +730,18 @@ export class PgTelemetryRepository {
             AND b.seat_index > a.seat_index
         )
         SELECT
-          p.deck_a,
+          MODE() WITHIN GROUP (ORDER BY p.deck_a) AS deck_a,
           p.deck_a_id,
-          p.deck_b,
+          MODE() WITHIN GROUP (ORDER BY p.deck_b) AS deck_b,
           p.deck_b_id,
           COUNT(*)::int AS games,
           COUNT(*) FILTER (WHERE p.won)::int AS wins,
           ((COALESCE(sa.wins / NULLIF(sa.games, 0), 0.5) + COALESCE(sb.wins / NULLIF(sb.games, 0), 0.5)) / 2)::float8 AS expected_win_rate
         FROM pairs p
-        LEFT JOIN seat_stats sa ON sa.deck = p.deck_a
-        LEFT JOIN seat_stats sb ON sb.deck = p.deck_b
-        GROUP BY p.deck_a, p.deck_a_id, p.deck_b, p.deck_b_id, expected_win_rate
-        ORDER BY games DESC, deck_a ASC, deck_b ASC
+        LEFT JOIN seat_stats sa ON sa.deck_id = p.deck_a_id
+        LEFT JOIN seat_stats sb ON sb.deck_id = p.deck_b_id
+        GROUP BY p.deck_a_id, p.deck_b_id, expected_win_rate
+        ORDER BY games DESC, deck_a_id ASC, deck_b_id ASC
       `,
       [format, pilotFilter],
     );
@@ -957,15 +958,15 @@ export class PgTelemetryRepository {
           JOIN game_seats opp ON opp.game_id = g.id AND opp.seat_index = 0 AND opp.team_index <> me.team_index
         )
         SELECT
-          opp_deck,
+          MODE() WITHIN GROUP (ORDER BY opp_deck) AS opp_deck,
           opp_deck_id,
           MAX(hero_name) AS hero_name,
           MAX(hero_id) AS hero_id,
           COUNT(*)::int AS games,
           COUNT(*) FILTER (WHERE won)::int AS wins
         FROM oriented
-        GROUP BY opp_deck, opp_deck_id
-        ORDER BY games DESC, opp_deck ASC
+        GROUP BY opp_deck_id
+        ORDER BY games DESC, opp_deck_id ASC
       `,
       [pilotFilter, deck],
     );
