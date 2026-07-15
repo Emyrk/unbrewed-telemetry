@@ -90,10 +90,12 @@ function readStateFromUrl() {
   const params = new URLSearchParams(location.search);
   const hasExplicitExclusions = params.has('exclude');
   const exclude = params.get('exclude');
+  const require = params.get('require');
   return {
     tab: params.get('tab') || 'overview',
     format: normalizedParam(params.get('format')),
     excluded: new Set(exclude ? exclude.split(',').map((v) => v.trim()).filter(Boolean) : []),
+    required: new Set(require ? require.split(',').map((v) => v.trim()).filter(Boolean) : []),
     hasExplicitExclusions,
     deck: params.get('deck') || null,
     pair: params.get('pair') || null,
@@ -113,6 +115,7 @@ function writeStateToUrl() {
   if (state.tab !== 'overview') params.set('tab', state.tab);
   if (state.format) params.set('format', state.format);
   if (state.excluded.size) params.set('exclude', [...state.excluded].join(','));
+  if (state.required.size) params.set('require', [...state.required].join(','));
   if (state.deck) params.set('deck', state.deck);
   if (state.pair) params.set('pair', state.pair);
   if (state.scenario?.format) params.set('scFormat', state.scenario.format);
@@ -162,10 +165,20 @@ function setTwoVTwoMode(mode, summary) {
   }
 }
 
-// Pilots to send to the API: the set that is *not* excluded. Empty = no filter.
+// Pilots selected for the broad API allow-list: the set that is *not* excluded.
+// Empty means no broad pilot filter unless a MUST filter is active.
 function includedPilots() {
   if (!state.excluded.size) return [];
   return allPilots.filter((pilot) => !state.excluded.has(pilot));
+}
+
+function pilotQueryValues() {
+  const included = state.excluded.size ? includedPilots() : [...allPilots];
+  const required = [...state.required]
+    .filter((pilot) => !state.excluded.has(pilot))
+    .map((pilot) => `must:${pilot}`);
+  if (!state.excluded.size && required.length === 0) return [];
+  return included.concat(required);
 }
 
 function applyDefaultPilotExclusions() {
@@ -184,7 +197,7 @@ function applyDefaultPilotExclusions() {
 function statsQuery() {
   const params = new URLSearchParams();
   if (state.format) params.set('format', state.format);
-  const pilots = includedPilots();
+  const pilots = pilotQueryValues();
   if (pilots.length) params.set('pilots', pilots.join(','));
   return params;
 }
@@ -260,11 +273,16 @@ function renderControls(data) {
   const pilots = pilotOptions(data.pilots || []);
   els.pilotChips.innerHTML = pilots.map((pilot) => {
     const off = state.excluded.has(pilot.value);
+    const must = !off && state.required.has(pilot.value);
     const id = registerHandler(() => togglePilot(pilot.value));
     const title = off
-      ? 'Excluded — games with this pilot type are hidden. Click to include.'
-      : 'Included. Click to exclude games with this pilot type.';
-    return `<button class="pilot-chip${off ? ' off' : ''}" data-handler="${id}" type="button" title="${esc(title)}">${esc(pilot.label)}</button>`;
+      ? `Excluded — games with ${pilot.label} are hidden. Click to include ${pilot.label}.`
+      : must
+        ? `MUST include ${pilot.label} — matching games need at least one ${pilot.label} seat. Click to exclude ${pilot.label}.`
+        : `Included — games may include ${pilot.label}. Click to make this a MUST include filter.`;
+    const mode = must ? ' must' : off ? ' off' : '';
+    const label = must ? `MUST ${pilot.label}` : pilot.label;
+    return `<button class="pilot-chip${mode}" data-handler="${id}" type="button" title="${esc(title)}" aria-pressed="${must ? 'true' : 'false'}">${esc(label)}</button>`;
   }).join('');
   bindHandlers(els.pilotChips);
 }
@@ -290,8 +308,15 @@ function setFormat(format) {
 }
 
 function togglePilot(pilot) {
-  if (state.excluded.has(pilot)) state.excluded.delete(pilot);
-  else state.excluded.add(pilot);
+  if (state.excluded.has(pilot)) {
+    state.excluded.delete(pilot);
+  } else if (state.required.has(pilot)) {
+    state.required.delete(pilot);
+    state.excluded.add(pilot);
+  } else {
+    state.required.add(pilot);
+  }
+  if (state.excluded.has(pilot)) state.required.delete(pilot);
   writeStateToUrl();
   loadDashboard().catch(showError);
 }
@@ -893,7 +918,7 @@ async function fetchScenario(scenario) {
   if (scenario.partner) params.set('partner', scenario.partner);
   if (scenario.enemyA) params.set('enemyA', scenario.enemyA);
   if (scenario.enemyB) params.set('enemyB', scenario.enemyB);
-  const pilots = includedPilots();
+  const pilots = pilotQueryValues();
   if (pilots.length) params.set('pilots', pilots.join(','));
   const key = params.toString();
   const cached = scenarioCache.get(key);
@@ -1641,9 +1666,11 @@ function selectedFormatLabel(data) {
 }
 
 function pilotSummary() {
-  if (!state.excluded.size) return 'all pilots';
+  const must = [...state.required].filter((pilot) => !state.excluded.has(pilot));
+  const mustText = must.length ? `; must include ${must.map(pilotLabel).join(', ')}` : '';
+  if (!state.excluded.size) return `all pilots${mustText}`;
   const included = includedPilots();
-  return included.length ? `${included.length} pilot type${included.length === 1 ? '' : 's'}` : 'none';
+  return included.length ? `${included.length} pilot type${included.length === 1 ? '' : 's'}${mustText}` : 'none';
 }
 
 // ---------- handler registry ----------

@@ -102,6 +102,45 @@ describeDb('telemetry api with postgres', () => {
     expect(json.decks.find((deck) => deck.deck === 'the-mandalorian@0.1.0')).toMatchObject({ games: 1, wins: 0, winRate: 0 });
   });
 
+  it('supports MUST pilot filters', async () => {
+    await postGame(baseUrl, secret, sampleGame({ gameId: 'must-hard-001', stateHash: 'must-hard-state-001' }), 'must-hard-001');
+    await postGame(baseUrl, secret, sampleGame({
+      gameId: 'must-human-001',
+      stateHash: 'must-human-state-001',
+      teams: [
+        {
+          seats: [{
+            deck: 'king-kong@0.1.0',
+            pilot: 'human',
+            runtimePlayerId: 'p1',
+            heroId: 'king-kong',
+            finalHealth: 7,
+          }],
+        },
+        {
+          seats: [{
+            deck: 'the-mandalorian@0.1.0',
+            pilot: 'bot:hard',
+            runtimePlayerId: 'p2',
+            heroId: 'the-mandalorian',
+            botDifficulty: 'hard',
+            finalHealth: 0,
+          }],
+        },
+      ],
+    }), 'must-human-001');
+
+    const broad = await fetch(`${baseUrl}/v1/stats/decks?format=duel&pilots=human,bot:hard`);
+    expect(broad.status).toBe(200);
+    expect((await broad.json() as { totalGames: number }).totalGames).toBe(2);
+
+    const mustHuman = await fetch(`${baseUrl}/v1/stats/decks?format=duel&pilots=human,bot:hard,must:human`);
+    expect(mustHuman.status).toBe(200);
+    const json = await mustHuman.json() as { totalGames: number; decks: { deck: string; games: number }[] };
+    expect(json.totalGames).toBe(1);
+    expect(json.decks.find((deck) => deck.deck === 'king-kong@0.1.0')).toMatchObject({ games: 1 });
+  });
+
   it('returns dashboard aggregates for the UI', async () => {
     await postGame(baseUrl, secret, sampleGame({ gameId: 'dash-game-001', stateHash: 'dash-state-001' }), 'dash-game-001');
 
