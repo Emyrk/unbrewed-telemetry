@@ -353,6 +353,7 @@ body {
 }
 .deck-stat .subtle { font-size: 10.5px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
 .deck-stat .val { font: 600 20px var(--font-mono); margin-top: 3px; }
+.deck-stat-ci { font: 400 11px var(--font-mono); color: var(--muted-2); margin-top: 2px; }
 .deck-page .modal-section, .deck-page .modal-cols { padding-left: 0; padding-right: 0; }
 .deck-page .modal-section:first-of-type { padding-top: 6px; }
 

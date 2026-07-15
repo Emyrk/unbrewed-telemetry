@@ -903,7 +903,11 @@ async function renderDeckPage() {
         <div class="modal-wr" style="color:${wrColor(d.winRate)}">${pct(d.winRate)}</div>
       </div>
       <div class="deck-stats">
-        <div class="deck-stat"><div class="subtle">95% CI</div><div class="val mono" style="font-size:16px">${pct(d.ciLow, 0)}–${pct(d.ciHigh, 0)}</div></div>
+        <div class="deck-stat">
+          <div class="subtle">Overall</div>
+          <div class="val mono" style="color:${wrColor(d.winRate)}">${pct(d.winRate)}</div>
+          <div class="deck-stat-ci">95% CI ${pct(d.ciLow, 0)}–${pct(d.ciHigh, 0)}</div>
+        </div>
         <div class="deck-stat"><div class="subtle">Avg HP left</div><div class="val mono">${d.avgFinalHealth == null ? '—' : d.avgFinalHealth.toFixed(1)}</div></div>
         ${splitStat('Going first', fp.first)}
         ${splitStat('Going second', fp.second)}
