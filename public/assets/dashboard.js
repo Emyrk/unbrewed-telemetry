@@ -441,9 +441,10 @@ function renderMatchups(data, decks) {
       <span class="mx-ctrl-label">Cells</span>
       <button class="syn-tab${matrixMetric === 'wr' ? ' active' : ''}" data-handler="${wrId}" type="button">Win rate</button>
       <button class="syn-tab${matrixMetric === 'games' ? ' active' : ''}" data-handler="${gamesId}" type="button">Games played</button>
+      ${matrixMetric === 'games' ? `
       <span class="mx-ctrl-label" style="margin-left:14px">Sample target</span>
       <input class="mx-sample" type="number" min="1" step="5" value="${matrixSampleTarget}" title="Games needed for full-confidence color" aria-label="Sample target in games">
-      <span class="mx-ctrl-hint">games</span>
+      <span class="mx-ctrl-hint">games</span>` : ''}
     </div>
     <div class="matrix-scroll"><div class="matrix-inner">${cols}${rows}</div></div>
     <div class="legend">
