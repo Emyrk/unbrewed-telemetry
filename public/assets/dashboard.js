@@ -41,6 +41,7 @@ const BUCKET_META = {
   other: { tag: '—', color: '#9d87a6' },
 };
 
+const TWO_V_TWO_MODE_KEY = 'unbrewed.twoVTwoPartnerMode';
 const state = readStateFromUrl();
 const sort = { key: 'wr', dir: -1 };
 
@@ -55,6 +56,7 @@ const els = {
   modalRoot: document.querySelector('#modal-root'),
 };
 
+let twoVTwoMode = readStoredTwoVTwoMode();
 let current = null;
 let allPilots = [];
 let matrixFocus = null; // full deck id of the focused row on the Matchups tab, or null for the grid
@@ -99,6 +101,24 @@ function writeStateToUrl() {
 function normalizedParam(value) {
   if (!value || value === 'all') return null;
   return value;
+}
+
+function readStoredTwoVTwoMode() {
+  try {
+    return localStorage.getItem(TWO_V_TWO_MODE_KEY) === 'adjusted' ? 'adjusted' : 'raw';
+  } catch {
+    return 'raw';
+  }
+}
+
+function setTwoVTwoMode(mode, summary) {
+  twoVTwoMode = mode === 'adjusted' ? 'adjusted' : 'raw';
+  try { localStorage.setItem(TWO_V_TWO_MODE_KEY, twoVTwoMode); } catch {}
+  const section = els.view.querySelector('[data-two-v-two-section]');
+  if (section) {
+    section.outerHTML = twoVTwoSection(summary);
+    bindHandlers(els.view);
+  }
 }
 
 // Pilots to send to the API: the set that is *not* excluded. Empty = no filter.
@@ -961,24 +981,45 @@ function closeModal() {
 
 function twoVTwoSection(two) {
   const summary = two || { games: 0, wins: 0, winRate: null, partners: [] };
+  const mode = twoVTwoMode === 'adjusted' ? 'adjusted' : 'raw';
   const partners = summary.partners || [];
-  const ranked = [...partners].sort((a, b) => b.delta - a.delta || b.games - a.games);
-  const best = ranked.filter((p) => p.delta >= 0).slice(0, 5);
-  const worst = ranked.filter((p) => p.delta < 0).sort((a, b) => a.delta - b.delta || b.games - a.games).slice(0, 5);
-  const row = (p) => `<div class="partner-row">
-    <span class="name">${labelHtml(p.label, p.deckId)}</span>
-    <span class="g">${number(p.games)}g</span>
-    <span class="mono" style="color:${wrColor(p.winRate)}">${pct(p.winRate)}</span>
-    <span style="text-align:right"><span class="delta-badge ${p.delta > 0.03 ? 'delta-up' : p.delta < -0.03 ? 'delta-down' : 'delta-flat'}">${signedPct(p.delta)}</span></span>
-  </div>`;
+  const metric = (p) => mode === 'adjusted' ? (p.adjustedDelta ?? 0) : (p.rawDelta ?? p.delta ?? 0);
+  const ranked = [...partners].sort((a, b) => metric(b) - metric(a) || b.games - a.games);
+  const best = ranked.filter((p) => metric(p) >= 0).slice(0, 5);
+  const worst = ranked.filter((p) => metric(p) < 0).sort((a, b) => metric(a) - metric(b) || b.games - a.games).slice(0, 5);
+  const metricLabel = mode === 'adjusted' ? 'Adj Δ' : 'Raw Δ';
+  const kicker = mode === 'adjusted'
+    ? 'Opponent-adjusted Δ compares each game to the opposing pair’s smoothed strength estimate.'
+    : 'Raw partner stats are not opponent-adjusted; Δ is compared to this deck’s overall 2v2 win rate.';
+  const bestTitle = mode === 'adjusted' ? 'Best adjusted partner results' : 'Best raw partner results';
+  const worstTitle = mode === 'adjusted' ? 'Worst adjusted partner results' : 'Worst raw partner results';
+  const rawId = registerHandler(() => setTwoVTwoMode('raw', summary));
+  const adjustedId = registerHandler(() => setTwoVTwoMode('adjusted', summary));
+  const row = (p) => {
+    const value = metric(p);
+    const cls = value > 0.03 ? 'delta-up' : value < -0.03 ? 'delta-down' : 'delta-flat';
+    const note = mode === 'adjusted' ? ` · expected ${pct(p.expectedWinRate ?? 0.5)}` : '';
+    return `<div class="partner-row">
+      <span class="name">${labelHtml(p.label, p.deckId)}<span class="partner-note">${esc(note)}</span></span>
+      <span class="g">${number(p.games)}g</span>
+      <span class="mono" style="color:${wrColor(p.winRate)}">${pct(p.winRate)}</span>
+      <span style="text-align:right"><span class="delta-badge ${cls}" title="${esc(metricLabel)}">${signedPct(value)}</span></span>
+    </div>`;
+  };
   const col = (title, arr, kind) => `<div>
     <div class="syn-opp-title ${kind}">${title} <span class="kicker">(${arr.length})</span></div>
     ${arr.length ? arr.map(row).join('') : `<div class="empty">none yet</div>`}
   </div>`;
-  return `<div class="modal-section two-v-two-detail">
+  return `<div class="modal-section two-v-two-detail" data-two-v-two-section>
     <div class="section-head">
-      <div class="sub-title" style="margin-top:0">2v2 performance</div>
-      <div class="kicker">Partner Δ is compared to this deck's overall 2v2 win rate.</div>
+      <div>
+        <div class="sub-title" style="margin-top:0">2v2 performance</div>
+        <div class="kicker" style="margin-top:3px">${esc(kicker)}</div>
+      </div>
+      <div class="syn-toggle" style="padding:0">
+        <button class="syn-tab${mode === 'raw' ? ' active' : ''}" data-handler="${rawId}" type="button">Raw</button>
+        <button class="syn-tab${mode === 'adjusted' ? ' active' : ''}" data-handler="${adjustedId}" type="button">Opponent-adjusted</button>
+      </div>
     </div>
     <div class="deck-stats compact">
       <div class="deck-stat">
@@ -998,7 +1039,7 @@ function twoVTwoSection(two) {
       </div>
     </div>
     ${summary.games > 0
-      ? `<div class="partner-cols">${col('Pairs well with', best, 'good')}${col('Pairs poorly with', worst, 'bad')}</div>`
+      ? `<div class="partner-cols">${col(bestTitle, best, 'good')}${col(worstTitle, worst, 'bad')}</div>`
       : empty('No 2v2 games for this deck yet.')}
   </div>`;
 }

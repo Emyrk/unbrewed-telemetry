@@ -242,12 +242,27 @@ describeDb('telemetry api with postgres', () => {
         games: number;
         wins: number;
         winRate: number;
-        partners: { deck: string; games: number; wins: number; winRate: number; delta: number }[];
+        partners: {
+          deck: string;
+          games: number;
+          wins: number;
+          winRate: number;
+          delta: number;
+          rawDelta: number;
+          adjustedDelta: number;
+          expectedWinRate: number;
+        }[];
       };
     };
     expect(json.twoVTwo).toMatchObject({ games: 4, wins: 2, winRate: 0.5 });
-    expect(json.twoVTwo.partners.find((p) => p.deck === 'bravo@1.0.0')).toMatchObject({ games: 2, wins: 2, winRate: 1, delta: 0.5 });
-    expect(json.twoVTwo.partners.find((p) => p.deck === 'charlie@1.0.0')).toMatchObject({ games: 2, wins: 0, winRate: 0, delta: -0.5 });
+    const bravo = json.twoVTwo.partners.find((p) => p.deck === 'bravo@1.0.0');
+    expect(bravo).toMatchObject({ games: 2, wins: 2, winRate: 1, delta: 0.5, rawDelta: 0.5 });
+    expect(bravo?.expectedWinRate).toBeCloseTo(0.5227, 4);
+    expect(bravo?.adjustedDelta).toBeCloseTo(0.4773, 4);
+    const charlie = json.twoVTwo.partners.find((p) => p.deck === 'charlie@1.0.0');
+    expect(charlie).toMatchObject({ games: 2, wins: 0, winRate: 0, delta: -0.5, rawDelta: -0.5 });
+    expect(charlie?.expectedWinRate).toBeCloseTo(0.4773, 4);
+    expect(charlie?.adjustedDelta).toBeCloseTo(-0.4773, 4);
   });
 
   it('reports 2v2 synergy pair matchups (opposing pairs and decks)', async () => {
