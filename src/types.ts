@@ -444,7 +444,12 @@ export interface DeckTwoVTwoPartner {
   games: number;
   wins: number;
   winRate: number;
+  expectedWinRate: number;
+  /** Backward-compatible raw delta: partner win rate minus this deck's overall 2v2 win rate. */
   delta: number;
+  rawDelta: number;
+  /** Average actual result minus expected result against the opposing pair's smoothed strength. */
+  adjustedDelta: number;
 }
 
 export interface DeckTwoVTwoSummary {

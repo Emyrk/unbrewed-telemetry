@@ -1021,6 +1021,8 @@ export class PgTelemetryRepository {
         hero_id: string | null;
         games: number;
         wins: number;
+        expected_win_rate: number | null;
+        adjusted_delta: number | null;
       }>(
         `
           WITH twos AS (
@@ -1028,6 +1030,27 @@ export class PgTelemetryRepository {
             FROM games g
             WHERE g.format IN ('team-2v2', '2v2')
               AND ${pilotFilterSql(1)}
+          ), team_pairs AS (
+            SELECT
+              a.game_id,
+              a.team_index,
+              CASE WHEN a.deck_id <= b.deck_id THEN a.deck ELSE b.deck END AS deck_a,
+              CASE WHEN a.deck_id <= b.deck_id THEN a.deck_id ELSE b.deck_id END AS deck_a_id,
+              CASE WHEN a.deck_id <= b.deck_id THEN b.deck ELSE a.deck END AS deck_b,
+              CASE WHEN a.deck_id <= b.deck_id THEN b.deck_id ELSE a.deck_id END AS deck_b_id,
+              a.won
+            FROM twos g
+            JOIN game_seats a ON a.game_id = g.id
+            JOIN game_seats b ON b.game_id = g.id
+              AND b.team_index = a.team_index
+              AND b.seat_index > a.seat_index
+          ), pair_strength AS (
+            SELECT
+              deck_a_id,
+              deck_b_id,
+              ((COUNT(*) FILTER (WHERE won))::float8 + 5) / (COUNT(*)::float8 + 10) AS strength
+            FROM team_pairs
+            GROUP BY deck_a_id, deck_b_id
           ), me AS (
             SELECT s.game_id, s.team_index, s.seat_index, s.won
             FROM game_seats s
@@ -1039,11 +1062,15 @@ export class PgTelemetryRepository {
               partner.deck_id AS partner_deck_id,
               partner.hero_name,
               partner.hero_id,
-              me.won
+              me.won,
+              COALESCE(1 - ps.strength, 0.5) AS expected_win_rate
             FROM me
             JOIN game_seats partner ON partner.game_id = me.game_id
               AND partner.team_index = me.team_index
               AND partner.seat_index <> me.seat_index
+            JOIN team_pairs opp ON opp.game_id = me.game_id
+              AND opp.team_index <> me.team_index
+            LEFT JOIN pair_strength ps ON ps.deck_a_id = opp.deck_a_id AND ps.deck_b_id = opp.deck_b_id
           )
           SELECT
             MODE() WITHIN GROUP (ORDER BY partner_deck) AS partner_deck,
@@ -1051,7 +1078,9 @@ export class PgTelemetryRepository {
             MAX(hero_name) FILTER (WHERE hero_name IS NOT NULL) AS hero_name,
             MAX(hero_id) FILTER (WHERE hero_id IS NOT NULL) AS hero_id,
             COUNT(*)::int AS games,
-            COUNT(*) FILTER (WHERE won)::int AS wins
+            COUNT(*) FILTER (WHERE won)::int AS wins,
+            AVG(expected_win_rate)::float8 AS expected_win_rate,
+            AVG((CASE WHEN won THEN 1.0 ELSE 0.0 END) - expected_win_rate)::float8 AS adjusted_delta
           FROM partnered
           GROUP BY partner_deck_id
           ORDER BY games DESC, partner_deck_id ASC
@@ -1071,6 +1100,7 @@ export class PgTelemetryRepository {
         const partnerGames = Number(row.games);
         const partnerWins = Number(row.wins);
         const partnerWinRate = partnerGames > 0 ? partnerWins / partnerGames : 0;
+        const rawDelta = winRate == null ? 0 : partnerWinRate - winRate;
         return {
           deck: row.partner_deck,
           deckId: row.partner_deck_id,
@@ -1078,7 +1108,10 @@ export class PgTelemetryRepository {
           games: partnerGames,
           wins: partnerWins,
           winRate: partnerWinRate,
-          delta: winRate == null ? 0 : partnerWinRate - winRate,
+          expectedWinRate: row.expected_win_rate ?? 0.5,
+          rawDelta,
+          adjustedDelta: row.adjusted_delta ?? 0,
+          delta: rawDelta,
         };
       }),
     };
