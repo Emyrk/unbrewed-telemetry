@@ -424,6 +424,23 @@ export interface DeckCardInfluence {
   influence: number;
 }
 
+export interface DeckTwoVTwoPartner {
+  deck: string;
+  deckId: string;
+  label: string;
+  games: number;
+  wins: number;
+  winRate: number;
+  delta: number;
+}
+
+export interface DeckTwoVTwoSummary {
+  games: number;
+  wins: number;
+  winRate: number | null;
+  partners: DeckTwoVTwoPartner[];
+}
+
 export interface DeckDetailResponse {
   found: boolean;
   deck: string;
@@ -445,5 +462,6 @@ export interface DeckDetailResponse {
   formats: DeckFormatWinRate[];
   maps: DeckMapWinRate[];
   matchups: DeckMatchupWinRate[];
+  twoVTwo: DeckTwoVTwoSummary;
   cards: DeckCardInfluence[];
 }

@@ -847,10 +847,11 @@ export class PgTelemetryRepository {
       this.deckCompositionMap(),
     ]);
 
-    const [formats, maps, matchups, cards, broadBase] = await Promise.all([
+    const [formats, maps, matchups, twoVTwo, cards, broadBase] = await Promise.all([
       this.deckFormatRows(deck, pilotFilter),
       this.deckMapRows(deck, pilotFilter),
       this.deckMatchupRows(deck, pilotFilter),
+      this.deckTwoVTwoRows(deck, pilotFilter),
       this.deckCardRows(deck, pilotFilter),
       this.pool.query<{ games: number; wins: number }>(
         `
@@ -888,6 +889,7 @@ export class PgTelemetryRepository {
       formats,
       maps,
       matchups,
+      twoVTwo,
       cards: cards.map((card) => ({
         ...card,
         baselineWinRate: baseline,
@@ -991,6 +993,93 @@ export class PgTelemetryRepository {
         winRate: games > 0 ? wins / games : 0,
       };
     });
+  }
+
+  private async deckTwoVTwoRows(deck: string, pilotFilter: string[] | null): Promise<DeckDetailResponse['twoVTwo']> {
+    const [overall, partners] = await Promise.all([
+      this.pool.query<{ games: number; wins: number }>(
+        `
+          WITH twos AS (
+            SELECT g.*
+            FROM games g
+            WHERE g.format IN ('team-2v2', '2v2')
+              AND ${pilotFilterSql(1)}
+          )
+          SELECT COUNT(*)::int AS games, COUNT(*) FILTER (WHERE s.won)::int AS wins
+          FROM game_seats s
+          JOIN twos g ON g.id = s.game_id
+          WHERE s.deck = $2
+        `,
+        [pilotFilter, deck],
+      ),
+      this.pool.query<{
+        partner_deck: string;
+        partner_deck_id: string;
+        hero_name: string | null;
+        hero_id: string | null;
+        games: number;
+        wins: number;
+      }>(
+        `
+          WITH twos AS (
+            SELECT g.*
+            FROM games g
+            WHERE g.format IN ('team-2v2', '2v2')
+              AND ${pilotFilterSql(1)}
+          ), me AS (
+            SELECT s.game_id, s.team_index, s.seat_index, s.won
+            FROM game_seats s
+            JOIN twos g ON g.id = s.game_id
+            WHERE s.deck = $2
+          ), partnered AS (
+            SELECT
+              partner.deck AS partner_deck,
+              partner.deck_id AS partner_deck_id,
+              partner.hero_name,
+              partner.hero_id,
+              me.won
+            FROM me
+            JOIN game_seats partner ON partner.game_id = me.game_id
+              AND partner.team_index = me.team_index
+              AND partner.seat_index <> me.seat_index
+          )
+          SELECT
+            MODE() WITHIN GROUP (ORDER BY partner_deck) AS partner_deck,
+            partner_deck_id,
+            MAX(hero_name) FILTER (WHERE hero_name IS NOT NULL) AS hero_name,
+            MAX(hero_id) FILTER (WHERE hero_id IS NOT NULL) AS hero_id,
+            COUNT(*)::int AS games,
+            COUNT(*) FILTER (WHERE won)::int AS wins
+          FROM partnered
+          GROUP BY partner_deck_id
+          ORDER BY games DESC, partner_deck_id ASC
+        `,
+        [pilotFilter, deck],
+      ),
+    ]);
+
+    const games = Number(overall.rows[0]?.games ?? 0);
+    const wins = Number(overall.rows[0]?.wins ?? 0);
+    const winRate = games > 0 ? wins / games : null;
+    return {
+      games,
+      wins,
+      winRate,
+      partners: partners.rows.map((row) => {
+        const partnerGames = Number(row.games);
+        const partnerWins = Number(row.wins);
+        const partnerWinRate = partnerGames > 0 ? partnerWins / partnerGames : 0;
+        return {
+          deck: row.partner_deck,
+          deckId: row.partner_deck_id,
+          label: row.hero_name ?? row.hero_id ?? row.partner_deck_id,
+          games: partnerGames,
+          wins: partnerWins,
+          winRate: partnerWinRate,
+          delta: winRate == null ? 0 : partnerWinRate - winRate,
+        };
+      }),
+    };
   }
 
   private async deckCardRows(
