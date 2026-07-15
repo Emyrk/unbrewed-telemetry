@@ -20,6 +20,8 @@ import type {
   NormalizedGame,
   NormalizedSeat,
   NormalizedTeam,
+  RecentGame,
+  RecentGamesResponse,
   SplitStat,
   SynergyPairMatchupsResponse,
 } from '../types.js';
@@ -208,6 +210,96 @@ export class PgTelemetryRepository {
       avgTurns,
       decks,
     };
+  }
+
+  /** The most recently received games (filtered), with their teams/seats for a feed. */
+  async recentGames(filters: DeckStatsFilters, limit: number): Promise<RecentGamesResponse> {
+    const pilotFilter = filters.pilots.length > 0 ? filters.pilots : null;
+    const cappedLimit = Math.max(1, Math.min(200, limit));
+    const gamesResult = await this.pool.query<{
+      id: string;
+      received_at: Date;
+      ended_at: Date | null;
+      source: string;
+      format: string;
+      format_label: string | null;
+      map: string;
+      winner_team: number | null;
+      draw: boolean;
+      turns: number | null;
+    }>(
+      `
+        SELECT g.id, g.received_at, g.ended_at, g.source, g.format, g.format_label,
+               g.map, g.winner_team, g.draw, g.turns
+        FROM games g
+        WHERE ($1::text IS NULL OR g.format = $1)
+          AND ${pilotFilterSql()}
+        ORDER BY g.received_at DESC, g.id DESC
+        LIMIT $3
+      `,
+      [filters.format, pilotFilter, cappedLimit],
+    );
+    const ids = gamesResult.rows.map((row) => row.id);
+    if (ids.length === 0) return { games: [] };
+
+    const seatsResult = await this.pool.query<{
+      game_id: string;
+      team_index: number;
+      seat_index: number;
+      role: string | null;
+      deck: string;
+      deck_id: string;
+      hero_name: string | null;
+      pilot: string;
+      pilot_kind: 'human' | 'bot' | 'unknown';
+      won: boolean;
+    }>(
+      `
+        SELECT s.game_id, s.team_index, s.seat_index, t.role,
+               s.deck, s.deck_id, s.hero_name, s.pilot, s.pilot_kind, s.won
+        FROM game_seats s
+        LEFT JOIN game_teams t ON t.game_id = s.game_id AND t.team_index = s.team_index
+        WHERE s.game_id = ANY($1)
+        ORDER BY s.game_id, s.team_index, s.seat_index
+      `,
+      [ids],
+    );
+
+    const teamsByGame = new Map<string, Map<number, RecentGame['teams'][number]>>();
+    for (const row of seatsResult.rows) {
+      let teams = teamsByGame.get(row.game_id);
+      if (!teams) { teams = new Map(); teamsByGame.set(row.game_id, teams); }
+      let team = teams.get(row.team_index);
+      if (!team) {
+        team = { teamIndex: row.team_index, role: row.role, won: row.won, seats: [] };
+        teams.set(row.team_index, team);
+      }
+      team.seats.push({
+        teamIndex: row.team_index,
+        seatIndex: row.seat_index,
+        deck: row.deck,
+        deckId: row.deck_id,
+        heroName: row.hero_name,
+        pilot: row.pilot,
+        pilotKind: row.pilot_kind,
+        won: row.won,
+      });
+    }
+
+    const games: RecentGame[] = gamesResult.rows.map((row) => ({
+      gameId: row.id,
+      receivedAt: row.received_at.toISOString(),
+      endedAt: row.ended_at ? row.ended_at.toISOString() : null,
+      source: row.source,
+      format: row.format,
+      formatLabel: row.format_label ?? row.format,
+      map: row.map,
+      winnerTeam: row.winner_team,
+      draw: row.draw,
+      turns: row.turns,
+      teams: [...(teamsByGame.get(row.id)?.values() ?? [])].sort((a, b) => a.teamIndex - b.teamIndex),
+    }));
+    return { games };
   }
 
   async dashboardStats(filters: DeckStatsFilters, generatedAt = new Date()): Promise<DashboardStatsResponse> {

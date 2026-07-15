@@ -28,6 +28,7 @@ const TABS = [
   ['scatter', 'Pick vs Win'],
   ['formats', 'Formats'],
   ['synergy', '2v2 Synergy'],
+  ['recent', 'Recents'],
 ];
 
 // Card-context bucket presentation for the influence table.
@@ -204,6 +205,7 @@ function renderView(data) {
     return;
   }
   if (state.tab !== 'matchups') matrixFocus = null;
+  if (state.tab === 'recent') { renderRecent(); return; }
   const decks = decorateDecks(data.decks);
   if (state.tab === 'heroes') renderHeroes(data, decks);
   else if (state.tab === 'matchups') renderMatchups(data, decks);
@@ -632,6 +634,61 @@ function synergyRow(row) {
 // Opponent rows carry full deck ids (`id@version`); labelForDeckId keys on the id.
 function deckIdOf(deck) {
   return String(deck || '').split('@')[0];
+}
+
+// ---------- recents ----------
+async function renderRecent() {
+  els.view.innerHTML = card(empty('Loading recent games…'), 'panel');
+  let data;
+  try {
+    const params = statsQuery();
+    params.set('limit', '50');
+    data = await fetchJson(`/v1/stats/recent?${params}`);
+  } catch (error) {
+    els.view.innerHTML = card(empty('Failed to load recent games: ' + (error.message || '')), 'panel');
+    return;
+  }
+  const games = data.games || [];
+  const scoped = state.format || state.excluded.size ? 'matching this view' : 'uploaded';
+  els.view.innerHTML = `<div class="card panel">
+    <div class="section-head">
+      <div class="section-title">Recent games</div>
+      <div class="kicker">Last ${games.length} games ${scoped} · newest first · click a deck for its page</div>
+    </div>
+    <div class="recent-list">${games.length ? games.map(recentRow).join('') : empty('No games uploaded under the current filters.')}</div>
+  </div>`;
+  bindHandlers(els.view);
+}
+
+function recentRow(g) {
+  const teamHtml = (team) => {
+    const cls = g.draw ? 'recent-draw' : team.won ? 'recent-win' : 'recent-lose';
+    const names = team.seats.map((s) => {
+      const id = registerHandler(() => openDeck(s.deck));
+      return `<span class="recent-hero" data-handler="${id}">${labelHtml(s.heroName || deckIdOf(s.deck), s.deckId)}</span>`;
+    }).join(' + ');
+    return `<span class="${cls}">${names}</span>`;
+  };
+  const sep = g.draw ? '<span class="recent-vs">drew</span>' : '<span class="recent-vs">vs</span>';
+  const match = g.teams.map(teamHtml).join(sep);
+  const meta = [g.map, g.turns == null ? null : `${g.turns}t`, g.source].filter(Boolean).join(' · ');
+  return `<div class="recent-row">
+    <span class="recent-time" title="${esc(g.receivedAt)}">${timeAgo(g.receivedAt)}</span>
+    <span class="recent-fmt">${esc(g.formatLabel)}</span>
+    <span class="recent-match">${match}</span>
+    <span class="recent-meta">${esc(meta)}</span>
+  </div>`;
+}
+
+function timeAgo(iso) {
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return '';
+  const s = Math.max(0, (Date.now() - then) / 1000);
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  if (s < 2592000) return `${Math.floor(s / 86400)}d ago`;
+  return new Date(then).toISOString().slice(0, 10);
 }
 
 // ---------- synergy pair modal (deep-linkable via ?pair=deckA|deckB) ----------

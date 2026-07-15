@@ -521,6 +521,41 @@ body {
 .card-infl-row .plays { font-size: 11px; color: var(--muted); text-align: right; font-family: var(--font-mono); }
 .infl-badge { font: 600 11px var(--font-mono); padding: 2px 7px; border-radius: 4px; text-align: right; }
 
+/* ---------- Recents ---------- */
+.recent-list { margin-top: 12px; }
+.recent-row {
+  display: grid;
+  grid-template-columns: 72px 64px 1fr auto;
+  align-items: center;
+  gap: 14px;
+  padding: 9px 6px;
+  border-bottom: 1px solid var(--border);
+}
+.recent-row:hover { background: var(--hover); }
+.recent-time { font-size: 11.5px; color: var(--muted-2); font-family: var(--font-mono); }
+.recent-fmt {
+  font: 600 10.5px var(--font-body);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  padding: 2px 6px;
+  text-align: center;
+}
+.recent-match { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.recent-win { color: var(--green); font-weight: 600; }
+.recent-lose { color: var(--muted); }
+.recent-draw { color: var(--text); }
+.recent-hero { cursor: pointer; }
+.recent-hero:hover { text-decoration: underline; }
+.recent-vs { color: var(--muted-2); font-size: 11px; margin: 0 8px; }
+.recent-meta { font-size: 11.5px; color: var(--muted-2); font-family: var(--font-mono); text-align: right; }
+@media (max-width: 780px) {
+  .recent-row { grid-template-columns: 1fr auto; }
+  .recent-fmt, .recent-meta { display: none; }
+}
+
 /* ---------- Footer FAQ ---------- */
 .dash-footer { max-width: 1240px; margin: 0 auto; padding: 4px 28px 64px; }
 .footer-inner { border-top: 1px solid var(--border); padding-top: 20px; }

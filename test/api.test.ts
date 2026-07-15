@@ -254,6 +254,22 @@ describeDb('telemetry api with postgres', () => {
     expect(await response.json()).toMatchObject({ ok: false, code: 'MISSING_PAIR' });
   });
 
+  it('lists recent games with teams and seats', async () => {
+    await postGame(baseUrl, secret, sampleGame({ gameId: 'recent-001', stateHash: 'recent-001' }), 'recent-001');
+    const response = await fetch(`${baseUrl}/v1/stats/recent?limit=10`);
+    expect(response.status).toBe(200);
+    const json = await response.json() as {
+      games: { gameId: string; format: string; winnerTeam: number | null; teams: { won: boolean; seats: { deckId: string; won: boolean }[] }[] }[];
+    };
+    const game = json.games.find((g) => g.gameId === 'recent-001');
+    expect(game).toBeTruthy();
+    expect(game).toMatchObject({ format: 'duel', winnerTeam: 0 });
+    expect(game!.teams).toHaveLength(2);
+    expect(game!.teams[0]).toMatchObject({ won: true });
+    expect(game!.teams[0]!.seats[0]!.deckId).toBe('king-kong');
+    expect(game!.teams[1]).toMatchObject({ won: false });
+  });
+
   it('stores invalid submissions and returns validation errors', async () => {
     const response = await postRaw(baseUrl, secret, { schemaVersion: 1, format: 'duel', map: 'mended-drum', teams: [], winner: 0 }, 'bad-game-001');
     expect(response.status).toBe(400);

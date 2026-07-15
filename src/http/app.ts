@@ -75,6 +75,11 @@ async function handleRequest(
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/v1/stats/recent') {
+    await handleRecentGames(url, res, repo);
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/v1/admin/decks') {
     await handleAdminListDecks(req, res, repo, config);
     return;
@@ -210,6 +215,13 @@ async function handleDeckIngest(
 
   const result = await repo.upsertDeckDefinitions(parsed as DeckDefinitionSubmission, config.now());
   sendJson(res, 200, { ok: true, upserted: result.upserted });
+}
+
+async function handleRecentGames(url: URL, res: ServerResponse, repo: PgTelemetryRepository): Promise<void> {
+  const limitParam = Number(url.searchParams.get('limit'));
+  const limit = Number.isFinite(limitParam) && limitParam > 0 ? limitParam : 50;
+  const result = await repo.recentGames(statsFiltersFromUrl(url), limit);
+  sendJson(res, 200, { ok: true, ...result });
 }
 
 async function handleSynergyMatchups(url: URL, res: ServerResponse, repo: PgTelemetryRepository): Promise<void> {

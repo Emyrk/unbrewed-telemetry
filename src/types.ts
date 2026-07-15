@@ -340,6 +340,42 @@ export interface DeckStatsResponse {
   decks: DeckStat[];
 }
 
+export interface RecentGameSeat {
+  teamIndex: number;
+  seatIndex: number;
+  deck: string;
+  deckId: string;
+  heroName: string | null;
+  pilot: string;
+  pilotKind: 'human' | 'bot' | 'unknown';
+  won: boolean;
+}
+
+export interface RecentGameTeam {
+  teamIndex: number;
+  role: string | null;
+  won: boolean;
+  seats: RecentGameSeat[];
+}
+
+export interface RecentGame {
+  gameId: string;
+  receivedAt: string;
+  endedAt: string | null;
+  source: string;
+  format: string;
+  formatLabel: string;
+  map: string;
+  winnerTeam: number | null;
+  draw: boolean;
+  turns: number | null;
+  teams: RecentGameTeam[];
+}
+
+export interface RecentGamesResponse {
+  games: RecentGame[];
+}
+
 export interface SplitStat {
   games: number;
   wins: number;
