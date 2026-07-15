@@ -20,6 +20,7 @@ const FLAG_THRESHOLD = 0.55;
 const FLAG_MIN_GAMES = 30;
 const MATRIX_MIN_GAMES = 3;
 const MATRIX_MAX_DECKS = 30;
+const DEFAULT_EXCLUDED_PILOTS = new Set(['bot:easy']);
 
 const TABS = [
   ['overview', 'Overview'],
@@ -75,11 +76,13 @@ document.addEventListener('keydown', (event) => {
 // ---------- state / url ----------
 function readStateFromUrl() {
   const params = new URLSearchParams(location.search);
+  const hasExplicitExclusions = params.has('exclude');
   const exclude = params.get('exclude');
   return {
     tab: params.get('tab') || 'overview',
     format: normalizedParam(params.get('format')),
     excluded: new Set(exclude ? exclude.split(',').map((v) => v.trim()).filter(Boolean) : []),
+    hasExplicitExclusions,
     deck: params.get('deck') || null,
     pair: params.get('pair') || null,
   };
@@ -107,6 +110,19 @@ function includedPilots() {
   return allPilots.filter((pilot) => !state.excluded.has(pilot));
 }
 
+function applyDefaultPilotExclusions() {
+  if (state.hasExplicitExclusions) return false;
+  state.hasExplicitExclusions = true;
+  let changed = false;
+  for (const pilot of DEFAULT_EXCLUDED_PILOTS) {
+    if (allPilots.includes(pilot) && !state.excluded.has(pilot)) {
+      state.excluded.add(pilot);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 function statsQuery() {
   const params = new URLSearchParams();
   if (state.format) params.set('format', state.format);
@@ -128,10 +144,15 @@ async function loadDashboard() {
     json = await fetchJson(`/v1/stats/dashboard${key ? `?${key}` : ''}`);
     dashCache.set(key, { at: Date.now(), json });
   }
-  current = json;
   if (allPilots.length === 0) {
     allPilots = (json.pilots || []).map((row) => row.pilot);
+    if (applyDefaultPilotExclusions()) {
+      writeStateToUrl();
+      await loadDashboard();
+      return;
+    }
   }
+  current = json;
   els.heroTotal.textContent = number(json.totalGames);
   const fp = json.firstPlayer && json.firstPlayer.winRate != null ? ` · first player ${pct(json.firstPlayer.winRate, 0)}` : '';
   els.heroSubtitle.innerHTML = `<span class="sub"> · ${number(json.totalSubmissions)} submissions, ${number(json.invalidSubmissions)} invalid${esc(fp)}</span>`;
@@ -178,8 +199,12 @@ function pilotOptions(rows) {
 
 function pilotLabel(pilot) {
   if (pilot === 'human') return 'Human';
-  if (pilot.startsWith('bot:')) return `Bot: ${pilot.slice(4)}`;
+  if (pilot.startsWith('bot:')) return `Bot: ${titleCase(pilot.slice(4))}`;
   return pilot;
+}
+
+function titleCase(value) {
+  return value ? value.charAt(0).toUpperCase() + value.slice(1) : value;
 }
 
 function setFormat(format) {
