@@ -161,7 +161,7 @@ describeDb('telemetry api with postgres', () => {
     expect(king).toMatchObject({ label: 'king-kong', games: 1, wins: 1 });
     // king-kong played 2 attack / 1 defense / 1 scheme -> attack-leaning play mix.
     expect(king?.profile).toMatchObject({ attack: 0.5, lean: 'Offensive' });
-    expect(json.matchups).toContainEqual(expect.objectContaining({ rowDeck: 'king-kong@0.1.0', colDeck: 'the-mandalorian@0.1.0', games: 1, wins: 1, avgTurns: 13, avgFinalHealth: 7 }));
+    expect(json.matchups).toContainEqual(expect.objectContaining({ rowDeck: 'king-kong', rowDeckId: 'king-kong', colDeck: 'the-mandalorian', colDeckId: 'the-mandalorian', games: 1, wins: 1, avgTurns: 13, avgFinalHealth: 7 }));
     expect(json.firstPlayer).toMatchObject({ games: 1, wins: 1, winRate: 1 });
   });
 
