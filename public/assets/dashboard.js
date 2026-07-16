@@ -68,7 +68,7 @@ let deckTwoVTwoPartner = null;
 let currentDeckDetail = null;
 let current = null;
 let allPilots = [];
-let matrixFocus = null; // full deck id of the focused row on the Matchups tab, or null for the grid
+let matrixFocus = state.matchup; // full deck id of the focused row on the Matchups tab, or null for the grid
 let matrixMetric = 'wr'; // 'wr' | 'games' — what the matrix cells display
 let matrixSampleTarget = 50; // games needed for full-confidence color in 'games' mode
 // Very short client cache so toggling filters back and forth is instant without
@@ -99,6 +99,7 @@ function readStateFromUrl() {
     hasExplicitExclusions,
     deck: params.get('deck') || null,
     pair: params.get('pair') || null,
+    matchup: params.get('matchup') || null,
     scenario: {
       format: normalizedParam(params.get('scFormat')),
       map: normalizedParam(params.get('scMap')),
@@ -118,6 +119,7 @@ function writeStateToUrl() {
   if (state.required.size) params.set('require', [...state.required].join(','));
   if (state.deck) params.set('deck', state.deck);
   if (state.pair) params.set('pair', state.pair);
+  if (state.tab === 'matchups' && state.matchup) params.set('matchup', state.matchup);
   if (state.scenario?.format) params.set('scFormat', state.scenario.format);
   if (state.scenario?.map) params.set('scMap', state.scenario.map);
   if (state.scenario?.deck) params.set('scDeck', state.scenario.deck);
@@ -330,6 +332,8 @@ function renderTabs() {
       state.tab = button.dataset.tab;
       state.deck = null; // leaving the full-page deck view
       state.pair = null;
+      state.matchup = null;
+      matrixFocus = null;
       writeStateToUrl();
       renderTabs();
       if (current) renderView(current);
@@ -344,7 +348,12 @@ function renderView(data) {
     els.view.innerHTML = card(empty('No completed games match these filters yet. Submit sample data or run local simulations to populate the dashboard.'));
     return;
   }
-  if (state.tab !== 'matchups') matrixFocus = null;
+  if (state.tab !== 'matchups') {
+    matrixFocus = null;
+    state.matchup = null;
+  } else if (state.matchup && !matrixFocus) {
+    matrixFocus = state.matchup;
+  }
   if (state.tab === 'recent') { renderRecent(); return; }
   const decks = decorateDecks(data.decks);
   if (state.tab === 'heroes') renderHeroes(data, decks);
@@ -554,6 +563,7 @@ function renderMatchups(data, decks) {
     return;
   }
   matrixFocus = null;
+  state.matchup = null;
 
   const top = withGames.slice(0, MATRIX_MAX_DECKS);
   const lookup = new Map((data.matchups || []).map((row) => [`${matchupDeckKey(row, 'row')}|${matchupDeckKey(row, 'col')}`, row]));
@@ -678,7 +688,23 @@ function matchupDecks(data, decks) {
 
 function focusMatchup(deckFull) {
   matrixFocus = deckFull;
+  state.matchup = deckFull;
+  writeStateToUrl();
   if (current) renderView(current);
+}
+
+function openMatchupFocus(deckFull) {
+  state.deck = null;
+  state.pair = null;
+  state.tab = 'matchups';
+  state.matchup = deckFull;
+  matrixFocus = deckFull;
+  const changedFormat = state.format && !isMatchupFormat(state.format);
+  if (changedFormat) state.format = 'duel';
+  writeStateToUrl();
+  renderTabs();
+  if (changedFormat) loadDashboard().catch(showError);
+  else if (current) renderView(current);
 }
 
 // Focused, transposed view: one deck vs each opponent, full names down a single
@@ -686,13 +712,14 @@ function focusMatchup(deckFull) {
 function renderMatchupFocus(data, decks) {
   const deck = decks.find((d) => d.deck === matrixFocus);
   const deckName = deck ? labelHtml(deck.label, deck.deckId) : esc(matrixFocus);
+  const summaryId = deck ? registerHandler(() => openDeck(deck.deck)) : null;
   const deckPlain = deck ? deck.label : matrixFocus;
   const opponents = (data.matchups || [])
     .filter((m) => matchupDeckKey(m, 'row') === matrixFocus)
     .map((m) => ({ deck: matchupDeckKey(m, 'col'), deckId: m.colDeckId || matchupDeckKey(m, 'col'), games: m.games, wins: m.wins, winRate: m.winRate, avgTurns: m.avgTurns, avgFinalHealth: m.avgFinalHealth, avgCardsLeft: m.avgCardsLeft }))
     .sort((a, b) => b.winRate - a.winRate || b.games - a.games);
 
-  const backId = registerHandler(() => { matrixFocus = null; if (current) renderView(current); });
+  const backId = registerHandler(() => { matrixFocus = null; state.matchup = null; writeStateToUrl(); if (current) renderView(current); });
 
   const oppRow = (o) => {
     const losses = o.games - o.wins;
@@ -717,7 +744,7 @@ function renderMatchupFocus(data, decks) {
     <div class="section-head">
       <div>
         <button class="mx-back" data-handler="${backId}" type="button">◀ All matchups</button>
-        <div class="section-title" style="margin-top:10px">${deckName}<span class="kicker" style="text-transform:none;letter-spacing:0;margin-left:8px">1v1 vs each opponent</span></div>
+        <div class="section-title" style="margin-top:10px">${deckName}${summaryId ? `<button class="inline-link" data-handler="${summaryId}" type="button">Summary</button>` : ''}<span class="kicker" style="text-transform:none;letter-spacing:0;margin-left:8px">1v1 vs each opponent</span></div>
         ${deck ? `<div class="mx-focus-summary">
           <span class="mx-focus-wr" style="color:${wrColor(deck.winRate)}">${pct(deck.winRate)}</span>
           <span class="mx-focus-meta">${number(deck.wins)}–${number(deck.games - deck.wins)} · ${number(deck.games)} games · 95% CI ${pct(deck.ciLow, 0)}–${pct(deck.ciHigh, 0)}</span>
@@ -1187,6 +1214,8 @@ function heroLabelHtml(deckId) {
 function openDeck(deck) {
   state.deck = deck;
   state.pair = null;
+  state.matchup = null;
+  matrixFocus = null;
   writeStateToUrl();
   renderDeckPage();
 }
@@ -1367,7 +1396,7 @@ function deckFormatPanel(tab, d, scopedDetail = null, loading = false) {
       ${scenarioSelectSection('Opponent', 'duelOpponent', deckDuelOpponent || '', [['', 'All opponents'], ...(d.matchups || []).map((m) => [m.deck, m.label])])}
       ${loading ? scenarioStatsSkeleton() : formatSummarySection(tab, null, scopedDetail)}
       ${loadingMsg || `${selectedOpponent ? '' : `<div class="modal-section">
-        <div class="sub-title" style="margin-top:0">Best and worst duel matchups</div>
+        <div class="sub-title title-with-link" style="margin-top:0"><span>Best and worst duel matchups</span><button class="inline-link" data-handler="${registerHandler(() => openMatchupFocus(d.deck))}" type="button">All matchups</button></div>
         <div class="list tight">${matchups.length ? matchups.map(matchupRow).join('') : empty('Not enough duel data.')}</div>
       </div>`}
       ${mapAndInfluenceSection(detail)}`}
