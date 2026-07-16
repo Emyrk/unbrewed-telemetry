@@ -919,9 +919,12 @@ export class PgTelemetryRepository {
       const games = Number(row.games);
       const wins = Number(row.wins);
       return {
-        rowDeck: row.row_deck,
+        // Dashboard matchup identity is intentionally versionless for now: the
+        // matrix answers "deck id vs deck id" and should not split rows when old
+        // game submissions used a different deck version string.
+        rowDeck: row.row_deck_id,
         rowDeckId: row.row_deck_id,
-        colDeck: row.col_deck,
+        colDeck: row.col_deck_id,
         colDeckId: row.col_deck_id,
         games,
         wins,

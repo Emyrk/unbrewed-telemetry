@@ -556,7 +556,7 @@ function renderMatchups(data, decks) {
   matrixFocus = null;
 
   const top = withGames.slice(0, MATRIX_MAX_DECKS);
-  const lookup = new Map((data.matchups || []).map((row) => [`${row.rowDeck}|${row.colDeck}`, row]));
+  const lookup = new Map((data.matchups || []).map((row) => [`${matchupDeckKey(row, 'row')}|${matchupDeckKey(row, 'col')}`, row]));
   const cols = `<div class="matrix-line"><div class="matrix-corner"></div>${top.map((d) => `<div class="matrix-colhead" title="${esc(d.label)}${isSpice(d.deckId) ? ' (spice)' : ''}">${esc(code(d.deckId))}</div>`).join('')}</div>`;
   const rows = top.map((rowDeck) => {
     const cells = top.map((colDeck) => matrixCell(rowDeck, colDeck, lookup)).join('');
@@ -636,25 +636,30 @@ function renderMatchupFormatWarning(data) {
   </div>`;
 }
 
+function matchupDeckKey(row, side) {
+  return side === 'row' ? (row.rowDeckId || row.rowDeck) : (row.colDeckId || row.colDeck);
+}
+
 function matchupDecks(data, decks) {
   const byDeck = new Map(decks.map((deck) => [deck.deck, deck]));
   const byDeckId = new Map(decks.map((deck) => [deck.deckId, deck]));
   const totals = new Map();
   for (const row of data.matchups || []) {
-    const entry = totals.get(row.rowDeck) || {
-      deck: row.rowDeck,
-      deckId: row.rowDeckId,
-      label: byDeck.get(row.rowDeck)?.label || byDeckId.get(row.rowDeckId)?.label || labelForDeckId(row.rowDeckId),
+    const key = matchupDeckKey(row, 'row');
+    const entry = totals.get(key) || {
+      deck: key,
+      deckId: row.rowDeckId || key,
+      label: byDeck.get(row.rowDeck)?.label || byDeckId.get(row.rowDeckId)?.label || labelForDeckId(row.rowDeckId || key),
       games: 0,
       wins: 0,
     };
     entry.games += Number(row.games || 0);
     entry.wins += Number(row.wins || 0);
-    totals.set(row.rowDeck, entry);
+    totals.set(key, entry);
   }
   return [...totals.values()]
     .map((entry) => {
-      const decorated = byDeck.get(entry.deck) || {};
+      const decorated = byDeck.get(entry.deck) || byDeckId.get(entry.deckId) || {};
       const games = entry.games;
       const wins = entry.wins;
       return {
@@ -683,8 +688,8 @@ function renderMatchupFocus(data, decks) {
   const deckName = deck ? labelHtml(deck.label, deck.deckId) : esc(matrixFocus);
   const deckPlain = deck ? deck.label : matrixFocus;
   const opponents = (data.matchups || [])
-    .filter((m) => m.rowDeck === matrixFocus)
-    .map((m) => ({ deck: m.colDeck, deckId: m.colDeckId, games: m.games, wins: m.wins, winRate: m.winRate, avgTurns: m.avgTurns, avgFinalHealth: m.avgFinalHealth, avgCardsLeft: m.avgCardsLeft }))
+    .filter((m) => matchupDeckKey(m, 'row') === matrixFocus)
+    .map((m) => ({ deck: matchupDeckKey(m, 'col'), deckId: m.colDeckId || matchupDeckKey(m, 'col'), games: m.games, wins: m.wins, winRate: m.winRate, avgTurns: m.avgTurns, avgFinalHealth: m.avgFinalHealth, avgCardsLeft: m.avgCardsLeft }))
     .sort((a, b) => b.winRate - a.winRate || b.games - a.games);
 
   const backId = registerHandler(() => { matrixFocus = null; if (current) renderView(current); });
@@ -739,7 +744,7 @@ function matrixCell(rowDeck, colDeck, lookup) {
   if (rowDeck.deck === colDeck.deck) {
     return `<div class="matrix-cell" style="background:transparent"></div>`;
   }
-  const row = lookup.get(`${rowDeck.deck}|${colDeck.deck}`);
+  const row = lookup.get(`${rowDeck.deckId || rowDeck.deck}|${colDeck.deckId || colDeck.deck}`);
   const games = row ? row.games : 0;
   const title = `${esc(rowDeck.label)} vs ${esc(colDeck.label)}`;
 
