@@ -47,6 +47,7 @@ const BUCKET_META = {
 const TWO_V_TWO_MODE_KEY = 'unbrewed.twoVTwoPartnerMode';
 const CARD_INFLUENCE_MODE_KEY = 'unbrewed.cardInfluenceMode';
 const state = readStateFromUrl();
+const matchupSort = { key: 'wr', dir: -1 };
 const sort = { key: 'wr', dir: -1 };
 
 const els = {
@@ -729,6 +730,39 @@ function openMatchupFocus(deckFull) {
   else if (current) renderView(current);
 }
 
+function setMatchupSort(key) {
+  if (matchupSort.key === key) matchupSort.dir = -matchupSort.dir;
+  else { matchupSort.key = key; matchupSort.dir = key === 'name' ? 1 : -1; }
+  if (current) renderView(current);
+}
+
+function matchupSortHeader(key, label) {
+  const arrow = matchupSort.key === key ? (matchupSort.dir === 1 ? ' ↑' : ' ↓') : '';
+  const id = registerHandler(() => setMatchupSort(key));
+  return `<button class="mx-sort" data-handler="${id}" type="button">${esc(label)}${arrow}</button>`;
+}
+
+function sortMatchupOpponents(opponents) {
+  const { key, dir } = matchupSort;
+  const value = (row) => key === 'name' ? labelForDeckId(row.deckId)
+    : key === 'games' ? row.games
+    : key === 'wr' ? row.winRate
+    : key === 'record' ? row.wins
+    : key === 'turns' ? row.avgTurns
+    : key === 'winTurns' ? row.avgWinTurns
+    : key === 'lossTurns' ? row.avgLossTurns
+    : key === 'hp' ? row.avgFinalHealth
+    : row.avgCardsLeft;
+  return [...opponents].sort((a, b) => {
+    const av = value(a);
+    const bv = value(b);
+    let cmp;
+    if (typeof av === 'string' || typeof bv === 'string') cmp = String(av || '').localeCompare(String(bv || ''));
+    else cmp = (av == null ? -Infinity : av) - (bv == null ? -Infinity : bv);
+    return cmp * dir || b.games - a.games || labelForDeckId(a.deckId).localeCompare(labelForDeckId(b.deckId));
+  });
+}
+
 // Focused, transposed view: one deck vs each opponent, full names down a single
 // column with win rate, favorability bar, record, and average game length.
 function renderMatchupFocus(data, decks) {
@@ -736,10 +770,20 @@ function renderMatchupFocus(data, decks) {
   const deckName = deck ? labelHtml(deck.label, deck.deckId) : esc(matrixFocus);
   const summaryId = deck ? registerHandler(() => openDeck(deck.deck)) : null;
   const deckPlain = deck ? deck.label : matrixFocus;
-  const opponents = (data.matchups || [])
+  const opponents = sortMatchupOpponents((data.matchups || [])
     .filter((m) => matchupDeckKey(m, 'row') === matrixFocus)
-    .map((m) => ({ deck: matchupDeckKey(m, 'col'), deckId: m.colDeckId || matchupDeckKey(m, 'col'), games: m.games, wins: m.wins, winRate: m.winRate, avgTurns: m.avgTurns, avgFinalHealth: m.avgFinalHealth, avgCardsLeft: m.avgCardsLeft }))
-    .sort((a, b) => b.winRate - a.winRate || b.games - a.games);
+    .map((m) => ({
+      deck: matchupDeckKey(m, 'col'),
+      deckId: m.colDeckId || matchupDeckKey(m, 'col'),
+      games: m.games,
+      wins: m.wins,
+      winRate: m.winRate,
+      avgTurns: m.avgTurns,
+      avgWinTurns: m.avgWinTurns,
+      avgLossTurns: m.avgLossTurns,
+      avgFinalHealth: m.avgFinalHealth,
+      avgCardsLeft: m.avgCardsLeft,
+    })));
 
   const backId = registerHandler(() => { matrixFocus = null; state.matchup = null; writeStateToUrl(); if (current) renderView(current); });
 
@@ -751,12 +795,16 @@ function renderMatchupFocus(data, decks) {
       : `<span class="mx-fill" style="left:${(o.winRate * 100).toFixed(1)}%;width:${((0.5 - o.winRate) * 100).toFixed(1)}%;background:${COLORS.red}"></span>`;
     const id = registerHandler(() => focusMatchup(o.deck));
     const low = o.games < MATRIX_MIN_GAMES ? ' mx-low' : '';
-    return `<div class="mx-row${low}" data-handler="${id}" title="${esc(deckPlain)} vs ${esc(labelForDeckId(o.deckId))}: ${o.wins}-${losses} over ${number(o.games)} games">
+    const winTurns = o.avgWinTurns == null ? 'n/a' : o.avgWinTurns.toFixed(1);
+    const lossTurns = o.avgLossTurns == null ? 'n/a' : o.avgLossTurns.toFixed(1);
+    return `<div class="mx-row${low}" data-handler="${id}" title="${esc(deckPlain)} vs ${esc(labelForDeckId(o.deckId))}: ${o.wins}-${losses} over ${number(o.games)} games · win turns ${winTurns} · loss turns ${lossTurns}">
       <span class="mx-name">${labelHtml(labelForDeckId(o.deckId), o.deckId)}</span>
       <span class="mx-bar"><span class="mx-mid"></span>${fill}</span>
       <span class="mx-wr" style="color:${wrColor(o.winRate)}">${pct(o.winRate, 0)}</span>
       <span class="mx-rec">${o.wins}-${losses}</span>
       <span class="mx-turns">${o.avgTurns == null ? '—' : o.avgTurns.toFixed(1)}</span>
+      <span class="mx-win-turns">${o.avgWinTurns == null ? '—' : o.avgWinTurns.toFixed(1)}</span>
+      <span class="mx-loss-turns">${o.avgLossTurns == null ? '—' : o.avgLossTurns.toFixed(1)}</span>
       <span class="mx-hp">${o.avgFinalHealth == null ? '—' : o.avgFinalHealth.toFixed(1)}</span>
       <span class="mx-cards">${o.avgCardsLeft == null ? '—' : o.avgCardsLeft.toFixed(1)}</span>
     </div>`;
@@ -776,13 +824,15 @@ function renderMatchupFocus(data, decks) {
     </div>
     <div class="mx-list">
       <div class="mx-row mx-headrow">
-        <span class="mx-name">Opponent</span>
+        <span class="mx-name">${matchupSortHeader('name', 'Opponent')}</span>
         <span class="mx-legend">← opponent favored · ${esc(deckPlain)} favored →</span>
-        <span class="mx-wr">Win</span>
-        <span class="mx-rec">W–L</span>
-        <span class="mx-turns">Turns</span>
-        <span class="mx-hp">HP left</span>
-        <span class="mx-cards">Cards</span>
+        <span class="mx-wr">${matchupSortHeader('wr', 'Win')}</span>
+        <span class="mx-rec">${matchupSortHeader('record', 'W–L')}</span>
+        <span class="mx-turns">${matchupSortHeader('turns', 'Turns')}</span>
+        <span class="mx-win-turns">${matchupSortHeader('winTurns', 'Win turns')}</span>
+        <span class="mx-loss-turns">${matchupSortHeader('lossTurns', 'Loss turns')}</span>
+        <span class="mx-hp">${matchupSortHeader('hp', 'HP left')}</span>
+        <span class="mx-cards">${matchupSortHeader('cards', 'Cards')}</span>
       </div>
       ${opponents.length ? opponents.map(oppRow).join('') : empty('No 1v1 opponents with data for this deck under the current filters.')}
     </div>

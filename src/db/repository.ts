@@ -874,6 +874,8 @@ export class PgTelemetryRepository {
       games: number;
       wins: number;
       avg_turns: number | null;
+      avg_win_turns: number | null;
+      avg_loss_turns: number | null;
       avg_final_health: number | null;
       avg_cards_left: number | null;
     }>(
@@ -907,6 +909,8 @@ export class PgTelemetryRepository {
           COUNT(*)::int AS games,
           COUNT(*) FILTER (WHERE won)::int AS wins,
           AVG(turns)::float8 AS avg_turns,
+          AVG(turns) FILTER (WHERE won)::float8 AS avg_win_turns,
+          AVG(turns) FILTER (WHERE NOT won)::float8 AS avg_loss_turns,
           AVG(final_health)::float8 AS avg_final_health,
           AVG(final_deck_count)::float8 AS avg_cards_left
         FROM oriented
@@ -930,6 +934,8 @@ export class PgTelemetryRepository {
         wins,
         winRate: games > 0 ? wins / games : 0,
         avgTurns: row.avg_turns,
+        avgWinTurns: row.avg_win_turns,
+        avgLossTurns: row.avg_loss_turns,
         avgFinalHealth: row.avg_final_health,
         avgCardsLeft: row.avg_cards_left,
       };

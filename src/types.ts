@@ -284,6 +284,8 @@ export interface DashboardMatchupStat {
   wins: number;
   winRate: number;
   avgTurns: number | null;
+  avgWinTurns: number | null;
+  avgLossTurns: number | null;
   avgFinalHealth: number | null;
   avgCardsLeft: number | null;
 }
