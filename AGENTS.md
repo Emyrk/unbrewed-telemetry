@@ -300,7 +300,7 @@ npm run dev
 npm start
 ```
 
-`npm run db:seed` fills the local database with deterministic synthetic games (including fabricated `telemetry.cardsPlayed`) so the dashboard has something to render. Control volume/seed with `SEED_GAMES` and `SEED`. It writes through the repository, so the server need not be running. Never point it at production.
+`npm run db:seed` fills the local database with deterministic synthetic games (including fabricated `telemetry.cardsPlayed`) so the dashboard has something to render. Control volume/seed with `SEED_GAMES` and `SEED`. Seeded submissions use `TELEMETRY_SOURCE` as their `source`, defaulting to `<hostname>:<user>:lab` when unset. It writes through the repository, so the server need not be running. Never point it at production.
 
 Other useful commands:
 
