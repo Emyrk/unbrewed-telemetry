@@ -9,6 +9,7 @@
 import { Pool } from 'pg';
 import { LOCAL_COMPOSE_DATABASE_URL, loadEnvFile } from '../src/config.js';
 import { PgTelemetryRepository } from '../src/db/repository.js';
+import { commandLineSourceName } from '../src/source-name.js';
 import type { GameSubmission, TelemetrySubmission } from '../src/types.js';
 
 loadEnvFile();
@@ -20,6 +21,7 @@ const seed = Number(process.env.SEED ?? 1337);
 // pushed deck_definitions and the dashboard shows real composition. Keep in sync
 // with CONTENT_VERSION used by scripts/push-decks.mts in unbrewed-engine.
 const DECK_VERSION = process.env.DECK_VERSION ?? '0.10.0';
+const sourceName = commandLineSourceName();
 
 interface Hero {
   id: string;
@@ -216,7 +218,7 @@ function buildGame(index: number): GameSubmission {
   return {
     schemaVersion: 1,
     gameId: `seed-${seed}-${index}`,
-    source: 'ai-lab',
+    source: sourceName,
     endedAt: new Date(Date.UTC(2026, 6, 1, 0, index % 3600)).toISOString(),
     format,
     formatLabel,

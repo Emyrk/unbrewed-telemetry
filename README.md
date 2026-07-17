@@ -31,11 +31,13 @@ The local Postgres container listens on port `55432` so it does not collide with
 PORT=8788
 DATABASE_URL=postgres://unbrewed:unbrewed@localhost:55432/unbrewed_telemetry
 TELEMETRY_SECRET=dev-telemetry-secret-change-me
+TELEMETRY_SOURCE=
 ALLOW_UNAUTHENTICATED_INGEST=0
 RUN_MIGRATIONS_ON_START=0
 ```
 
 `TELEMETRY_SECRET` signs ingest requests. Production should keep `ALLOW_UNAUTHENTICATED_INGEST=0`.
+`TELEMETRY_SOURCE` labels locally generated simulation/seed submissions; when unset, command-line producers default to `<hostname>:<user>:lab`.
 
 ## API
 
