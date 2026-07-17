@@ -340,18 +340,30 @@ body {
 .mx-list { margin-top: 14px; }
 .mx-row {
   display: grid;
-  grid-template-columns: minmax(140px, 1.4fr) 1fr 46px 54px 56px 58px 56px;
+  grid-template-columns: minmax(140px, 1.4fr) 1fr 46px 54px 56px 68px 72px 58px 56px;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   padding: 8px 8px;
   border-bottom: 1px solid var(--border);
   border-radius: 6px;
   cursor: pointer;
 }
-.mx-turns, .mx-hp, .mx-cards { text-align: right; font: 500 11.5px var(--font-mono); color: var(--muted); }
+.mx-turns, .mx-win-turns, .mx-loss-turns, .mx-hp, .mx-cards { text-align: right; font: 500 11.5px var(--font-mono); color: var(--muted); }
 .mx-row:hover { background: var(--hover); }
 .mx-row.mx-low { opacity: 0.5; }
 .mx-headrow, .mx-headrow:hover { cursor: default; background: none; border-bottom: 1px solid var(--border-strong); }
+.mx-sort {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+.mx-sort:hover { color: var(--text); }
 .mx-headrow span { font: 600 10.5px var(--font-body); color: var(--muted-2); text-transform: uppercase; letter-spacing: 0.05em; }
 .mx-headrow .mx-legend { text-transform: none; letter-spacing: 0; text-align: center; color: var(--muted-2); }
 .mx-name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

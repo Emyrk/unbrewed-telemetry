@@ -151,7 +151,7 @@ describeDb('telemetry api with postgres', () => {
       totalSubmissions: number;
       formats: { format: string; games: number }[];
       decks: { deck: string; label: string; games: number; wins: number; profile: { attack: number; lean: string } | null }[];
-      matchups: { rowDeck: string; colDeck: string; games: number; wins: number }[];
+      matchups: { rowDeck: string; colDeck: string; games: number; wins: number; avgWinTurns: number | null; avgLossTurns: number | null }[];
       firstPlayer: { games: number; wins: number; winRate: number };
     };
     expect(json.totalGames).toBe(1);
@@ -161,7 +161,8 @@ describeDb('telemetry api with postgres', () => {
     expect(king).toMatchObject({ label: 'king-kong', games: 1, wins: 1 });
     // king-kong played 2 attack / 1 defense / 1 scheme -> attack-leaning play mix.
     expect(king?.profile).toMatchObject({ attack: 0.5, lean: 'Offensive' });
-    expect(json.matchups).toContainEqual(expect.objectContaining({ rowDeck: 'king-kong', rowDeckId: 'king-kong', colDeck: 'the-mandalorian', colDeckId: 'the-mandalorian', games: 1, wins: 1, avgTurns: 13, avgFinalHealth: 7 }));
+    expect(json.matchups).toContainEqual(expect.objectContaining({ rowDeck: 'king-kong', rowDeckId: 'king-kong', colDeck: 'the-mandalorian', colDeckId: 'the-mandalorian', games: 1, wins: 1, avgTurns: 13, avgWinTurns: 13, avgLossTurns: null, avgFinalHealth: 7 }));
+    expect(json.matchups).toContainEqual(expect.objectContaining({ rowDeck: 'the-mandalorian', rowDeckId: 'the-mandalorian', colDeck: 'king-kong', colDeckId: 'king-kong', games: 1, wins: 0, avgTurns: 13, avgWinTurns: null, avgLossTurns: 13 }));
     expect(json.firstPlayer).toMatchObject({ games: 1, wins: 1, winRate: 1 });
   });
 
