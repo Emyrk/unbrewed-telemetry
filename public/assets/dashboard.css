@@ -674,6 +674,19 @@ body {
 }
 .recent-hourly-segment { display: block; width: 100%; }
 .recent-hourly-label { font: 500 9px var(--font-mono); color: var(--muted-2); white-space: nowrap; }
+.recent-hourly-totals {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.recent-hourly-totals span { display: inline-flex; align-items: center; gap: 5px; }
+.recent-hourly-totals strong { color: var(--text); font: 600 11px var(--font-mono); }
+.recent-hourly-totals i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; }
+.recent-hourly-total-label { color: var(--text); font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }
 .recent-hourly-legend { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; color: var(--muted); font-size: 11px; }
 .recent-hourly-legend span { display: inline-flex; align-items: center; gap: 5px; }
 .recent-hourly-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; }
