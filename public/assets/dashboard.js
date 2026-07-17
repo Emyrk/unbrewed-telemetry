@@ -206,7 +206,7 @@ function statsQuery() {
 
 function deckDetailCacheKey(deck, extra = {}) {
   const params = statsQuery();
-  params.set('deck', deck);
+  params.set('deck', resolveDeckDetailKey(deck));
   for (const [key, value] of Object.entries(extra)) {
     if (value != null && value !== '') params.set(key, value);
   }
@@ -559,7 +559,7 @@ function renderMatchups(data, decks) {
   const focus = resolveMatchupFocus(matrixFocus || state.matchup, withGames);
   if (focus) {
     matrixFocus = focus.deck;
-    state.matchup = matchupUrlKey(focus);
+    state.matchup = cleanDeckUrlKey(focus);
     renderMatchupFocus(data, withGames);
     return;
   }
@@ -692,16 +692,25 @@ function resolveMatchupFocus(value, decks) {
   return decks.find((deck) => deck.deck === value || deck.deckId === value) || null;
 }
 
-function matchupUrlKey(deckOrFull) {
+function cleanDeckUrlKey(deckOrFull) {
   if (!deckOrFull) return null;
-  if (typeof deckOrFull === 'object') return deckOrFull.deckId || deckOrFull.deck;
+  if (typeof deckOrFull === 'object') return deckOrFull.deckId || splitDeckVersion(deckOrFull.deck);
   const deck = (current?.decks || []).find((row) => row.deck === deckOrFull || row.deckId === deckOrFull);
-  return deck?.deckId || deckOrFull;
+  return deck?.deckId || splitDeckVersion(deckOrFull);
+}
+
+function resolveDeckDetailKey(deckOrId) {
+  const deck = (current?.decks || []).find((row) => row.deck === deckOrId || row.deckId === deckOrId);
+  return deck?.deck || deckOrId;
+}
+
+function splitDeckVersion(deck) {
+  return String(deck || '').split('@')[0];
 }
 
 function focusMatchup(deckFull) {
   matrixFocus = deckFull;
-  state.matchup = matchupUrlKey(deckFull);
+  state.matchup = cleanDeckUrlKey(deckFull);
   writeStateToUrl();
   if (current) renderView(current);
 }
@@ -710,7 +719,7 @@ function openMatchupFocus(deckFull) {
   state.deck = null;
   state.pair = null;
   state.tab = 'matchups';
-  state.matchup = matchupUrlKey(deckFull);
+  state.matchup = cleanDeckUrlKey(deckFull);
   matrixFocus = deckFull;
   const changedFormat = state.format && !isMatchupFormat(state.format);
   if (changedFormat) state.format = 'duel';
@@ -1225,7 +1234,7 @@ function heroLabelHtml(deckId) {
 // Deck detail is a full page (not a modal), deep-linkable via ?deck=. Opening
 // just sets state + URL; renderView routes to renderDeckPage which fetches.
 function openDeck(deck) {
-  state.deck = deck;
+  state.deck = cleanDeckUrlKey(deck);
   state.pair = null;
   state.matchup = null;
   matrixFocus = null;
@@ -1241,6 +1250,11 @@ function exitDeckPage() {
 
 async function renderDeckPage() {
   els.view.innerHTML = card(empty('Loading deck…'));
+  const cleanDeck = cleanDeckUrlKey(state.deck);
+  if (cleanDeck && cleanDeck !== state.deck) {
+    state.deck = cleanDeck;
+    writeStateToUrl();
+  }
   let d;
   try {
     d = await fetchDeckDetail(state.deck);
