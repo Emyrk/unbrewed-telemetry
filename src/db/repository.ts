@@ -586,8 +586,18 @@ export class PgTelemetryRepository {
       bucket.formats.push({ format: row.format, label: row.label ?? row.format, games });
     }
 
+    const totalsByFormat = new Map<string, { format: string; label: string; games: number }>();
+    for (const bucket of byHour.values()) {
+      for (const format of bucket.formats) {
+        const total = totalsByFormat.get(format.format) ?? { format: format.format, label: format.label, games: 0 };
+        total.games += format.games;
+        totalsByFormat.set(format.format, total);
+      }
+    }
+
     return {
       generatedAt: now.toISOString(),
+      totals: [...totalsByFormat.values()].sort((a, b) => b.games - a.games || a.format.localeCompare(b.format)),
       buckets: [...byHour.entries()].map(([hour, bucket]) => ({ hour, ...bucket })),
     };
   }

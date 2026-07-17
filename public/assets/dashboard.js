@@ -1144,13 +1144,21 @@ async function renderRecent() {
 
 function recentHourlyChart(data) {
   const buckets = data?.buckets || [];
+  const totals = data?.totals || [];
   const max = Math.max(1, ...buckets.map((bucket) => bucket.total || 0));
-  const formats = [...new Map(buckets.flatMap((bucket) =>
-    (bucket.formats || []).map((format) => [format.format, format.label || format.format]))).entries()];
+  const formats = totals.length
+    ? totals.map((format) => [format.format, format.label || format.format])
+    : [...new Map(buckets.flatMap((bucket) =>
+      (bucket.formats || []).map((format) => [format.format, format.label || format.format]))).entries()];
   const legend = formats.length
     ? `<div class="recent-hourly-legend">${formats.map(([format, label]) =>
       `<span><i style="background:${formatColor(format)}"></i>${esc(label)}</span>`).join('')}</div>`
     : '';
+  const totalGames = totals.reduce((sum, row) => sum + (row.games || 0), 0);
+  const totalLine = totals.length
+    ? `<div class="recent-hourly-totals"><span class="recent-hourly-total-label">Total ${number(totalGames)}</span>${totals.map((row) =>
+      `<span><i style="background:${formatColor(row.format)}"></i>${esc(row.label || row.format)} <strong>${number(row.games)}</strong></span>`).join('')}</div>`
+    : `<div class="recent-hourly-totals"><span class="recent-hourly-total-label">Total 0</span></div>`;
   return `<div class="card panel recent-hourly-card">
     <div class="section-head">
       <div class="section-title">Games added by hour</div>
@@ -1159,6 +1167,7 @@ function recentHourlyChart(data) {
     <div class="recent-hourly-chart" aria-label="Games added in the last 24 hours by hour and format">
       ${buckets.map((bucket) => recentHourlyBar(bucket, max)).join('')}
     </div>
+    ${totalLine}
     ${legend}
   </div>`;
 }

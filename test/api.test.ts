@@ -395,8 +395,10 @@ describeDb('telemetry api with postgres', () => {
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toContain('max-age=300');
     const json = await response.json() as {
+      totals: { format: string; games: number }[];
       buckets: { hour: string; total: number; formats: { format: string; games: number }[] }[];
     };
+    expect(json.totals).toContainEqual(expect.objectContaining({ format: 'duel', games: 1 }));
     expect(json.buckets).toHaveLength(24);
     const currentHour = json.buckets.at(-1);
     expect(currentHour?.hour).toBe('2026-07-14T16:00:00.000Z');

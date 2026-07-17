@@ -436,6 +436,7 @@ export interface RecentHourlyBucket {
 
 export interface RecentHourlyResponse {
   generatedAt: string;
+  totals: RecentHourlyFormatBucket[];
   buckets: RecentHourlyBucket[];
 }
 
