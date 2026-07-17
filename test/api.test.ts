@@ -389,6 +389,21 @@ describeDb('telemetry api with postgres', () => {
     expect(game!.teams[1]).toMatchObject({ won: false });
   });
 
+  it('serves cached hourly recent game buckets', async () => {
+    await postGame(baseUrl, secret, sampleGame({ gameId: 'recent-hourly-001', stateHash: 'recent-hourly-001' }), 'recent-hourly-001');
+    const response = await fetch(`${baseUrl}/v1/stats/recent/hourly`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toContain('max-age=300');
+    const json = await response.json() as {
+      buckets: { hour: string; total: number; formats: { format: string; games: number }[] }[];
+    };
+    expect(json.buckets).toHaveLength(24);
+    const currentHour = json.buckets.at(-1);
+    expect(currentHour?.hour).toBe('2026-07-14T16:00:00.000Z');
+    expect(currentHour).toMatchObject({ total: 1 });
+    expect(currentHour?.formats).toContainEqual(expect.objectContaining({ format: 'duel', games: 1 }));
+  });
+
   it('stores invalid submissions and returns validation errors', async () => {
     const response = await postRaw(baseUrl, secret, { schemaVersion: 1, format: 'duel', map: 'mended-drum', teams: [], winner: 0 }, 'bad-game-001');
     expect(response.status).toBe(400);

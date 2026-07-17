@@ -1116,17 +1116,23 @@ function deckIdOf(deck) {
 async function renderRecent() {
   els.view.innerHTML = card(empty('Loading recent games…'), 'panel');
   let data;
+  let hourly;
   try {
     const params = statsQuery();
-    params.set('limit', '50');
-    data = await fetchJson(`/v1/stats/recent?${params}`);
+    const listParams = new URLSearchParams(params);
+    listParams.set('limit', '50');
+    [data, hourly] = await Promise.all([
+      fetchJson(`/v1/stats/recent?${listParams}`),
+      fetchJson(`/v1/stats/recent/hourly${params.toString() ? `?${params}` : ''}`),
+    ]);
   } catch (error) {
     els.view.innerHTML = card(empty('Failed to load recent games: ' + (error.message || '')), 'panel');
     return;
   }
   const games = data.games || [];
   const scoped = state.format || state.excluded.size ? 'matching this view' : 'uploaded';
-  els.view.innerHTML = `<div class="card panel">
+  els.view.innerHTML = `${recentHourlyChart(hourly)}
+  <div class="card panel">
     <div class="section-head">
       <div class="section-title">Recent games</div>
       <div class="kicker">Last ${games.length} games ${scoped} · newest first · click a deck for its page</div>
@@ -1134,6 +1140,57 @@ async function renderRecent() {
     <div class="recent-list">${games.length ? games.map(recentRow).join('') : empty('No games uploaded under the current filters.')}</div>
   </div>`;
   bindHandlers(els.view);
+}
+
+function recentHourlyChart(data) {
+  const buckets = data?.buckets || [];
+  const max = Math.max(1, ...buckets.map((bucket) => bucket.total || 0));
+  const formats = [...new Map(buckets.flatMap((bucket) =>
+    (bucket.formats || []).map((format) => [format.format, format.label || format.format]))).entries()];
+  const legend = formats.length
+    ? `<div class="recent-hourly-legend">${formats.map(([format, label]) =>
+      `<span><i style="background:${formatColor(format)}"></i>${esc(label)}</span>`).join('')}</div>`
+    : '';
+  return `<div class="card panel recent-hourly-card">
+    <div class="section-head">
+      <div class="section-title">Games added by hour</div>
+      <div class="kicker">Last 24 hours · stacked by format · cached 5m</div>
+    </div>
+    <div class="recent-hourly-chart" aria-label="Games added in the last 24 hours by hour and format">
+      ${buckets.map((bucket) => recentHourlyBar(bucket, max)).join('')}
+    </div>
+    ${legend}
+  </div>`;
+}
+
+function recentHourlyBar(bucket, max) {
+  const total = bucket.total || 0;
+  const height = Math.max(total > 0 ? 6 : 2, Math.round((total / max) * 82));
+  const segments = total > 0
+    ? bucket.formats.map((format) => {
+      const pct = (format.games / total) * 100;
+      return `<span class="recent-hourly-segment" style="height:${pct.toFixed(2)}%;background:${formatColor(format.format)}" title="${esc(format.label)}: ${number(format.games)}"></span>`;
+    }).join('')
+    : '';
+  const hour = hourLabel(bucket.hour);
+  return `<div class="recent-hourly-bar" title="${esc(hour)} · ${number(total)} games">
+    <div class="recent-hourly-count">${total ? number(total) : ''}</div>
+    <div class="recent-hourly-stack" style="height:${height}px">${segments}</div>
+    <div class="recent-hourly-label">${esc(hour)}</div>
+  </div>`;
+}
+
+function formatColor(format) {
+  const palette = [COLORS.gold, COLORS.blue, COLORS.violet, COLORS.green, COLORS.red, '#d88bd0', '#7fc7c3'];
+  let hash = 0;
+  for (const ch of String(format || '')) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+  return palette[hash % palette.length];
+}
+
+function hourLabel(iso) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleTimeString([], { hour: 'numeric' });
 }
 
 function recentRow(g) {

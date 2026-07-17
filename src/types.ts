@@ -422,6 +422,23 @@ export interface RecentGamesResponse {
   games: RecentGame[];
 }
 
+export interface RecentHourlyFormatBucket {
+  format: string;
+  label: string;
+  games: number;
+}
+
+export interface RecentHourlyBucket {
+  hour: string;
+  total: number;
+  formats: RecentHourlyFormatBucket[];
+}
+
+export interface RecentHourlyResponse {
+  generatedAt: string;
+  buckets: RecentHourlyBucket[];
+}
+
 export interface SplitStat {
   games: number;
   wins: number;
