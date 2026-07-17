@@ -68,7 +68,7 @@ let deckTwoVTwoPartner = null;
 let currentDeckDetail = null;
 let current = null;
 let allPilots = [];
-let matrixFocus = state.matchup; // full deck id of the focused row on the Matchups tab, or null for the grid
+let matrixFocus = null; // full deck id of the focused row on the Matchups tab, or null for the grid
 let matrixMetric = 'wr'; // 'wr' | 'games' — what the matrix cells display
 let matrixSampleTarget = 50; // games needed for full-confidence color in 'games' mode
 // Very short client cache so toggling filters back and forth is instant without
@@ -351,8 +351,6 @@ function renderView(data) {
   if (state.tab !== 'matchups') {
     matrixFocus = null;
     state.matchup = null;
-  } else if (state.matchup && !matrixFocus) {
-    matrixFocus = state.matchup;
   }
   if (state.tab === 'recent') { renderRecent(); return; }
   const decks = decorateDecks(data.decks);
@@ -558,7 +556,10 @@ function renderMatchups(data, decks) {
     els.view.innerHTML = card(empty('Need at least two decks with 1v1 games for a matchup matrix.'), 'panel');
     return;
   }
-  if (matrixFocus && withGames.some((deck) => deck.deck === matrixFocus)) {
+  const focus = resolveMatchupFocus(matrixFocus || state.matchup, withGames);
+  if (focus) {
+    matrixFocus = focus.deck;
+    state.matchup = matchupUrlKey(focus);
     renderMatchupFocus(data, withGames);
     return;
   }
@@ -686,9 +687,21 @@ function matchupDecks(data, decks) {
     .sort((a, b) => b.games - a.games || a.label.localeCompare(b.label));
 }
 
+function resolveMatchupFocus(value, decks) {
+  if (!value) return null;
+  return decks.find((deck) => deck.deck === value || deck.deckId === value) || null;
+}
+
+function matchupUrlKey(deckOrFull) {
+  if (!deckOrFull) return null;
+  if (typeof deckOrFull === 'object') return deckOrFull.deckId || deckOrFull.deck;
+  const deck = (current?.decks || []).find((row) => row.deck === deckOrFull || row.deckId === deckOrFull);
+  return deck?.deckId || deckOrFull;
+}
+
 function focusMatchup(deckFull) {
   matrixFocus = deckFull;
-  state.matchup = deckFull;
+  state.matchup = matchupUrlKey(deckFull);
   writeStateToUrl();
   if (current) renderView(current);
 }
@@ -697,7 +710,7 @@ function openMatchupFocus(deckFull) {
   state.deck = null;
   state.pair = null;
   state.tab = 'matchups';
-  state.matchup = deckFull;
+  state.matchup = matchupUrlKey(deckFull);
   matrixFocus = deckFull;
   const changedFormat = state.format && !isMatchupFormat(state.format);
   if (changedFormat) state.format = 'duel';
