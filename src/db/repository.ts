@@ -23,6 +23,7 @@ import type {
   NormalizedTeam,
   RecentGame,
   RecentGamesResponse,
+  RecentHourlyResponse,
   ScenarioExplorerResponse,
   SplitStat,
   SynergyPairMatchupsResponse,
@@ -533,6 +534,62 @@ export class PgTelemetryRepository {
       teams: [...(teamsByGame.get(row.id)?.values() ?? [])].sort((a, b) => a.teamIndex - b.teamIndex),
     }));
     return { games };
+  }
+
+
+  /** Last 24 hourly ingest buckets, grouped by format for the Recents page chart. */
+  async recentHourlyGames(filters: DeckStatsFilters, now = new Date()): Promise<RecentHourlyResponse> {
+    const pilotFilter = filters.pilots.length > 0 ? filters.pilots : null;
+    const endHour = floorToHour(now);
+    const startHour = new Date(endHour.getTime() - 23 * 60 * 60 * 1000);
+    const result = await this.pool.query<{
+      hour: Date;
+      format: string | null;
+      label: string | null;
+      games: number | string | null;
+    }>(
+      `
+        WITH hours AS (
+          SELECT generate_series($3::timestamptz, $4::timestamptz, interval '1 hour') AS hour
+        ), counts AS (
+          SELECT
+            date_trunc('hour', g.received_at) AS hour,
+            g.format,
+            COALESCE(MAX(g.format_label) FILTER (WHERE g.format_label IS NOT NULL), g.format) AS label,
+            COUNT(*)::int AS games
+          FROM games g
+          WHERE ($1::text IS NULL OR g.format = $1)
+            AND ${pilotFilterSql()}
+            AND g.received_at >= $3
+            AND g.received_at < $4::timestamptz + interval '1 hour'
+          GROUP BY date_trunc('hour', g.received_at), g.format
+        )
+        SELECT h.hour, c.format, c.label, c.games
+        FROM hours h
+        LEFT JOIN counts c ON c.hour = h.hour
+        ORDER BY h.hour ASC, c.games DESC NULLS LAST, c.format ASC
+      `,
+      [filters.format, pilotFilter, startHour, endHour],
+    );
+
+    const byHour = new Map<string, { total: number; formats: { format: string; label: string; games: number }[] }>();
+    for (let i = 0; i < 24; i += 1) {
+      const hour = new Date(startHour.getTime() + i * 60 * 60 * 1000).toISOString();
+      byHour.set(hour, { total: 0, formats: [] });
+    }
+    for (const row of result.rows) {
+      const hour = row.hour.toISOString();
+      const bucket = byHour.get(hour);
+      if (!bucket || !row.format) continue;
+      const games = Number(row.games ?? 0);
+      bucket.total += games;
+      bucket.formats.push({ format: row.format, label: row.label ?? row.format, games });
+    }
+
+    return {
+      generatedAt: now.toISOString(),
+      buckets: [...byHour.entries()].map(([hour, bucket]) => ({ hour, ...bucket })),
+    };
   }
 
   async dashboardStats(filters: DeckStatsFilters, generatedAt = new Date()): Promise<DashboardStatsResponse> {
@@ -1736,6 +1793,12 @@ function pickComposition(
   if (!entry) return null;
   if (version && entry.byVersion.has(version)) return entry.byVersion.get(version)!;
   return entry.latest;
+}
+
+function floorToHour(value: Date): Date {
+  const hour = new Date(value);
+  hour.setUTCMinutes(0, 0, 0);
+  return hour;
 }
 
 function splitDeckId(deck: string): { deckId: string; deckVersion: string | null } {

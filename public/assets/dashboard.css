@@ -643,6 +643,45 @@ body {
 .infl-badge { font: 600 11px var(--font-mono); padding: 2px 7px; border-radius: 4px; text-align: right; }
 
 /* ---------- Recents ---------- */
+.recent-hourly-card { margin-bottom: 14px; }
+.recent-hourly-chart {
+  height: 126px;
+  display: grid;
+  grid-template-columns: repeat(24, minmax(10px, 1fr));
+  align-items: end;
+  gap: 5px;
+  margin-top: 12px;
+  padding-top: 8px;
+}
+.recent-hourly-bar {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+.recent-hourly-count { height: 14px; font: 600 10px var(--font-mono); color: var(--muted); }
+.recent-hourly-stack {
+  width: 100%;
+  max-width: 30px;
+  min-height: 2px;
+  display: flex;
+  flex-direction: column-reverse;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 4px 4px 2px 2px;
+}
+.recent-hourly-segment { display: block; width: 100%; }
+.recent-hourly-label { font: 500 9px var(--font-mono); color: var(--muted-2); white-space: nowrap; }
+.recent-hourly-legend { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; color: var(--muted); font-size: 11px; }
+.recent-hourly-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.recent-hourly-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; }
+@media (max-width: 780px) {
+  .recent-hourly-chart { gap: 3px; height: 108px; }
+  .recent-hourly-label { display: none; }
+}
+
 .recent-list { margin-top: 12px; }
 .recent-row {
   display: grid;

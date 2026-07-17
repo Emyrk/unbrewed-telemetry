@@ -3,9 +3,19 @@ import { randomUUID } from 'node:crypto';
 import { validateGameSubmission } from '../ingest/schema.js';
 import { validateDeckDefinitions } from '../ingest/deck-schema.js';
 import type { PgTelemetryRepository } from '../db/repository.js';
-import type { DeckDefinitionSubmission, GameSubmission } from '../types.js';
+import type { DeckDefinitionSubmission, GameSubmission, RecentHourlyResponse } from '../types.js';
 import { verifyIngestAuth } from './auth.js';
 import { serveDashboardAsset } from './static.js';
+
+const RECENT_HOURLY_CACHE_MS = 5 * 60 * 1000;
+
+interface RecentHourlyCacheEntry {
+  expiresAt: number;
+  payload?: RecentHourlyResponse;
+  pending?: Promise<RecentHourlyResponse>;
+}
+
+const recentHourlyCache = new Map<string, RecentHourlyCacheEntry>();
 
 export interface AppConfig {
   telemetrySecret: string;
@@ -77,6 +87,11 @@ async function handleRequest(
 
   if (req.method === 'GET' && url.pathname === '/v1/stats/scenario') {
     await handleScenarioExplorer(url, res, repo);
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/v1/stats/recent/hourly') {
+    await handleRecentHourly(url, res, repo, config);
     return;
   }
 
@@ -236,6 +251,33 @@ async function handleScenarioExplorer(url: URL, res: ServerResponse, repo: PgTel
   sendJson(res, 200, { ok: true, ...result });
 }
 
+async function handleRecentHourly(
+  url: URL,
+  res: ServerResponse,
+  repo: PgTelemetryRepository,
+  config: AppConfig,
+): Promise<void> {
+  const filters = statsFiltersFromUrl(url);
+  const key = recentHourlyCacheKey(filters.format, filters.pilots);
+  const nowMs = config.now().getTime();
+  const cached = recentHourlyCache.get(key);
+  if (cached?.payload && cached.expiresAt > nowMs) {
+    sendJson(res, 200, { ok: true, ...cached.payload }, cacheHeaders(RECENT_HOURLY_CACHE_MS));
+    return;
+  }
+
+  const pending = cached?.pending ?? repo.recentHourlyGames(filters, config.now());
+  recentHourlyCache.set(key, { expiresAt: nowMs + RECENT_HOURLY_CACHE_MS, pending });
+  try {
+    const payload = await pending;
+    recentHourlyCache.set(key, { expiresAt: nowMs + RECENT_HOURLY_CACHE_MS, payload });
+    sendJson(res, 200, { ok: true, ...payload }, cacheHeaders(RECENT_HOURLY_CACHE_MS));
+  } catch (error) {
+    if (recentHourlyCache.get(key)?.pending === pending) recentHourlyCache.delete(key);
+    throw error;
+  }
+}
+
 async function handleRecentGames(url: URL, res: ServerResponse, repo: PgTelemetryRepository): Promise<void> {
   const limitParam = Number(url.searchParams.get('limit'));
   const limit = Number.isFinite(limitParam) && limitParam > 0 ? limitParam : 50;
@@ -321,6 +363,16 @@ function blankToNull(value: string | null): string | null {
   return trimmed === '' || trimmed === 'all' ? null : trimmed;
 }
 
+function recentHourlyCacheKey(format: string | null, pilots: string[]): string {
+  return JSON.stringify({ format, pilots: [...pilots].sort() });
+}
+
+function cacheHeaders(ttlMs: number): Record<string, string> {
+  return {
+    'cache-control': `public, max-age=${Math.floor(ttlMs / 1000)}, stale-while-revalidate=${Math.floor(ttlMs / 1000)}`,
+  };
+}
+
 type BodyResult =
   | { ok: true; body: Buffer }
   | { ok: false; status: number; code: string; message: string };
@@ -383,12 +435,13 @@ async function handleAdminDeleteDeck(
   sendJson(res, 200, { ok: true, ...result });
 }
 
-function sendJson(res: ServerResponse, status: number, payload: unknown): void {
+function sendJson(res: ServerResponse, status: number, payload: unknown, headers: Record<string, string> = {}): void {
   const body = JSON.stringify(payload);
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'content-length': Buffer.byteLength(body),
     'cache-control': 'no-store',
+    ...headers,
   });
   res.end(body);
 }
