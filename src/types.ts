@@ -386,6 +386,17 @@ export interface ScenarioExplorerResponse {
   matchups: ScenarioExplorerMatchup[];
 }
 
+export interface SourceStat {
+  source: string;
+  submissions: number;
+  lastReceivedAt: string | null;
+}
+
+export interface SourceStatsResponse {
+  totalSubmissions: number;
+  sources: SourceStat[];
+}
+
 export interface RecentGameSeat {
   teamIndex: number;
   seatIndex: number;

@@ -389,6 +389,23 @@ describeDb('telemetry api with postgres', () => {
     expect(game!.teams[1]).toMatchObject({ won: false });
   });
 
+  it('groups submissions by source', async () => {
+    await postGame(baseUrl, secret, sampleGame({ gameId: 'source-001', stateHash: 'source-001', source: 'engine' }), 'source-001');
+    await postGame(baseUrl, secret, sampleGame({ gameId: 'source-002', stateHash: 'source-002', source: 'steven:laptop:lab' }), 'source-002');
+    await postGame(baseUrl, secret, sampleGame({ gameId: 'source-003', stateHash: 'source-003', source: 'steven:laptop:lab' }), 'source-003');
+
+    const response = await fetch(`${baseUrl}/v1/stats/sources`);
+    expect(response.status).toBe(200);
+    const json = await response.json() as {
+      totalSubmissions: number;
+      sources: { source: string; submissions: number; lastReceivedAt: string | null }[];
+    };
+    expect(json.totalSubmissions).toBe(3);
+    expect(json.sources[0]).toMatchObject({ source: 'steven:laptop:lab', submissions: 2 });
+    expect(json.sources).toContainEqual(expect.objectContaining({ source: 'engine', submissions: 1 }));
+    expect(json.sources[0]!.lastReceivedAt).toBeTruthy();
+  });
+
   it('serves cached hourly recent game buckets', async () => {
     await postGame(baseUrl, secret, sampleGame({ gameId: 'recent-hourly-001', stateHash: 'recent-hourly-001' }), 'recent-hourly-001');
     const response = await fetch(`${baseUrl}/v1/stats/recent/hourly`);
