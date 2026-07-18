@@ -25,6 +25,7 @@ import type {
   RecentGamesResponse,
   RecentHourlyResponse,
   ScenarioExplorerResponse,
+  SourceStatsResponse,
   SplitStat,
   SynergyPairMatchupsResponse,
 } from '../types.js';
@@ -444,6 +445,38 @@ export class PgTelemetryRepository {
       };
     });
     return { totalGames: partners.reduce((sum, row) => sum + row.games, 0), partners, matchups };
+  }
+
+  /** Submission contribution by source name under the active dashboard filters. */
+  async sourceStats(filters: DeckStatsFilters): Promise<SourceStatsResponse> {
+    const pilotFilter = filters.pilots.length > 0 ? filters.pilots : null;
+    const result = await this.pool.query<{
+      source: string | null;
+      submissions: number | string;
+      last_received_at: Date | null;
+    }>(
+      `
+        SELECT
+          COALESCE(NULLIF(g.source, ''), 'unknown') AS source,
+          COUNT(*)::int AS submissions,
+          MAX(g.received_at) AS last_received_at
+        FROM games g
+        WHERE ($1::text IS NULL OR g.format = $1)
+          AND ${pilotFilterSql()}
+        GROUP BY COALESCE(NULLIF(g.source, ''), 'unknown')
+        ORDER BY submissions DESC, source ASC
+      `,
+      [filters.format, pilotFilter],
+    );
+    const sources = result.rows.map((row) => ({
+      source: row.source ?? 'unknown',
+      submissions: Number(row.submissions ?? 0),
+      lastReceivedAt: row.last_received_at ? row.last_received_at.toISOString() : null,
+    }));
+    return {
+      totalSubmissions: sources.reduce((sum, source) => sum + source.submissions, 0),
+      sources,
+    };
   }
 
   /** The most recently received games (filtered), with their teams/seats for a feed. */

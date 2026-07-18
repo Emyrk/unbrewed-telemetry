@@ -79,6 +79,15 @@ Query parameters:
 - `format`: optional format id, such as `duel` or `team-2v2`.
 - `pilots`: optional comma-separated allowed pilot values or pilot kinds. Example: `bot:hard` or `human,bot`.
 
+### `GET /v1/stats/sources`
+
+Returns submission counts grouped by source name for the Submissions → Sources dashboard tab.
+
+Query parameters:
+
+- `format`: optional format id, such as `duel` or `team-2v2`.
+- `pilots`: optional comma-separated allowed pilot values or pilot kinds. Example: `bot:hard` or `human,bot`.
+
 ### `GET /v1/stats/decks`
 
 Returns aggregate deck balance stats.

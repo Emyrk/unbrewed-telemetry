@@ -90,6 +90,11 @@ async function handleRequest(
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/v1/stats/sources') {
+    await handleSourceStats(url, res, repo);
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/v1/stats/recent/hourly') {
     await handleRecentHourly(url, res, repo, config);
     return;
@@ -248,6 +253,11 @@ async function handleScenarioExplorer(url: URL, res: ServerResponse, repo: PgTel
     enemyB: blankToNull(url.searchParams.get('enemyB')),
     pilots: filters.pilots,
   });
+  sendJson(res, 200, { ok: true, ...result });
+}
+
+async function handleSourceStats(url: URL, res: ServerResponse, repo: PgTelemetryRepository): Promise<void> {
+  const result = await repo.sourceStats(statsFiltersFromUrl(url));
   sendJson(res, 200, { ok: true, ...result });
 }
 

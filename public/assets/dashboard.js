@@ -31,7 +31,7 @@ const TABS = [
   ['formats', 'Formats'],
   ['synergy', '2v2 Synergy'],
   ['scenario', 'Scenario'],
-  ['recent', 'Recents'],
+  ['submissions', 'Submissions'],
 ];
 
 // Card-context bucket presentation for the influence table.
@@ -93,7 +93,7 @@ function readStateFromUrl() {
   const exclude = params.get('exclude');
   const require = params.get('require');
   return {
-    tab: params.get('tab') || 'overview',
+    tab: params.get('tab') === 'recent' ? 'submissions' : (params.get('tab') || 'overview'),
     format: normalizedParam(params.get('format')),
     excluded: new Set(exclude ? exclude.split(',').map((v) => v.trim()).filter(Boolean) : []),
     required: new Set(require ? require.split(',').map((v) => v.trim()).filter(Boolean) : []),
@@ -101,6 +101,7 @@ function readStateFromUrl() {
     deck: params.get('deck') || null,
     pair: params.get('pair') || null,
     matchup: params.get('matchup') || null,
+    subtab: params.get('subtab') === 'sources' ? 'sources' : 'recent',
     scenario: {
       format: normalizedParam(params.get('scFormat')),
       map: normalizedParam(params.get('scMap')),
@@ -121,6 +122,7 @@ function writeStateToUrl() {
   if (state.deck) params.set('deck', state.deck);
   if (state.pair) params.set('pair', state.pair);
   if (state.tab === 'matchups' && state.matchup) params.set('matchup', state.matchup);
+  if (state.tab === 'submissions' && state.subtab !== 'recent') params.set('subtab', state.subtab);
   if (state.scenario?.format) params.set('scFormat', state.scenario.format);
   if (state.scenario?.map) params.set('scMap', state.scenario.map);
   if (state.scenario?.deck) params.set('scDeck', state.scenario.deck);
@@ -353,7 +355,7 @@ function renderView(data) {
     matrixFocus = null;
     state.matchup = null;
   }
-  if (state.tab === 'recent') { renderRecent(); return; }
+  if (state.tab === 'recent' || state.tab === 'submissions') { renderSubmissions(); return; }
   const decks = decorateDecks(data.decks);
   if (state.tab === 'heroes') renderHeroes(data, decks);
   else if (state.tab === 'matchups') renderMatchups(data, decks);
@@ -1113,8 +1115,41 @@ function deckIdOf(deck) {
 }
 
 // ---------- recents ----------
+function renderSubmissions() {
+  state.tab = 'submissions';
+  const body = state.subtab === 'sources'
+    ? '<div data-submissions-panel="sources"></div>'
+    : '<div data-submissions-panel="recent"></div>';
+  els.view.innerHTML = `<div class="card panel submissions-shell">
+    <div class="section-head">
+      <div>
+        <div class="section-title">Submissions</div>
+        <div class="kicker">Inspect newly ingested games and where submissions come from</div>
+      </div>
+      <div class="subtabs" role="tablist" aria-label="Submission views">
+        ${submissionTabButton('recent', 'Recent')}
+        ${submissionTabButton('sources', 'Sources')}
+      </div>
+    </div>
+  </div>${body}`;
+  els.view.querySelectorAll('[data-subtab]').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.subtab = button.dataset.subtab;
+      writeStateToUrl();
+      renderSubmissions();
+    });
+  });
+  if (state.subtab === 'sources') renderSources();
+  else renderRecent();
+}
+
+function submissionTabButton(key, label) {
+  return `<button class="subtab${state.subtab === key ? ' active' : ''}" data-subtab="${key}" role="tab" aria-selected="${state.subtab === key}" type="button">${esc(label)}</button>`;
+}
+
 async function renderRecent() {
-  els.view.innerHTML = card(empty('Loading recent games…'), 'panel');
+  const target = els.view.querySelector('[data-submissions-panel="recent"]') || els.view;
+  target.innerHTML = card(empty('Loading recent games…'), 'panel');
   let data;
   let hourly;
   try {
@@ -1126,12 +1161,12 @@ async function renderRecent() {
       fetchJson(`/v1/stats/recent/hourly${params.toString() ? `?${params}` : ''}`),
     ]);
   } catch (error) {
-    els.view.innerHTML = card(empty('Failed to load recent games: ' + (error.message || '')), 'panel');
+    target.innerHTML = card(empty('Failed to load recent games: ' + (error.message || '')), 'panel');
     return;
   }
   const games = data.games || [];
   const scoped = state.format || state.excluded.size ? 'matching this view' : 'uploaded';
-  els.view.innerHTML = `${recentHourlyChart(hourly)}
+  target.innerHTML = `${recentHourlyChart(hourly)}
   <div class="card panel">
     <div class="section-head">
       <div class="section-title">Recent games</div>
@@ -1200,6 +1235,87 @@ function hourLabel(iso) {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return '';
   return date.toLocaleTimeString([], { hour: 'numeric' });
+}
+
+async function renderSources() {
+  const target = els.view.querySelector('[data-submissions-panel="sources"]') || els.view;
+  target.innerHTML = card(empty('Loading sources…'), 'panel');
+  let data;
+  try {
+    const params = statsQuery();
+    data = await fetchJson(`/v1/stats/sources${params.toString() ? `?${params}` : ''}`);
+  } catch (error) {
+    target.innerHTML = card(empty('Failed to load sources: ' + (error.message || '')), 'panel');
+    return;
+  }
+  const sources = data.sources || [];
+  const total = data.totalSubmissions || sources.reduce((sum, source) => sum + (source.submissions || 0), 0);
+  target.innerHTML = `<div class="card panel sources-card">
+    <div class="section-head">
+      <div>
+        <div class="section-title">Sources</div>
+        <div class="kicker">${number(total)} submissions ${state.format || state.excluded.size ? 'matching this view' : 'uploaded'} · grouped by source name</div>
+      </div>
+    </div>
+    ${sources.length ? sourcesSummary(sources, total) : empty('No source data under the current filters.')}
+  </div>`;
+}
+
+function sourcesSummary(sources, total) {
+  const gradient = sourcesPieGradient(sources, total);
+  const top = sources[0];
+  return `<div class="sources-layout">
+    <div class="sources-pie-wrap">
+      <div class="sources-pie" style="background:${gradient}" role="img" aria-label="Submission share by source"></div>
+      <div class="sources-pie-center">
+        <strong>${number(total)}</strong>
+        <span>submissions</span>
+      </div>
+      ${top ? `<div class="kicker sources-top-source">Top: ${esc(top.source)} · ${pct(top.submissions, total)}</div>` : ''}
+    </div>
+    <div class="sources-table">
+      ${sources.map((source) => sourceRow(source, total)).join('')}
+    </div>
+  </div>`;
+}
+
+function sourcesPieGradient(sources, total) {
+  if (!total) return 'rgba(255,255,255,0.08)';
+  let cursor = 0;
+  const stops = [];
+  sources.forEach((source) => {
+    const start = cursor;
+    cursor += (source.submissions / total) * 100;
+    const color = sourceColor(source.source);
+    stops.push(`${color} ${start.toFixed(2)}% ${cursor.toFixed(2)}%`);
+  });
+  return `conic-gradient(${stops.join(', ')})`;
+}
+
+function sourceRow(source, total) {
+  const share = total ? source.submissions / total : 0;
+  const color = sourceColor(source.source);
+  const last = source.lastReceivedAt ? timeAgo(source.lastReceivedAt) : '—';
+  return `<div class="source-row">
+    <span class="source-dot" style="background:${color}"></span>
+    <span class="source-name" title="${esc(source.source)}">${esc(source.source)}</span>
+    <span class="source-bar"><i style="width:${(share * 100).toFixed(2)}%;background:${color}"></i></span>
+    <span class="source-count">${number(source.submissions)}</span>
+    <span class="source-share">${pct(source.submissions, total)}</span>
+    <span class="source-last" title="${esc(source.lastReceivedAt || '')}">${esc(last)}</span>
+  </div>`;
+}
+
+function sourceColor(source) {
+  const palette = [COLORS.gold, COLORS.blue, COLORS.violet, COLORS.green, COLORS.red, '#d88bd0', '#7fc7c3', '#f0a66a'];
+  let hash = 0;
+  for (const ch of String(source || 'unknown')) hash = (hash * 33 + ch.charCodeAt(0)) >>> 0;
+  return palette[hash % palette.length];
+}
+
+function pct(value, total) {
+  if (!total) return '0%';
+  return `${((value / total) * 100).toFixed(value === total ? 0 : 1)}%`;
 }
 
 function recentRow(g) {
