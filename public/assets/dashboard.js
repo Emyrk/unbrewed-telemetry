@@ -1271,7 +1271,7 @@ function sourcesSummary(sources, total) {
         <strong>${number(total)}</strong>
         <span>submissions</span>
       </div>
-      ${top ? `<div class="kicker sources-top-source">Top: ${esc(top.source)} · ${pct(top.submissions, total)}</div>` : ''}
+      ${top ? `<div class="kicker sources-top-source">Top: ${esc(top.source)} · ${sourcePct(top.submissions, total)}</div>` : ''}
     </div>
     <div class="sources-table">
       ${sources.map((source) => sourceRow(source, total)).join('')}
@@ -1301,7 +1301,7 @@ function sourceRow(source, total) {
     <span class="source-name" title="${esc(source.source)}">${esc(source.source)}</span>
     <span class="source-bar"><i style="width:${(share * 100).toFixed(2)}%;background:${color}"></i></span>
     <span class="source-count">${number(source.submissions)}</span>
-    <span class="source-share">${pct(source.submissions, total)}</span>
+    <span class="source-share">${sourcePct(source.submissions, total)}</span>
     <span class="source-last" title="${esc(source.lastReceivedAt || '')}">${esc(last)}</span>
   </div>`;
 }
@@ -1313,7 +1313,7 @@ function sourceColor(source) {
   return palette[hash % palette.length];
 }
 
-function pct(value, total) {
+function sourcePct(value, total) {
   if (!total) return '0%';
   return `${((value / total) * 100).toFixed(value === total ? 0 : 1)}%`;
 }
