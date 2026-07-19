@@ -21,7 +21,7 @@ const FLAG_MIN_GAMES = 30;
 const MATRIX_MIN_GAMES = 3;
 const MATRIX_MAX_DECKS = 30;
 const MATCHUP_FORMATS = new Set(['duel', '1v1']);
-const DEFAULT_EXCLUDED_PILOTS = new Set(['bot:easy']);
+const DEFAULT_INCLUDED_PILOTS = new Set(['human', 'bot:hard']);
 
 const TABS = [
   ['overview', 'Overview'],
@@ -190,8 +190,8 @@ function applyDefaultPilotExclusions() {
   if (state.hasExplicitExclusions) return false;
   state.hasExplicitExclusions = true;
   let changed = false;
-  for (const pilot of DEFAULT_EXCLUDED_PILOTS) {
-    if (allPilots.includes(pilot) && !state.excluded.has(pilot)) {
+  for (const pilot of allPilots) {
+    if (!DEFAULT_INCLUDED_PILOTS.has(pilot) && !state.excluded.has(pilot)) {
       state.excluded.add(pilot);
       changed = true;
     }
