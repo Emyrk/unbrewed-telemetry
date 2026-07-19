@@ -106,6 +106,7 @@ function readStateFromUrl() {
     pilotComparison: {
       pilotA: params.get('pcPilotA') || null,
       pilotB: params.get('pcPilotB') || null,
+      hero: params.get('pcHero') || null,
       opponentPilot: params.get('pcOpponentPilot') || null,
       opponent: params.get('pcOpponent') || null,
     },
@@ -134,6 +135,7 @@ function writeStateToUrl() {
   if (state.matchupOpponentPilot) params.set('matchupOpponentPilot', state.matchupOpponentPilot);
   if (state.pilotComparison?.pilotA) params.set('pcPilotA', state.pilotComparison.pilotA);
   if (state.pilotComparison?.pilotB) params.set('pcPilotB', state.pilotComparison.pilotB);
+  if (state.pilotComparison?.hero) params.set('pcHero', state.pilotComparison.hero);
   if (state.pilotComparison?.opponentPilot) params.set('pcOpponentPilot', state.pilotComparison.opponentPilot);
   if (state.pilotComparison?.opponent) params.set('pcOpponent', state.pilotComparison.opponent);
   if (state.tab === 'submissions' && state.subtab !== 'recent') params.set('subtab', state.subtab);
@@ -1044,6 +1046,7 @@ async function renderPilotComparisons(data) {
       </div>
     </div>
     <div class="pilot-comparison-controls">
+      ${scenarioSelect('Your hero', 'hero', comparison.hero || '', [['', 'All heroes'], ...decks.map((deck) => [deck.deck, deck.label])])}
       ${scenarioSelect('Pilot A', 'pilotA', comparison.pilotA || '', options('Choose pilot A…'))}
       ${scenarioSelect('Pilot B', 'pilotB', comparison.pilotB || '', options('Choose pilot B…'))}
       ${scenarioSelect('Opponent pilot', 'opponentPilot', comparison.opponentPilot || '', options('Choose opponent pilot…'))}
@@ -1088,6 +1091,7 @@ async function fetchPilotComparison(comparison) {
     pilotB: comparison.pilotB,
     opponentPilot: comparison.opponentPilot,
   });
+  if (comparison.hero) params.set('hero', comparison.hero);
   if (comparison.opponent) params.set('opponent', comparison.opponent);
   const key = params.toString();
   const cached = pilotComparisonCache.get(key);
@@ -1105,13 +1109,20 @@ function pilotComparisonTable(detail) {
   const aTotals = comparisonTotals(comparable, 'pilotA');
   const bTotals = comparisonTotals(comparable, 'pilotB');
   const pooledDelta = aTotals.games > 0 && bTotals.games > 0 ? aTotals.winRate - bTotals.winRate : null;
+  const scope = detail.hero
+    ? `Playing ${labelForDeckId(deckIdOf(detail.hero))}`
+    : `Across ${number(comparable.length)} comparable heroes`;
+  const opponentScope = detail.opponent ? ` vs ${labelForDeckId(deckIdOf(detail.opponent))}` : '';
   return `<div>
+    <div class="comparison-scope"><strong>${esc(scope)}</strong>${esc(opponentScope)} · opponent pilot ${esc(pilotLabel(detail.opponentPilot))}</div>
     <div class="comparison-overview">
       ${deckStat(pilotLabel(detail.pilotA), pct(aTotals.winRate), `${number(aTotals.wins)}-${number(aTotals.games - aTotals.wins)} · ${number(aTotals.games)} games`, wrColor(aTotals.winRate))}
       ${deckStat(pilotLabel(detail.pilotB), pct(bTotals.winRate), `${number(bTotals.wins)}-${number(bTotals.games - bTotals.wins)} · ${number(bTotals.games)} games`, wrColor(bTotals.winRate))}
-      ${deckStat('Pooled difference', pooledDelta == null ? '—' : signedPct(pooledDelta), `${number(comparable.length)} comparable heroes`)}
+      ${deckStat(detail.hero ? 'Win-rate difference' : 'Pooled difference', pooledDelta == null ? '—' : signedPct(pooledDelta), detail.hero ? 'selected hero' : `${number(comparable.length)} comparable heroes`)}
     </div>
-    <div class="comparison-note">Pooled rates include only heroes with samples for both pilots. Per-hero differences are more useful than the pooled number when game counts differ.</div>
+    <div class="comparison-note">${detail.hero
+      ? 'Both pilot samples use the selected hero and the same opponent constraints.'
+      : 'Pooled rates include only heroes with samples for both pilots. Per-hero differences are more useful than the pooled number when game counts differ.'}</div>
     <div class="pilot-compare-grid pilot-compare-head">
       <span>Hero</span>
       <span>${esc(pilotLabel(detail.pilotA))}</span>

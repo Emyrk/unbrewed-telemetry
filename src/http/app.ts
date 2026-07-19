@@ -266,6 +266,7 @@ async function handlePilotComparison(url: URL, res: ServerResponse, repo: PgTele
   const result = await repo.pilotComparison({
     pilotA,
     pilotB,
+    hero: blankToNull(url.searchParams.get('hero')),
     opponentPilot,
     opponent: blankToNull(url.searchParams.get('opponent')),
   });

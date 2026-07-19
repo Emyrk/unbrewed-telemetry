@@ -221,6 +221,7 @@ export class PgTelemetryRepository {
   async pilotComparison(args: {
     pilotA: string;
     pilotB: string;
+    hero: string | null;
     opponentPilot: string;
     opponent: string | null;
   }): Promise<PilotComparisonResponse> {
@@ -261,10 +262,11 @@ export class PgTelemetryRepository {
         WHERE me.pilot IN ($1, $2)
           AND opp.pilot = $3
           AND ($4::text IS NULL OR opp.deck = $4)
+          AND ($5::text IS NULL OR me.deck = $5)
         GROUP BY me.deck_id, me.pilot
         ORDER BY me.deck_id ASC, me.pilot ASC
       `,
-      [args.pilotA, args.pilotB, args.opponentPilot, args.opponent],
+      [args.pilotA, args.pilotB, args.opponentPilot, args.opponent, args.hero],
     );
 
     type MutableRow = PilotComparisonResponse['rows'][number];
@@ -326,6 +328,7 @@ export class PgTelemetryRepository {
     return {
       pilotA: args.pilotA,
       pilotB: args.pilotB,
+      hero: args.hero,
       opponentPilot: args.opponentPilot,
       opponent: args.opponent,
       rows,

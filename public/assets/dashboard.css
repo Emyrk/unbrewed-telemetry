@@ -516,10 +516,16 @@ body {
 /* ---------- Pilot Comparisons ---------- */
 .pilot-comparison-controls {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 12px;
   margin: 18px 0;
 }
+.comparison-scope {
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.comparison-scope strong { color: var(--text); }
 .comparison-overview {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

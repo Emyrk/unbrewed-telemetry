@@ -68,7 +68,7 @@ Recommended endpoints:
 - `POST /v1/decks` upserts a batch of deck definitions into the versioned registry (same HMAC auth as `/v1/games`). Payload schema: `schemas/deck-definitions.v1.schema.json`.
 - `GET /v1/stats/dashboard?format=&pilots=` returns all aggregates the dashboard needs (decks with deck profiles, formats with boss-side win rate + by-boss breakdown, maps, pilots, matchups, synergy, first-player).
 - `GET /v1/stats/decks?format=&pilots=` returns just the deck table slice.
-- `GET /v1/stats/pilot-comparison?pilotA=&pilotB=&opponentPilot=&opponent=` compares two exact pilots across 1v1 heroes while holding the opposing pilot and optional opposing hero constant. Powers the Pilot Comparisons dashboard tab.
+- `GET /v1/stats/pilot-comparison?pilotA=&pilotB=&opponentPilot=&hero=&opponent=` compares two exact pilots across 1v1 heroes while holding the opposing pilot and optional active/opposing heroes constant. Powers the Pilot Comparisons dashboard tab.
 - `GET /v1/stats/deck?deck=&format=&pilots=&opponent=&heroPilot=&opponentPilot=` returns one deck's detail: play-mix profile, win rate by format and map, 1v1 matchups, and per-card influence. The exact pilot parameters support swapping pilot assignments for a fixed 1v1 hero matchup. 404s when the deck has no games under the filters.
 - Optional later: `POST /v1/games/batch` for AI lab backfills or simulations.
 

@@ -282,6 +282,17 @@ describeDb('telemetry api with postgres', () => {
       winRateDelta: 0,
     }));
 
+    const heroComparison = await fetch(`${baseUrl}/v1/stats/pilot-comparison?pilotA=bot%3Ahard%2864%2C2s%29&pilotB=bot%3Ahard&hero=king-kong%400.1.0&opponentPilot=bot%3Ahard&opponent=the-mandalorian%400.1.0`);
+    expect(heroComparison.status).toBe(200);
+    const heroComparisonJson = await heroComparison.json() as {
+      hero: string | null;
+      rows: { deck: string; deckId: string }[];
+    };
+    expect(heroComparisonJson.hero).toBe('king-kong@0.1.0');
+    expect(heroComparisonJson.rows).toEqual([
+      expect.objectContaining({ deck: 'king-kong@0.1.0', deckId: 'king-kong' }),
+    ]);
+
     const samePilot = await fetch(`${baseUrl}/v1/stats/pilot-comparison?pilotA=bot%3Ahard&pilotB=bot%3Ahard&opponentPilot=bot%3Ahard`);
     expect(samePilot.status).toBe(400);
     expect(await samePilot.json()).toMatchObject({ code: 'SAME_PILOT' });

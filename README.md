@@ -105,7 +105,7 @@ curl 'http://localhost:8788/v1/stats/decks?format=duel&pilots=bot:hard'
 
 ### `GET /v1/stats/pilot-comparison`
 
-Compares two exact pilots across 1v1 heroes while holding the opposing pilot constant. An optional `opponent` deck narrows every row to the same opposing hero.
+Compares two exact pilots across 1v1 heroes while holding the opposing pilot constant. Optional `hero` and `opponent` deck parameters narrow the comparison to the selected active hero and/or opposing hero.
 
 Required query parameters: `pilotA`, `pilotB`, and `opponentPilot`. `pilotA` and `pilotB` must differ.
 

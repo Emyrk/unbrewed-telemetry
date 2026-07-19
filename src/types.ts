@@ -377,6 +377,7 @@ export interface PilotComparisonRow {
 export interface PilotComparisonResponse {
   pilotA: string;
   pilotB: string;
+  hero: string | null;
   opponentPilot: string;
   opponent: string | null;
   rows: PilotComparisonRow[];
