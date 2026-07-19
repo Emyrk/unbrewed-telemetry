@@ -197,6 +197,56 @@ describeDb('telemetry api with postgres', () => {
     expect(openingCrushing).toMatchObject({ gamesWith: 1, baselineWinRate: 1, influence: 0 });
   });
 
+  it('filters 1v1 deck detail by hero and opponent pilot assignments', async () => {
+    const matchupGame = (
+      gameId: string,
+      heroPilot: string,
+      opponentPilot: string,
+      winner: number,
+    ) => sampleGame({
+      gameId,
+      stateHash: `${gameId}-state`,
+      teams: [
+        {
+          seats: [{
+            deck: 'king-kong@0.1.0',
+            pilot: heroPilot,
+            runtimePlayerId: 'p1',
+            heroId: 'king-kong',
+            botDifficulty: 'hard',
+            finalHealth: winner === 0 ? 7 : 0,
+          }],
+        },
+        {
+          seats: [{
+            deck: 'the-mandalorian@0.1.0',
+            pilot: opponentPilot,
+            runtimePlayerId: 'p2',
+            heroId: 'the-mandalorian',
+            botDifficulty: 'hard',
+            finalHealth: winner === 1 ? 7 : 0,
+          }],
+        },
+      ],
+      winner,
+    });
+
+    await postGame(baseUrl, secret, matchupGame('pilot-compare-001', 'bot:hard(64,2s)', 'bot:hard', 0), 'pilot-compare-001');
+    await postGame(baseUrl, secret, matchupGame('pilot-compare-002', 'bot:hard(64,2s)', 'bot:hard', 0), 'pilot-compare-002');
+    await postGame(baseUrl, secret, matchupGame('pilot-compare-003', 'bot:hard', 'bot:hard(64,2s)', 1), 'pilot-compare-003');
+
+    const selected = await fetch(`${baseUrl}/v1/stats/deck?deck=king-kong@0.1.0&format=duel&opponent=the-mandalorian@0.1.0&heroPilot=bot%3Ahard%2864%2C2s%29&opponentPilot=bot%3Ahard`);
+    expect(selected.status).toBe(200);
+    expect(await selected.json()).toMatchObject({ games: 2, wins: 2, winRate: 1 });
+
+    const swapped = await fetch(`${baseUrl}/v1/stats/deck?deck=king-kong@0.1.0&format=duel&opponent=the-mandalorian@0.1.0&heroPilot=bot%3Ahard&opponentPilot=bot%3Ahard%2864%2C2s%29`);
+    expect(swapped.status).toBe(200);
+    expect(await swapped.json()).toMatchObject({ games: 1, wins: 0, winRate: 0 });
+
+    const missing = await fetch(`${baseUrl}/v1/stats/deck?deck=king-kong@0.1.0&format=duel&opponent=the-mandalorian@0.1.0&heroPilot=human&opponentPilot=bot%3Ahard`);
+    expect(missing.status).toBe(404);
+  });
+
   it('404s deck detail for an unknown deck', async () => {
     const response = await fetch(`${baseUrl}/v1/stats/deck?deck=does-not-exist@9.9.9`);
     expect(response.status).toBe(404);

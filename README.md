@@ -103,6 +103,26 @@ Example:
 curl 'http://localhost:8788/v1/stats/decks?format=duel&pilots=bot:hard'
 ```
 
+### `GET /v1/stats/deck`
+
+Returns detailed stats for one deck. The dashboard uses the exact 1v1 filters to compare pilot assignments for the same hero matchup.
+
+Query parameters:
+
+- `deck`: required full deck key.
+- `format`: optional format id.
+- `pilots`: optional broad comma-separated pilot allowlist.
+- `opponent`: optional opposing deck key.
+- `partner`: optional allied deck key for 2v2.
+- `heroPilot`: optional exact pilot value for the selected deck.
+- `opponentPilot`: optional exact pilot value for the opposing team.
+
+Example:
+
+```sh
+curl 'http://localhost:8788/v1/stats/deck?deck=king-kong@0.1.0&format=duel&opponent=the-mandalorian@0.1.0&heroPilot=bot:hard(64,2s)&opponentPilot=bot:hard'
+```
+
 ## Submit the sample game
 
 With the dev server running:

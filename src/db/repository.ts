@@ -50,6 +50,8 @@ export interface DeckStatsFilters {
   pilots: string[];
   opponent?: string | null;
   partner?: string | null;
+  heroPilot?: string | null;
+  opponentPilot?: string | null;
 }
 
 interface DuplicateRow {
@@ -1126,6 +1128,8 @@ export class PgTelemetryRepository {
     const pilotFilter = filters.pilots.length > 0 ? filters.pilots : null;
     const opponent = filters.opponent ?? null;
     const partner = filters.partner ?? null;
+    const heroPilot = filters.heroPilot ?? null;
+    const opponentPilot = filters.opponentPilot ?? null;
     const { deckId, deckVersion } = splitDeckId(deck);
 
     const totals = await this.pool.query<{ total_games: number }>(
@@ -1134,11 +1138,11 @@ export class PgTelemetryRepository {
           SELECT g.* FROM games g
           WHERE ($1::text IS NULL OR g.format = $1)
             AND ${pilotFilterSql()}
-            AND ${deckScenarioFilterSql(3, 4, 5)}
+            AND ${deckScenarioFilterSql(3, 4, 5, 6, 7)}
         )
         SELECT COUNT(*)::int AS total_games FROM selected_games
       `,
-      [filters.format, pilotFilter, deck, opponent, partner],
+      [filters.format, pilotFilter, deck, opponent, partner, heroPilot, opponentPilot],
     );
     const totalGames = Number(totals.rows[0]?.total_games ?? 0);
 
@@ -1165,7 +1169,7 @@ export class PgTelemetryRepository {
           SELECT g.* FROM games g
           WHERE ($1::text IS NULL OR g.format = $1)
             AND ${pilotFilterSql()}
-            AND ${deckScenarioFilterSql(3, 4, 5)}
+            AND ${deckScenarioFilterSql(3, 4, 5, 6, 7)}
         )
         SELECT
           MAX(s.deck_version) AS deck_version,
@@ -1188,7 +1192,7 @@ export class PgTelemetryRepository {
         JOIN selected_games g ON g.id = s.game_id
         WHERE s.deck = $3
       `,
-      [filters.format, pilotFilter, deck, opponent, partner],
+      [filters.format, pilotFilter, deck, opponent, partner, heroPilot, opponentPilot],
     );
     const base = baseSel.rows[0];
     const selGames = Number(base?.games ?? 0);
@@ -1209,19 +1213,19 @@ export class PgTelemetryRepository {
 
     const [formats, maps, matchups, twoVTwo, cards, startingCards, broadBase] = await Promise.all([
       this.deckFormatRows(deck, pilotFilter),
-      this.deckMapRows(deck, pilotFilter, filters.format, opponent, partner),
+      this.deckMapRows(deck, pilotFilter, filters.format, opponent, partner, heroPilot, opponentPilot),
       this.deckMatchupRows(deck, pilotFilter),
       this.deckTwoVTwoRows(deck, pilotFilter),
-      this.deckCardRows(deck, pilotFilter, filters.format, opponent, partner),
-      this.deckStartingCardRows(deck, pilotFilter, filters.format, opponent, partner),
+      this.deckCardRows(deck, pilotFilter, filters.format, opponent, partner, heroPilot, opponentPilot),
+      this.deckStartingCardRows(deck, pilotFilter, filters.format, opponent, partner, heroPilot, opponentPilot),
       this.pool.query<{ games: number; wins: number }>(
         `
-          WITH broad_games AS (SELECT g.* FROM games g WHERE ${pilotFilterSql(1)} AND ($3::text IS NULL OR g.format = $3) AND ${deckScenarioFilterSql(2, 4, 5)})
+          WITH broad_games AS (SELECT g.* FROM games g WHERE ${pilotFilterSql(1)} AND ($3::text IS NULL OR g.format = $3) AND ${deckScenarioFilterSql(2, 4, 5, 6, 7)})
           SELECT COUNT(*)::int AS games, COUNT(*) FILTER (WHERE s.won)::int AS wins
           FROM game_seats s JOIN broad_games g ON g.id = s.game_id
           WHERE s.deck = $2
         `,
-        [pilotFilter, deck, filters.format, opponent, partner],
+        [pilotFilter, deck, filters.format, opponent, partner, heroPilot, opponentPilot],
       ),
     ]);
 
@@ -1338,10 +1342,18 @@ export class PgTelemetryRepository {
     });
   }
 
-  private async deckMapRows(deck: string, pilotFilter: string[] | null, format: string | null = null, opponent: string | null = null, partner: string | null = null): Promise<DeckDetailResponse['maps']> {
+  private async deckMapRows(
+    deck: string,
+    pilotFilter: string[] | null,
+    format: string | null = null,
+    opponent: string | null = null,
+    partner: string | null = null,
+    heroPilot: string | null = null,
+    opponentPilot: string | null = null,
+  ): Promise<DeckDetailResponse['maps']> {
     const rows = await this.pool.query<{ map: string; map_version: string | null; games: number; wins: number }>(
       `
-        WITH broad_games AS (SELECT g.* FROM games g WHERE ${pilotFilterSql(1)} AND ($3::text IS NULL OR g.format = $3) AND ${deckScenarioFilterSql(2, 4, 5)})
+        WITH broad_games AS (SELECT g.* FROM games g WHERE ${pilotFilterSql(1)} AND ($3::text IS NULL OR g.format = $3) AND ${deckScenarioFilterSql(2, 4, 5, 6, 7)})
         SELECT
           g.map,
           MAX(g.map_version) FILTER (WHERE g.map_version IS NOT NULL) AS map_version,
@@ -1352,7 +1364,7 @@ export class PgTelemetryRepository {
         GROUP BY g.map
         ORDER BY games DESC, g.map ASC
       `,
-      [pilotFilter, deck, format, opponent, partner],
+      [pilotFilter, deck, format, opponent, partner, heroPilot, opponentPilot],
     );
     return rows.rows.map((row) => {
       const games = Number(row.games);
@@ -1538,6 +1550,8 @@ export class PgTelemetryRepository {
     format: string | null = null,
     opponent: string | null = null,
     partner: string | null = null,
+    heroPilot: string | null = null,
+    opponentPilot: string | null = null,
   ): Promise<Omit<DeckDetailResponse['cards'][number], 'baselineWinRate' | 'influence'>[]> {
     const rows = await this.pool.query<{
       card: string;
@@ -1547,7 +1561,7 @@ export class PgTelemetryRepository {
       wins_with: number;
     }>(
       `
-        WITH broad_games AS (SELECT g.* FROM games g WHERE ${pilotFilterSql(1)} AND ($3::text IS NULL OR g.format = $3) AND ${deckScenarioFilterSql(2, 4, 5)})
+        WITH broad_games AS (SELECT g.* FROM games g WHERE ${pilotFilterSql(1)} AND ($3::text IS NULL OR g.format = $3) AND ${deckScenarioFilterSql(2, 4, 5, 6, 7)})
         SELECT
           c.card,
           mode() WITHIN GROUP (ORDER BY c.context_bucket) AS bucket,
@@ -1560,7 +1574,7 @@ export class PgTelemetryRepository {
         GROUP BY c.card
         ORDER BY plays DESC, c.card ASC
       `,
-      [pilotFilter, deck, format, opponent, partner],
+      [pilotFilter, deck, format, opponent, partner, heroPilot, opponentPilot],
     );
     return rows.rows.map((row) => {
       const gamesWith = Number(row.games_with);
@@ -1582,6 +1596,8 @@ export class PgTelemetryRepository {
     format: string | null = null,
     opponent: string | null = null,
     partner: string | null = null,
+    heroPilot: string | null = null,
+    opponentPilot: string | null = null,
   ): Promise<Omit<DeckDetailResponse['startingCards'][number], 'baselineWinRate' | 'influence'>[]> {
     const rows = await this.pool.query<{
       card: string;
@@ -1590,7 +1606,7 @@ export class PgTelemetryRepository {
       wins_with: number;
     }>(
       `
-        WITH broad_games AS (SELECT g.* FROM games g WHERE ${pilotFilterSql(1)} AND ($3::text IS NULL OR g.format = $3) AND ${deckScenarioFilterSql(2, 4, 5)})
+        WITH broad_games AS (SELECT g.* FROM games g WHERE ${pilotFilterSql(1)} AND ($3::text IS NULL OR g.format = $3) AND ${deckScenarioFilterSql(2, 4, 5, 6, 7)})
         SELECT
           c.card,
           COUNT(*)::int AS starts,
@@ -1602,7 +1618,7 @@ export class PgTelemetryRepository {
         GROUP BY c.card
         ORDER BY starts DESC, c.card ASC
       `,
-      [pilotFilter, deck, format, opponent, partner],
+      [pilotFilter, deck, format, opponent, partner, heroPilot, opponentPilot],
     );
     return rows.rows.map((row) => {
       const gamesWith = Number(row.games_with);
@@ -1882,7 +1898,13 @@ function pilotFilterSql(paramIndex = 2): string {
             ))`;
 }
 
-function deckScenarioFilterSql(deckParam = 3, opponentParam = 4, partnerParam = 5): string {
+function deckScenarioFilterSql(
+  deckParam = 3,
+  opponentParam = 4,
+  partnerParam = 5,
+  heroPilotParam = 6,
+  opponentPilotParam = 7,
+): string {
   return `($${opponentParam}::text IS NULL OR EXISTS (
               SELECT 1
               FROM game_seats opp
@@ -1903,6 +1925,23 @@ function deckScenarioFilterSql(deckParam = 3, opponentParam = 4, partnerParam = 
                 AND partner.deck = $${partnerParam}
                 AND partner.team_index = me.team_index
                 AND partner.seat_index <> me.seat_index
+            ))
+            AND ($${heroPilotParam}::text IS NULL OR EXISTS (
+              SELECT 1
+              FROM game_seats me
+              WHERE me.game_id = g.id
+                AND me.deck = $${deckParam}
+                AND me.pilot = $${heroPilotParam}
+            ))
+            AND ($${opponentPilotParam}::text IS NULL OR EXISTS (
+              SELECT 1
+              FROM game_seats opp
+              JOIN game_seats me ON me.game_id = opp.game_id
+              WHERE opp.game_id = g.id
+                AND me.game_id = g.id
+                AND me.deck = $${deckParam}
+                AND opp.team_index <> me.team_index
+                AND opp.pilot = $${opponentPilotParam}
             ))`;
 }
 

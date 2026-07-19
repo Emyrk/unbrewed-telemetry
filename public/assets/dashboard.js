@@ -65,6 +65,8 @@ let cardInfluenceMode = readStoredCardInfluenceMode();
 let twoVTwoMode = readStoredTwoVTwoMode();
 let deckFormatTab = null;
 let deckDuelOpponent = null;
+let deckDuelHeroPilot = null;
+let deckDuelOpponentPilot = null;
 let deckTwoVTwoPartner = null;
 let currentDeckDetail = null;
 let current = null;
@@ -210,17 +212,22 @@ function statsQuery() {
 function deckDetailCacheKey(deck, extra = {}) {
   const params = statsQuery();
   params.set('deck', resolveDeckDetailKey(deck));
+  if (extra.clearPilots) params.delete('pilots');
   for (const [key, value] of Object.entries(extra)) {
+    if (key === 'clearPilots') continue;
     if (value != null && value !== '') params.set(key, value);
   }
   return params.toString();
 }
 
-async function fetchDeckDetail(deck, extra = {}) {
+async function fetchDeckDetail(deck, extra = {}, allowNotFound = false) {
   const key = deckDetailCacheKey(deck, extra);
   const cached = deckDetailCache.get(key);
   if (cached && Date.now() - cached.at < DECK_DETAIL_TTL_MS) return cached.data;
-  const data = await fetchJson(`/v1/stats/deck?${key}`);
+  const response = await fetch(`/v1/stats/deck?${key}`, { headers: { accept: 'application/json' } });
+  const data = await response.json();
+  if (allowNotFound && response.status === 404) return null;
+  if (!response.ok || !data.ok) throw new Error(data.message || data.code || 'Request failed');
   deckDetailCache.set(key, { at: Date.now(), data });
   return data;
 }
@@ -1467,6 +1474,11 @@ function heroLabelHtml(deckId) {
 // just sets state + URL; renderView routes to renderDeckPage which fetches.
 function openDeck(deck) {
   state.deck = cleanDeckUrlKey(deck);
+  deckFormatTab = null;
+  deckDuelOpponent = null;
+  deckDuelHeroPilot = null;
+  deckDuelOpponentPilot = null;
+  deckTwoVTwoPartner = null;
   state.pair = null;
   state.matchup = null;
   matrixFocus = null;
@@ -1555,6 +1567,8 @@ function setDeckFormatTab(key) {
 
 function setDeckScenario(field, value) {
   if (field === 'duelOpponent') deckDuelOpponent = value || null;
+  if (field === 'duelHeroPilot') deckDuelHeroPilot = value || null;
+  if (field === 'duelOpponentPilot') deckDuelOpponentPilot = value || null;
   if (field === 'twoPartner') deckTwoVTwoPartner = value || null;
   updateDeckFormatShell().catch(showError);
 }
@@ -1568,22 +1582,47 @@ async function updateDeckFormatShell() {
   const tabs = deckFormatTabs(currentDeckDetail.formats || []);
   const activeTab = resolveDeckFormatTab(tabs);
   let scopedDetail = null;
+  let swappedDetail = null;
   const scenario = deckFormatScenario(activeTab);
   if (scenario) {
-    shell.innerHTML = deckFormatShellContent(tabs, activeTab, currentDeckDetail, null, true);
+    shell.innerHTML = deckFormatShellContent(tabs, activeTab, currentDeckDetail, null, null, true);
     bindHandlers(shell);
     bindDeckScenarioControls(shell);
-    scopedDetail = await fetchDeckDetail(state.deck, scenario);
+    const swappedScenario = deckPilotSwapScenario(activeTab);
+    [scopedDetail, swappedDetail] = await Promise.all([
+      fetchDeckDetail(state.deck, scenario, true),
+      swappedScenario ? fetchDeckDetail(state.deck, swappedScenario, true) : Promise.resolve(null),
+    ]);
   }
-  shell.innerHTML = deckFormatShellContent(tabs, activeTab, currentDeckDetail, scopedDetail);
+  shell.innerHTML = deckFormatShellContent(tabs, activeTab, currentDeckDetail, scopedDetail, swappedDetail);
   bindHandlers(shell);
   bindDeckScenarioControls(shell);
 }
 
 function deckFormatScenario(tab) {
-  if (tab.key === 'duel' && deckDuelOpponent) return { format: 'duel', opponent: deckDuelOpponent };
+  if (tab.key === 'duel' && (deckDuelOpponent || deckDuelHeroPilot || deckDuelOpponentPilot)) {
+    return {
+      format: 'duel',
+      opponent: deckDuelOpponent,
+      heroPilot: deckDuelHeroPilot,
+      opponentPilot: deckDuelOpponentPilot,
+      clearPilots: !!(deckDuelHeroPilot || deckDuelOpponentPilot),
+    };
+  }
   if (tab.key === 'team-2v2' && deckTwoVTwoPartner) return { format: 'team-2v2', partner: deckTwoVTwoPartner };
   return null;
+}
+
+function deckPilotSwapScenario(tab) {
+  if (tab.key !== 'duel' || !deckDuelOpponent || !deckDuelHeroPilot || !deckDuelOpponentPilot) return null;
+  if (deckDuelHeroPilot === deckDuelOpponentPilot) return null;
+  return {
+    format: 'duel',
+    opponent: deckDuelOpponent,
+    heroPilot: deckDuelOpponentPilot,
+    opponentPilot: deckDuelHeroPilot,
+    clearPilots: true,
+  };
 }
 
 function bindDeckScenarioControls(root) {
@@ -1594,7 +1633,7 @@ function bindDeckScenarioControls(root) {
   });
 }
 
-function deckFormatShellContent(tabs, activeTab, d, scopedDetail = null, loading = false) {
+function deckFormatShellContent(tabs, activeTab, d, scopedDetail = null, swappedDetail = null, loading = false) {
   return `<div class="section-head">
     <div>
       <div class="sub-title" style="margin-top:0">Format detail</div>
@@ -1602,7 +1641,7 @@ function deckFormatShellContent(tabs, activeTab, d, scopedDetail = null, loading
     </div>
     <div class="syn-tabs deck-format-tabs">${tabs.map((tab) => deckFormatTabButton(tab, activeTab)).join('')}</div>
   </div>
-  ${deckFormatPanel(activeTab, d, scopedDetail, loading)}`;
+  ${deckFormatPanel(activeTab, d, scopedDetail, swappedDetail, loading)}`;
 }
 
 function deckFormatTabs(formats) {
@@ -1638,7 +1677,8 @@ function deckFormatTabButton(tab, activeTab) {
   return `<button class="syn-tab${tab.key === activeTab.key ? ' active' : ''}" data-handler="${id}" type="button">${esc(tab.label)}</button>`;
 }
 
-function deckFormatPanel(tab, d, scopedDetail = null, loading = false) {
+function deckFormatPanel(tab, d, scopedDetail = null, swappedDetail = null, loading = false) {
+  const hasScenario = !!deckFormatScenario(tab);
   const detail = scopedDetail || d;
   const loadingMsg = loading ? scenarioLoadingSection() : '';
   if (tab.key === 'team-2v2') {
@@ -1651,19 +1691,61 @@ function deckFormatPanel(tab, d, scopedDetail = null, loading = false) {
   if (tab.key === 'duel') {
     const matchups = matchupHighlights(d.matchups || []);
     const selectedOpponent = deckDuelOpponent ? (d.matchups || []).find((m) => m.deck === deckDuelOpponent) : null;
+    const pilotOptions = [['', 'Any pilot'], ...allPilots.map((pilot) => [pilot, pilotLabel(pilot)])];
     return `<div class="deck-format-panel">
-      ${scenarioSelectSection('Opponent', 'duelOpponent', deckDuelOpponent || '', [['', 'All opponents'], ...(d.matchups || []).map((m) => [m.deck, m.label])])}
-      ${loading ? scenarioStatsSkeleton() : formatSummarySection(tab, null, scopedDetail)}
-      ${loadingMsg || `${selectedOpponent ? '' : `<div class="modal-section">
+      <div class="scenario-control-grid">
+        ${scenarioSelectSection('Hero pilot', 'duelHeroPilot', deckDuelHeroPilot || '', pilotOptions)}
+        ${scenarioSelectSection('Opponent hero', 'duelOpponent', deckDuelOpponent || '', [['', 'All opponents'], ...(d.matchups || []).map((m) => [m.deck, m.label])])}
+        ${scenarioSelectSection('Opponent pilot', 'duelOpponentPilot', deckDuelOpponentPilot || '', pilotOptions)}
+      </div>
+      ${loading ? scenarioStatsSkeleton() : hasScenario && !scopedDetail ? `<div class="modal-section">${empty('No games match this pilot assignment.')}</div>` : formatSummarySection(tab, null, scopedDetail)}
+      ${loadingMsg || `${pilotComparisonSection(scopedDetail, swappedDetail, selectedOpponent)}
+      ${selectedOpponent ? '' : `<div class="modal-section">
         <div class="sub-title title-with-link" style="margin-top:0"><span>Best and worst duel matchups</span><button class="inline-link" data-handler="${registerHandler(() => openMatchupFocus(d.deck))}" type="button">All matchups</button></div>
         <div class="list tight">${matchups.length ? matchups.map(matchupRow).join('') : empty('Not enough duel data.')}</div>
       </div>`}
-      ${mapAndInfluenceSection(detail)}`}
+      ${hasScenario && !scopedDetail ? '' : mapAndInfluenceSection(detail)}`}
     </div>`;
   }
   return `<div class="deck-format-panel">
     ${formatSummarySection(tab)}
     ${mapAndInfluenceSection(d)}
+  </div>`;
+}
+
+function pilotComparisonSection(selectedDetail, swappedDetail, selectedOpponent) {
+  if (!selectedOpponent || !deckDuelHeroPilot || !deckDuelOpponentPilot) return '';
+  const selected = pilotAssignmentRow(deckDuelHeroPilot, deckDuelOpponentPilot, selectedDetail);
+  const samePilot = deckDuelHeroPilot === deckDuelOpponentPilot;
+  const swapped = samePilot ? '' : pilotAssignmentRow(deckDuelOpponentPilot, deckDuelHeroPilot, swappedDetail);
+  const swing = !samePilot && selectedDetail?.games > 0 && swappedDetail?.games > 0
+    ? selectedDetail.winRate - swappedDetail.winRate
+    : null;
+  const samples = [selectedDetail?.games || 0, swappedDetail?.games || 0].filter((games) => games > 0);
+  const smallSample = samples.some((games) => games < 10);
+  return `<div class="modal-section pilot-comparison">
+    <div class="sub-title" style="margin-top:0">Pilot assignment comparison</div>
+    <div class="kicker">Same hero matchup, with the selected pilots assigned to opposite sides.</div>
+    <div class="pilot-comparison-table">
+      ${selected}
+      ${swapped}
+    </div>
+    ${swing == null ? '' : `<div class="comparison-swing"><span>Assignment swing</span><strong class="mono" style="color:${wrColor(0.5 + swing / 2)}">${signedPct(swing)}</strong></div>`}
+    ${smallSample ? '<div class="sample-warning">Small sample: treat these percentages as directional, not conclusive.</div>' : ''}
+  </div>`;
+}
+
+function pilotAssignmentRow(heroPilot, opponentPilot, detail) {
+  const games = detail?.games || 0;
+  const wins = detail?.wins || 0;
+  const losses = Math.max(0, games - wins);
+  const rate = games > 0 ? pct(detail.winRate) : '—';
+  const interval = games > 0 ? `95% CI ${pct(detail.ciLow, 0)}-${pct(detail.ciHigh, 0)}` : 'No games';
+  return `<div class="pilot-comparison-row">
+    <div><strong>${esc(pilotLabel(heroPilot))}</strong><span> vs ${esc(pilotLabel(opponentPilot))}</span></div>
+    <div class="mono comparison-record">${number(wins)}-${number(losses)} · ${number(games)} games</div>
+    <div class="mono comparison-rate" style="color:${games > 0 ? wrColor(detail.winRate) : 'var(--muted-2)'}">${rate}</div>
+    <div class="subtle comparison-ci">${interval}</div>
   </div>`;
 }
 
@@ -1676,9 +1758,12 @@ function formatSummarySection(tab, twoVTwo = null, scopedDetail = null) {
   const wins = twoVTwo ? twoVTwo.wins : row.wins;
   const winRate = twoVTwo ? twoVTwo.winRate : row.winRate;
   const firstPlayer = row?.firstPlayer || { first: {}, second: {} };
+  const interval = scopedDetail && scopedDetail.ciLow != null && scopedDetail.ciHigh != null
+    ? ` · 95% CI ${pct(scopedDetail.ciLow, 0)}-${pct(scopedDetail.ciHigh, 0)}`
+    : '';
   return `<div class="modal-section">
     <div class="deck-stats compact scenario-stats">
-      ${deckStat(`${tab.label} win rate`, winRate == null ? '—' : pct(winRate), `${number(wins)}-${number(Math.max(0, games - wins))} · ${number(games)} games`, winRate == null ? undefined : wrColor(winRate))}
+      ${deckStat(`${tab.label} win rate`, winRate == null ? '—' : pct(winRate), `${number(wins)}-${number(Math.max(0, games - wins))} · ${number(games)} games${interval}`, winRate == null ? undefined : wrColor(winRate))}
       ${deckStat('Avg HP on wins', row?.avgWinFinalHealth == null ? '—' : row.avgWinFinalHealth.toFixed(1), `${number(wins)} wins`)}
       ${deckStat('Cards left on wins', row?.avgWinCardsLeft == null ? '—' : row.avgWinCardsLeft.toFixed(1), 'final deck count')}
       ${deckStat('Cards left on losses', row?.avgLossCardsLeft == null ? '—' : row.avgLossCardsLeft.toFixed(1), 'final deck count')}

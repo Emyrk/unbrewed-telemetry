@@ -68,7 +68,7 @@ Recommended endpoints:
 - `POST /v1/decks` upserts a batch of deck definitions into the versioned registry (same HMAC auth as `/v1/games`). Payload schema: `schemas/deck-definitions.v1.schema.json`.
 - `GET /v1/stats/dashboard?format=&pilots=` returns all aggregates the dashboard needs (decks with deck profiles, formats with boss-side win rate + by-boss breakdown, maps, pilots, matchups, synergy, first-player).
 - `GET /v1/stats/decks?format=&pilots=` returns just the deck table slice.
-- `GET /v1/stats/deck?deck=&format=&pilots=` returns one deck's detail: play-mix profile, win rate by format and map, 1v1 matchups, and per-card influence. 404s when the deck has no games under the filters.
+- `GET /v1/stats/deck?deck=&format=&pilots=&opponent=&heroPilot=&opponentPilot=` returns one deck's detail: play-mix profile, win rate by format and map, 1v1 matchups, and per-card influence. The exact pilot parameters support swapping pilot assignments for a fixed 1v1 hero matchup. 404s when the deck has no games under the filters.
 - Optional later: `POST /v1/games/batch` for AI lab backfills or simulations.
 
 Authentication should be server-to-server only. Use the telemetry secret as an HMAC key by default, signing the request body plus timestamp. Ask Steven before downgrading the ingest API to bearer-only auth for MVP speed. Never accept submissions from browsers.

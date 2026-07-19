@@ -336,7 +336,14 @@ async function handleDeckDetail(url: URL, res: ServerResponse, repo: PgTelemetry
   sendJson(res, 200, { ok: true, ...detail });
 }
 
-function statsFiltersFromUrl(url: URL): { format: string | null; pilots: string[]; opponent: string | null; partner: string | null } {
+function statsFiltersFromUrl(url: URL): {
+  format: string | null;
+  pilots: string[];
+  opponent: string | null;
+  partner: string | null;
+  heroPilot: string | null;
+  opponentPilot: string | null;
+} {
   const format = blankToNull(url.searchParams.get('format'));
   const pilotParam = blankToNull(url.searchParams.get('pilots')) ?? blankToNull(url.searchParams.get('pilot'));
   const pilots = pilotParam ? pilotParam.split(',').map((value) => value.trim()).filter(Boolean) : [];
@@ -345,6 +352,8 @@ function statsFiltersFromUrl(url: URL): { format: string | null; pilots: string[
     pilots,
     opponent: blankToNull(url.searchParams.get('opponent')),
     partner: blankToNull(url.searchParams.get('partner')),
+    heroPilot: blankToNull(url.searchParams.get('heroPilot')),
+    opponentPilot: blankToNull(url.searchParams.get('opponentPilot')),
   };
 }
 
