@@ -203,6 +203,7 @@ describeDb('telemetry api with postgres', () => {
       heroPilot: string,
       opponentPilot: string,
       winner: number,
+      opponentDeck = 'the-mandalorian@0.1.0',
     ) => sampleGame({
       gameId,
       stateHash: `${gameId}-state`,
@@ -219,10 +220,10 @@ describeDb('telemetry api with postgres', () => {
         },
         {
           seats: [{
-            deck: 'the-mandalorian@0.1.0',
+            deck: opponentDeck,
             pilot: opponentPilot,
             runtimePlayerId: 'p2',
-            heroId: 'the-mandalorian',
+            heroId: opponentDeck.split('@')[0] ?? opponentDeck,
             botDifficulty: 'hard',
             finalHealth: winner === 1 ? 7 : 0,
           }],
@@ -235,6 +236,8 @@ describeDb('telemetry api with postgres', () => {
     await postGame(baseUrl, secret, matchupGame('pilot-compare-002', 'bot:hard(64,2s)', 'bot:hard', 0), 'pilot-compare-002');
     await postGame(baseUrl, secret, matchupGame('pilot-compare-003', 'bot:hard', 'bot:hard(64,2s)', 1), 'pilot-compare-003');
     await postGame(baseUrl, secret, matchupGame('pilot-compare-004', 'bot:hard', 'bot:hard', 0), 'pilot-compare-004');
+    await postGame(baseUrl, secret, matchupGame('pilot-compare-005', 'bot:hard(64,2s)', 'bot:hard', 0, 'batman@0.1.0'), 'pilot-compare-005');
+    await postGame(baseUrl, secret, matchupGame('pilot-compare-006', 'bot:hard', 'bot:hard', 1, 'batman@0.1.0'), 'pilot-compare-006');
 
     const selected = await fetch(`${baseUrl}/v1/stats/deck?deck=king-kong@0.1.0&format=duel&opponent=the-mandalorian@0.1.0&heroPilot=bot%3Ahard%2864%2C2s%29&opponentPilot=bot%3Ahard`);
     expect(selected.status).toBe(200);
@@ -290,8 +293,23 @@ describeDb('telemetry api with postgres', () => {
     };
     expect(heroComparisonJson.hero).toBe('king-kong@0.1.0');
     expect(heroComparisonJson.rows).toEqual([
-      expect.objectContaining({ deck: 'king-kong@0.1.0', deckId: 'king-kong' }),
+      expect.objectContaining({ deck: 'the-mandalorian@0.1.0', deckId: 'the-mandalorian' }),
     ]);
+
+    const allOpponents = await fetch(`${baseUrl}/v1/stats/pilot-comparison?pilotA=bot%3Ahard%2864%2C2s%29&pilotB=bot%3Ahard&hero=king-kong%400.1.0&opponentPilot=bot%3Ahard`);
+    expect(allOpponents.status).toBe(200);
+    const allOpponentsJson = await allOpponents.json() as {
+      rows: { deckId: string; pilotA: { winRate: number }; pilotB: { winRate: number }; winRateDelta: number | null }[];
+    };
+    expect(allOpponentsJson.rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ deckId: 'the-mandalorian' }),
+      expect.objectContaining({
+        deckId: 'batman',
+        pilotA: expect.objectContaining({ winRate: 1 }),
+        pilotB: expect.objectContaining({ winRate: 0 }),
+        winRateDelta: 1,
+      }),
+    ]));
 
     const samePilot = await fetch(`${baseUrl}/v1/stats/pilot-comparison?pilotA=bot%3Ahard&pilotB=bot%3Ahard&opponentPilot=bot%3Ahard`);
     expect(samePilot.status).toBe(400);

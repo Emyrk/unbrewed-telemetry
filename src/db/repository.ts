@@ -244,10 +244,12 @@ export class PgTelemetryRepository {
           WHERE g.format IN ('duel', '1v1')
         )
         SELECT
-          MODE() WITHIN GROUP (ORDER BY me.deck) AS deck,
-          me.deck_id,
-          MAX(me.hero_name) FILTER (WHERE me.hero_name IS NOT NULL) AS hero_name,
-          MAX(me.hero_id) FILTER (WHERE me.hero_id IS NOT NULL) AS hero_id,
+          MODE() WITHIN GROUP (ORDER BY CASE WHEN $5::text IS NULL THEN me.deck ELSE opp.deck END) AS deck,
+          CASE WHEN $5::text IS NULL THEN me.deck_id ELSE opp.deck_id END AS deck_id,
+          MAX(CASE WHEN $5::text IS NULL THEN me.hero_name ELSE opp.hero_name END)
+            FILTER (WHERE CASE WHEN $5::text IS NULL THEN me.hero_name ELSE opp.hero_name END IS NOT NULL) AS hero_name,
+          MAX(CASE WHEN $5::text IS NULL THEN me.hero_id ELSE opp.hero_id END)
+            FILTER (WHERE CASE WHEN $5::text IS NULL THEN me.hero_id ELSE opp.hero_id END IS NOT NULL) AS hero_id,
           me.pilot,
           COUNT(*)::int AS games,
           COUNT(*) FILTER (WHERE me.won)::int AS wins,
@@ -263,8 +265,8 @@ export class PgTelemetryRepository {
           AND opp.pilot = $3
           AND ($4::text IS NULL OR opp.deck = $4)
           AND ($5::text IS NULL OR me.deck = $5)
-        GROUP BY me.deck_id, me.pilot
-        ORDER BY me.deck_id ASC, me.pilot ASC
+        GROUP BY CASE WHEN $5::text IS NULL THEN me.deck_id ELSE opp.deck_id END, me.pilot
+        ORDER BY deck_id ASC, me.pilot ASC
       `,
       [args.pilotA, args.pilotB, args.opponentPilot, args.opponent, args.hero],
     );

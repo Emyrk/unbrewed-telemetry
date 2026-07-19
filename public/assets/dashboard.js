@@ -1102,10 +1102,11 @@ async function fetchPilotComparison(comparison) {
 }
 
 function pilotComparisonTable(detail) {
-  const comparable = (detail.rows || []).filter((row) => row.pilotA.games > 0 && row.pilotB.games > 0);
-  if (!comparable.length) {
-    return empty('No heroes have games for both pilots under this opponent selection. Try removing the opponent hero or choosing pilots with more games.');
+  const rows = detail.rows || [];
+  if (!rows.length) {
+    return empty('No games match this hero and pilot selection. Try removing the opponent hero or choosing pilots with more games.');
   }
+  const comparable = rows.filter((row) => row.pilotA.games > 0 && row.pilotB.games > 0);
   const aTotals = comparisonTotals(comparable, 'pilotA');
   const bTotals = comparisonTotals(comparable, 'pilotB');
   const pooledDelta = aTotals.games > 0 && bTotals.games > 0 ? aTotals.winRate - bTotals.winRate : null;
@@ -1113,23 +1114,25 @@ function pilotComparisonTable(detail) {
     ? `Playing ${labelForDeckId(deckIdOf(detail.hero))}`
     : `Across ${number(comparable.length)} comparable heroes`;
   const opponentScope = detail.opponent ? ` vs ${labelForDeckId(deckIdOf(detail.opponent))}` : '';
+  const rowLabel = detail.hero ? 'Opponent' : 'Hero';
   return `<div>
     <div class="comparison-scope"><strong>${esc(scope)}</strong>${esc(opponentScope)} · opponent pilot ${esc(pilotLabel(detail.opponentPilot))}</div>
     <div class="comparison-overview">
-      ${deckStat(pilotLabel(detail.pilotA), pct(aTotals.winRate), `${number(aTotals.wins)}-${number(aTotals.games - aTotals.wins)} · ${number(aTotals.games)} games`, wrColor(aTotals.winRate))}
-      ${deckStat(pilotLabel(detail.pilotB), pct(bTotals.winRate), `${number(bTotals.wins)}-${number(bTotals.games - bTotals.wins)} · ${number(bTotals.games)} games`, wrColor(bTotals.winRate))}
-      ${deckStat(detail.hero ? 'Win-rate difference' : 'Pooled difference', pooledDelta == null ? '—' : signedPct(pooledDelta), detail.hero ? 'selected hero' : `${number(comparable.length)} comparable heroes`)}
+      ${deckStat(pilotLabel(detail.pilotA), aTotals.games ? pct(aTotals.winRate) : '—', `${number(aTotals.wins)}-${number(aTotals.games - aTotals.wins)} · ${number(aTotals.games)} comparable games`, aTotals.games ? wrColor(aTotals.winRate) : undefined)}
+      ${deckStat(pilotLabel(detail.pilotB), bTotals.games ? pct(bTotals.winRate) : '—', `${number(bTotals.wins)}-${number(bTotals.games - bTotals.wins)} · ${number(bTotals.games)} comparable games`, bTotals.games ? wrColor(bTotals.winRate) : undefined)}
+      ${deckStat(detail.hero ? 'Overall pilot gap' : 'Pooled pilot gap', pooledDelta == null ? '—' : signedPct(pooledDelta), `${number(comparable.length)} comparable ${detail.hero ? 'opponents' : 'heroes'}`)}
     </div>
     <div class="comparison-note">${detail.hero
-      ? 'Both pilot samples use the selected hero and the same opponent constraints.'
-      : 'Pooled rates include only heroes with samples for both pilots. Per-hero differences are more useful than the pooled number when game counts differ.'}</div>
+      ? 'Each row is the selected hero against one enemy hero. The center line shows the win-rate gap: left favors Pilot B, right favors Pilot A.'
+      : 'Each row aggregates one hero across its opponents. The center line shows the win-rate gap between the two pilots.'}</div>
     <div class="pilot-compare-grid pilot-compare-head">
-      <span>Hero</span>
+      <span>${rowLabel}</span>
+      <span class="pilot-gap-legend">← ${esc(pilotLabel(detail.pilotB))} better · ${esc(pilotLabel(detail.pilotA))} better →</span>
       <span>${esc(pilotLabel(detail.pilotA))}</span>
       <span>${esc(pilotLabel(detail.pilotB))}</span>
-      <span>Difference</span>
+      <span>Gap</span>
     </div>
-    ${comparable.map(pilotComparisonRow).join('')}
+    ${rows.map((row) => pilotComparisonRow(row, detail)).join('')}
   </div>`;
 }
 
@@ -1139,21 +1142,32 @@ function comparisonTotals(rows, key) {
   return { games, wins, winRate: games > 0 ? wins / games : 0 };
 }
 
-function pilotComparisonRow(row) {
+function pilotComparisonRow(row, detail) {
   const openId = registerHandler(() => openDeck(row.deck));
-  const sample = (value) => `<div class="pilot-sample">
+  const sample = (value) => value.games > 0 ? `<div class="pilot-sample">
     <strong style="color:${wrColor(value.winRate)}">${pct(value.winRate)}</strong>
     <span>${number(value.wins)}-${number(value.games - value.wins)} · ${number(value.games)}g</span>
     <span>CI ${pct(value.ciLow, 0)}-${pct(value.ciHigh, 0)}${value.firstPlayer.games ? ` · first ${pct(value.firstPlayer.winRate, 0)}` : ''}</span>
-  </div>`;
+  </div>` : `<div class="pilot-sample empty-sample"><strong>—</strong><span>0 games</span></div>`;
   const delta = row.winRateDelta;
   const lowSample = Math.min(row.pilotA.games, row.pilotB.games) < 10;
   return `<div class="pilot-compare-grid pilot-compare-row${lowSample ? ' low-sample' : ''}">
     <button class="pilot-compare-hero" data-handler="${openId}" type="button">${labelHtml(row.label, row.deckId)}${lowSample ? '<small>small sample</small>' : ''}</button>
+    ${pilotGapBar(delta, row, detail)}
     ${sample(row.pilotA)}
     ${sample(row.pilotB)}
     <span class="pilot-delta ${delta > 0.03 ? 'delta-up' : delta < -0.03 ? 'delta-down' : 'delta-flat'}">${delta == null ? '—' : signedPct(delta)}</span>
   </div>`;
+}
+
+function pilotGapBar(delta, row, detail) {
+  if (delta == null) return '<div class="pilot-gap-bar no-data" title="Both pilots need games for a gap"><span class="pilot-gap-mid"></span></div>';
+  const ratio = clamp(Math.abs(delta) / 0.5, 0, 1);
+  const width = ratio * 50;
+  const left = delta >= 0 ? 50 : 50 - width;
+  const color = delta >= 0 ? COLORS.green : COLORS.red;
+  const title = `${row.label}: ${pilotLabel(detail.pilotA)} ${pct(row.pilotA.winRate)} vs ${pilotLabel(detail.pilotB)} ${pct(row.pilotB.winRate)} · gap ${signedPct(delta)}`;
+  return `<div class="pilot-gap-bar" title="${esc(title)}"><span class="pilot-gap-mid"></span><span class="pilot-gap-fill" style="left:${left.toFixed(1)}%;width:${width.toFixed(1)}%;background:${color}"></span></div>`;
 }
 
 // ---------- scenario explorer ----------
