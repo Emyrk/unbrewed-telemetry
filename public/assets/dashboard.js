@@ -103,6 +103,8 @@ function readStateFromUrl() {
     deck: params.get('deck') || null,
     pair: params.get('pair') || null,
     matchup: params.get('matchup') || null,
+    matchupHeroPilot: params.get('matchupHeroPilot') || null,
+    matchupOpponentPilot: params.get('matchupOpponentPilot') || null,
     subtab: params.get('subtab') === 'sources' ? 'sources' : 'recent',
     scenario: {
       format: normalizedParam(params.get('scFormat')),
@@ -124,6 +126,8 @@ function writeStateToUrl() {
   if (state.deck) params.set('deck', state.deck);
   if (state.pair) params.set('pair', state.pair);
   if (state.tab === 'matchups' && state.matchup) params.set('matchup', state.matchup);
+  if (state.matchupHeroPilot) params.set('matchupHeroPilot', state.matchupHeroPilot);
+  if (state.matchupOpponentPilot) params.set('matchupOpponentPilot', state.matchupOpponentPilot);
   if (state.tab === 'submissions' && state.subtab !== 'recent') params.set('subtab', state.subtab);
   if (state.scenario?.format) params.set('scFormat', state.scenario.format);
   if (state.scenario?.map) params.set('scMap', state.scenario.map);
@@ -206,6 +210,8 @@ function statsQuery() {
   if (state.format) params.set('format', state.format);
   const pilots = pilotQueryValues();
   if (pilots.length) params.set('pilots', pilots.join(','));
+  if (state.tab === 'matchups' && !state.deck && state.matchupHeroPilot) params.set('heroPilot', state.matchupHeroPilot);
+  if (state.tab === 'matchups' && !state.deck && state.matchupOpponentPilot) params.set('opponentPilot', state.matchupOpponentPilot);
   return params;
 }
 
@@ -555,6 +561,32 @@ function profileBar(deck) {
 }
 
 // ---------- matchups ----------
+function matchupPilotControls() {
+  const options = [['', 'Any pilot'], ...allPilots.map((pilot) => [pilot, pilotLabel(pilot)])];
+  const select = (label, field, value) => {
+    const opts = options.map(([optionValue, optionLabel]) => `<option value="${esc(optionValue)}"${optionValue === value ? ' selected' : ''}>${esc(optionLabel)}</option>`).join('');
+    return `<label class="scenario-field matchup-pilot-field"><span>${esc(label)}</span><select data-matchup-pilot-field="${esc(field)}">${opts}</select></label>`;
+  };
+  return `<div class="matchup-pilot-controls">
+    ${select('Row / hero pilot', 'hero', state.matchupHeroPilot || '')}
+    ${select('Column / opponent pilot', 'opponent', state.matchupOpponentPilot || '')}
+  </div>`;
+}
+
+function bindMatchupPilotControls(root) {
+  root.querySelectorAll('[data-matchup-pilot-field]').forEach((select) => {
+    if (select.dataset.bound) return;
+    select.dataset.bound = '1';
+    select.addEventListener('change', () => {
+      if (select.dataset.matchupPilotField === 'hero') state.matchupHeroPilot = select.value || null;
+      if (select.dataset.matchupPilotField === 'opponent') state.matchupOpponentPilot = select.value || null;
+      matrixFocus = state.matchup;
+      writeStateToUrl();
+      loadDashboard().catch(showError);
+    });
+  });
+}
+
 function renderMatchups(data, decks) {
   if (state.format && !isMatchupFormat(state.format)) {
     renderMatchupFormatWarning(data);
@@ -563,7 +595,12 @@ function renderMatchups(data, decks) {
 
   const withGames = matchupDecks(data, decks);
   if (withGames.length < 2) {
-    els.view.innerHTML = card(empty('Need at least two decks with 1v1 games for a matchup matrix.'), 'panel');
+    els.view.innerHTML = `<div class="card panel">
+      <div class="section-title">1v1 Matchup Matrix</div>
+      ${matchupPilotControls()}
+      ${empty('Need at least two decks with 1v1 games for this pilot selection.')}
+    </div>`;
+    bindMatchupPilotControls(els.view);
     return;
   }
   const focus = resolveMatchupFocus(matrixFocus || state.matchup, withGames);
@@ -602,6 +639,7 @@ function renderMatchups(data, decks) {
       <div class="section-title">1v1 Matchup Matrix</div>
       <div class="kicker">Only 1v1 formats are shown here. ${kicker}</div>
     </div>
+    ${matchupPilotControls()}
     <div class="mx-controls">
       <span class="mx-ctrl-label">Cells</span>
       <button class="syn-tab${matrixMetric === 'wr' ? ' active' : ''}" data-handler="${wrId}" type="button">Win rate</button>
@@ -618,6 +656,7 @@ function renderMatchups(data, decks) {
     </div>
   </div>`;
 
+  bindMatchupPilotControls(els.view);
   const input = els.view.querySelector('.mx-sample');
   if (input) {
     input.addEventListener('change', () => {
@@ -689,8 +728,8 @@ function matchupDecks(data, decks) {
         games,
         wins,
         winRate: games > 0 ? wins / games : 0,
-        ciLow: state.format ? decorated.ciLow ?? null : null,
-        ciHigh: state.format ? decorated.ciHigh ?? null : null,
+        ciLow: state.format && !state.matchupHeroPilot && !state.matchupOpponentPilot ? decorated.ciLow ?? null : null,
+        ciHigh: state.format && !state.matchupHeroPilot && !state.matchupOpponentPilot ? decorated.ciHigh ?? null : null,
       };
     })
     .filter((deck) => deck.games > 0)
@@ -826,11 +865,12 @@ function renderMatchupFocus(data, decks) {
         <div class="section-title" style="margin-top:10px">${deckName}${summaryId ? `<button class="inline-link" data-handler="${summaryId}" type="button">Summary</button>` : ''}<span class="kicker" style="text-transform:none;letter-spacing:0;margin-left:8px">1v1 vs each opponent</span></div>
         ${deck ? `<div class="mx-focus-summary">
           <span class="mx-focus-wr" style="color:${wrColor(deck.winRate)}">${pct(deck.winRate)}</span>
-          <span class="mx-focus-meta">${number(deck.wins)}–${number(deck.games - deck.wins)} · ${number(deck.games)} games · 95% CI ${pct(deck.ciLow, 0)}–${pct(deck.ciHigh, 0)}</span>
+          <span class="mx-focus-meta">${number(deck.wins)}–${number(deck.games - deck.wins)} · ${number(deck.games)} games${deck.ciLow == null || deck.ciHigh == null ? '' : ` · 95% CI ${pct(deck.ciLow, 0)}–${pct(deck.ciHigh, 0)}`}</span>
         </div>` : ''}
       </div>
       <div class="kicker">Bar diverges from 50% · green favors ${esc(deckPlain)} · faded rows are under ${MATRIX_MIN_GAMES} games</div>
     </div>
+    ${matchupPilotControls()}
     <div class="mx-list">
       <div class="mx-row mx-headrow">
         <span class="mx-name">${matchupSortHeader('name', 'Opponent')}</span>
@@ -846,6 +886,7 @@ function renderMatchupFocus(data, decks) {
       ${opponents.length ? opponents.map(oppRow).join('') : empty('No 1v1 opponents with data for this deck under the current filters.')}
     </div>
   </div>`;
+  bindMatchupPilotControls(els.view);
 }
 
 function matrixCell(rowDeck, colDeck, lookup) {

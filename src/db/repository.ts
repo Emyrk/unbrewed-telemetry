@@ -639,6 +639,9 @@ export class PgTelemetryRepository {
 
   async dashboardStats(filters: DeckStatsFilters, generatedAt = new Date()): Promise<DashboardStatsResponse> {
     const pilotFilter = filters.pilots.length > 0 ? filters.pilots : null;
+    const matchupHeroPilot = filters.heroPilot ?? null;
+    const matchupOpponentPilot = filters.opponentPilot ?? null;
+    const matchupPilotFilter = matchupHeroPilot || matchupOpponentPilot ? null : pilotFilter;
 
     // Wave 1: everything independent of totalGames, fetched concurrently.
     const [summary, submissions, formats, pilots, matchups, synergy] = await Promise.all([
@@ -674,7 +677,7 @@ export class PgTelemetryRepository {
       ),
       this.formatRows(pilotFilter),
       this.pilotRows(),
-      this.matchupRows(filters.format, pilotFilter),
+      this.matchupRows(filters.format, matchupPilotFilter, matchupHeroPilot, matchupOpponentPilot),
       this.synergyRows(filters.format, pilotFilter),
     ]);
 
@@ -967,7 +970,12 @@ export class PgTelemetryRepository {
     }));
   }
 
-  private async matchupRows(format: string | null, pilotFilter: string[] | null): Promise<DashboardStatsResponse['matchups']> {
+  private async matchupRows(
+    format: string | null,
+    pilotFilter: string[] | null,
+    heroPilot: string | null = null,
+    opponentPilot: string | null = null,
+  ): Promise<DashboardStatsResponse['matchups']> {
     const rows = await this.pool.query<{
       row_deck: string;
       row_deck_id: string;
@@ -1002,6 +1010,8 @@ export class PgTelemetryRepository {
           JOIN game_seats row_seat ON row_seat.game_id = g.id
           JOIN game_seats col_seat ON col_seat.game_id = g.id AND col_seat.team_index <> row_seat.team_index
           WHERE row_seat.seat_index = 0 AND col_seat.seat_index = 0
+            AND ($3::text IS NULL OR row_seat.pilot = $3)
+            AND ($4::text IS NULL OR col_seat.pilot = $4)
         )
         SELECT
           MODE() WITHIN GROUP (ORDER BY row_deck) AS row_deck,
@@ -1019,7 +1029,7 @@ export class PgTelemetryRepository {
         GROUP BY row_deck_id, col_deck_id
         ORDER BY games DESC, row_deck_id ASC, col_deck_id ASC
       `,
-      [format, pilotFilter],
+      [format, pilotFilter, heroPilot, opponentPilot],
     );
     return rows.rows.map((row) => {
       const games = Number(row.games);

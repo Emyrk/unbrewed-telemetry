@@ -243,6 +243,24 @@ describeDb('telemetry api with postgres', () => {
     expect(swapped.status).toBe(200);
     expect(await swapped.json()).toMatchObject({ games: 1, wins: 0, winRate: 0 });
 
+    const matchupMatrix = await fetch(`${baseUrl}/v1/stats/dashboard?format=duel&pilots=human&heroPilot=bot%3Ahard%2864%2C2s%29&opponentPilot=bot%3Ahard`);
+    expect(matchupMatrix.status).toBe(200);
+    const matchupJson = await matchupMatrix.json() as {
+      matchups: { rowDeckId: string; colDeckId: string; games: number; wins: number }[];
+    };
+    expect(matchupJson.matchups).toContainEqual(expect.objectContaining({
+      rowDeckId: 'king-kong',
+      colDeckId: 'the-mandalorian',
+      games: 2,
+      wins: 2,
+    }));
+    expect(matchupJson.matchups).toContainEqual(expect.objectContaining({
+      rowDeckId: 'the-mandalorian',
+      colDeckId: 'king-kong',
+      games: 1,
+      wins: 1,
+    }));
+
     const missing = await fetch(`${baseUrl}/v1/stats/deck?deck=king-kong@0.1.0&format=duel&opponent=the-mandalorian@0.1.0&heroPilot=human&opponentPilot=bot%3Ahard`);
     expect(missing.status).toBe(404);
   });
