@@ -314,6 +314,31 @@ export class PgTelemetryRepository {
       rowsByDeck.set(row.deck_id, current);
     }
 
+    if (args.hero) {
+      const { deckId: heroDeckId } = splitDeckId(args.hero);
+      const mirrorIsInScope = !args.opponent || splitDeckId(args.opponent).deckId === heroDeckId;
+      if (mirrorIsInScope && !rowsByDeck.has(heroDeckId)) {
+        const metadata = await this.pool.query<{ hero_name: string | null; hero_id: string | null }>(
+          `
+            SELECT
+              MAX(hero_name) FILTER (WHERE hero_name IS NOT NULL) AS hero_name,
+              MAX(hero_id) FILTER (WHERE hero_id IS NOT NULL) AS hero_id
+            FROM game_seats
+            WHERE deck = $1
+          `,
+          [args.hero],
+        );
+        rowsByDeck.set(heroDeckId, {
+          deck: args.hero,
+          deckId: heroDeckId,
+          label: metadata.rows[0]?.hero_name ?? metadata.rows[0]?.hero_id ?? heroDeckId,
+          pilotA: emptySample(),
+          pilotB: emptySample(),
+          winRateDelta: null,
+        });
+      }
+    }
+
     const rows = [...rowsByDeck.values()].map((row) => ({
       ...row,
       winRateDelta: row.pilotA.games > 0 && row.pilotB.games > 0

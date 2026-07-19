@@ -304,6 +304,13 @@ describeDb('telemetry api with postgres', () => {
     expect(allOpponentsJson.rows).toEqual(expect.arrayContaining([
       expect.objectContaining({ deckId: 'the-mandalorian' }),
       expect.objectContaining({
+        deck: 'king-kong@0.1.0',
+        deckId: 'king-kong',
+        pilotA: expect.objectContaining({ games: 0 }),
+        pilotB: expect.objectContaining({ games: 0 }),
+        winRateDelta: null,
+      }),
+      expect.objectContaining({
         deckId: 'batman',
         pilotA: expect.objectContaining({ winRate: 1 }),
         pilotB: expect.objectContaining({ winRate: 0 }),
