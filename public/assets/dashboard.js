@@ -1123,11 +1123,11 @@ function pilotComparisonTable(detail) {
       ${deckStat(detail.hero ? 'Overall pilot gap' : 'Pooled pilot gap', pooledDelta == null ? '—' : signedPct(pooledDelta), `${number(comparable.length)} comparable ${detail.hero ? 'opponents' : 'heroes'}`)}
     </div>
     <div class="comparison-note">${detail.hero
-      ? 'Each row is the selected hero against one enemy hero. The center line shows the win-rate gap: left favors Pilot B, right favors Pilot A.'
-      : 'Each row aggregates one hero across its opponents. The center line shows the win-rate gap between the two pilots.'}</div>
+      ? 'Each row is the selected hero against one enemy hero. The number line plots both pilot win rates; the segment is green when Pilot A is higher and red when Pilot A is lower.'
+      : 'Each row aggregates one hero across its opponents. The number line plots both pilot win rates and colors the gap by Pilot A’s advantage or disadvantage.'}</div>
     <div class="pilot-compare-grid pilot-compare-head">
       <span>${rowLabel}</span>
-      <span class="pilot-gap-legend">← ${esc(pilotLabel(detail.pilotB))} better · ${esc(pilotLabel(detail.pilotA))} better →</span>
+      <span class="pilot-gap-legend">0% · two pilot win rates · 100%</span>
       <span>${esc(pilotLabel(detail.pilotA))}</span>
       <span>${esc(pilotLabel(detail.pilotB))}</span>
       <span>Gap</span>
@@ -1161,13 +1161,21 @@ function pilotComparisonRow(row, detail) {
 }
 
 function pilotGapBar(delta, row, detail) {
-  if (delta == null) return '<div class="pilot-gap-bar no-data" title="Both pilots need games for a gap"><span class="pilot-gap-mid"></span></div>';
-  const ratio = clamp(Math.abs(delta) / 0.5, 0, 1);
-  const width = ratio * 50;
-  const left = delta >= 0 ? 50 : 50 - width;
-  const color = delta >= 0 ? COLORS.green : COLORS.red;
-  const title = `${row.label}: ${pilotLabel(detail.pilotA)} ${pct(row.pilotA.winRate)} vs ${pilotLabel(detail.pilotB)} ${pct(row.pilotB.winRate)} · gap ${signedPct(delta)}`;
-  return `<div class="pilot-gap-bar" title="${esc(title)}"><span class="pilot-gap-mid"></span><span class="pilot-gap-fill" style="left:${left.toFixed(1)}%;width:${width.toFixed(1)}%;background:${color}"></span></div>`;
+  const hasA = row.pilotA.games > 0;
+  const hasB = row.pilotB.games > 0;
+  if (!hasA && !hasB) return '<div class="pilot-gap-bar no-data" title="No games for either pilot"></div>';
+  const a = clamp(row.pilotA.winRate, 0, 1) * 100;
+  const b = clamp(row.pilotB.winRate, 0, 1) * 100;
+  const left = Math.min(a, b);
+  const width = Math.abs(a - b);
+  const color = delta == null ? COLORS.muted : delta > 0 ? COLORS.green : delta < 0 ? COLORS.red : COLORS.muted;
+  const title = `${row.label}: ${pilotLabel(detail.pilotA)} ${hasA ? pct(row.pilotA.winRate) : 'no games'} vs ${pilotLabel(detail.pilotB)} ${hasB ? pct(row.pilotB.winRate) : 'no games'}${delta == null ? '' : ` · gap ${signedPct(delta)}`}`;
+  return `<div class="pilot-gap-bar${delta == null ? ' no-comparison' : ''}" title="${esc(title)}">
+    <span class="pilot-gap-tick start"></span><span class="pilot-gap-tick middle"></span><span class="pilot-gap-tick end"></span>
+    ${hasA && hasB ? `<span class="pilot-gap-fill" style="left:${left.toFixed(1)}%;width:${Math.max(width, 0.5).toFixed(1)}%;background:${color}"></span>` : ''}
+    ${hasA ? `<span class="pilot-gap-point pilot-a" style="left:${a.toFixed(1)}%" aria-label="${esc(pilotLabel(detail.pilotA))}: ${pct(row.pilotA.winRate)}"></span>` : ''}
+    ${hasB ? `<span class="pilot-gap-point pilot-b" style="left:${b.toFixed(1)}%" aria-label="${esc(pilotLabel(detail.pilotB))}: ${pct(row.pilotB.winRate)}"></span>` : ''}
+  </div>`;
 }
 
 // ---------- scenario explorer ----------

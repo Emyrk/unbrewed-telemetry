@@ -556,22 +556,43 @@ body {
 .pilot-gap-legend { text-align: center; text-transform: none !important; letter-spacing: 0 !important; }
 .pilot-gap-bar {
   position: relative;
-  height: 12px;
+  height: 16px;
   border-radius: 999px;
-  background: var(--track);
-  overflow: hidden;
+  background: linear-gradient(to bottom, transparent 6px, var(--track) 6px, var(--track) 10px, transparent 10px);
+  overflow: visible;
 }
-.pilot-gap-mid {
+.pilot-gap-tick {
   position: absolute;
-  z-index: 2;
-  left: 50%;
-  top: -2px;
-  bottom: -2px;
+  top: 5px;
   width: 1px;
-  background: rgba(255, 255, 255, 0.45);
+  height: 6px;
+  background: rgba(255, 255, 255, 0.16);
 }
-.pilot-gap-fill { position: absolute; top: 1px; bottom: 1px; border-radius: 999px; }
-.pilot-gap-bar.no-data { opacity: 0.4; }
+.pilot-gap-tick.start { left: 0; }
+.pilot-gap-tick.middle { left: 50%; }
+.pilot-gap-tick.end { right: 0; }
+.pilot-gap-fill { position: absolute; top: 6px; height: 4px; border-radius: 999px; opacity: 0.9; }
+.pilot-gap-point {
+  position: absolute;
+  z-index: 3;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+}
+.pilot-gap-point.pilot-a {
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--accent);
+  background: var(--panel);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+.pilot-gap-point.pilot-b {
+  width: 7px;
+  height: 7px;
+  background: var(--violet);
+  box-shadow: 0 0 0 1px var(--panel), 0 0 0 2px rgba(167, 139, 201, 0.35);
+}
+.pilot-gap-bar.no-data, .pilot-gap-bar.no-comparison { opacity: 0.55; }
 .pilot-compare-row {
   padding: 11px 12px;
   border: 1px solid var(--border);
