@@ -21,6 +21,7 @@ import type {
   NormalizedSeat,
   NormalizedStartingCard,
   NormalizedTeam,
+  PilotComparisonResponse,
   RecentGame,
   RecentGamesResponse,
   RecentHourlyResponse,
@@ -213,6 +214,121 @@ export class PgTelemetryRepository {
       totalGames,
       avgTurns,
       decks,
+    };
+  }
+
+  /** Compare two exact pilots while holding the opposing pilot (and optionally hero) constant. */
+  async pilotComparison(args: {
+    pilotA: string;
+    pilotB: string;
+    opponentPilot: string;
+    opponent: string | null;
+  }): Promise<PilotComparisonResponse> {
+    const result = await this.pool.query<{
+      deck: string;
+      deck_id: string;
+      hero_name: string | null;
+      hero_id: string | null;
+      pilot: string;
+      games: number;
+      wins: number;
+      avg_turns: number | null;
+      first_games: number;
+      first_wins: number;
+    }>(
+      `
+        WITH duel_games AS (
+          SELECT g.*
+          FROM games g
+          WHERE g.format IN ('duel', '1v1')
+        )
+        SELECT
+          MODE() WITHIN GROUP (ORDER BY me.deck) AS deck,
+          me.deck_id,
+          MAX(me.hero_name) FILTER (WHERE me.hero_name IS NOT NULL) AS hero_name,
+          MAX(me.hero_id) FILTER (WHERE me.hero_id IS NOT NULL) AS hero_id,
+          me.pilot,
+          COUNT(*)::int AS games,
+          COUNT(*) FILTER (WHERE me.won)::int AS wins,
+          AVG(g.turns)::float8 AS avg_turns,
+          COUNT(*) FILTER (WHERE g.first_player_team = me.team_index)::int AS first_games,
+          COUNT(*) FILTER (WHERE g.first_player_team = me.team_index AND me.won)::int AS first_wins
+        FROM duel_games g
+        JOIN game_seats me ON me.game_id = g.id AND me.seat_index = 0
+        JOIN game_seats opp ON opp.game_id = g.id
+          AND opp.seat_index = 0
+          AND opp.team_index <> me.team_index
+        WHERE me.pilot IN ($1, $2)
+          AND opp.pilot = $3
+          AND ($4::text IS NULL OR opp.deck = $4)
+        GROUP BY me.deck_id, me.pilot
+        ORDER BY me.deck_id ASC, me.pilot ASC
+      `,
+      [args.pilotA, args.pilotB, args.opponentPilot, args.opponent],
+    );
+
+    type MutableRow = PilotComparisonResponse['rows'][number];
+    const emptySample = (): MutableRow['pilotA'] => ({
+      games: 0,
+      wins: 0,
+      winRate: 0,
+      ciLow: 0,
+      ciHigh: 0,
+      avgTurns: null,
+      firstPlayer: { games: 0, wins: 0, winRate: null },
+    });
+    const rowsByDeck = new Map<string, MutableRow>();
+    for (const row of result.rows) {
+      const games = Number(row.games);
+      const wins = Number(row.wins);
+      const interval = wilson(wins, games);
+      const firstGames = Number(row.first_games);
+      const firstWins = Number(row.first_wins);
+      const sample = {
+        games,
+        wins,
+        winRate: interval.p,
+        ciLow: interval.lo,
+        ciHigh: interval.hi,
+        avgTurns: row.avg_turns,
+        firstPlayer: {
+          games: firstGames,
+          wins: firstWins,
+          winRate: firstGames > 0 ? firstWins / firstGames : null,
+        },
+      };
+      const current = rowsByDeck.get(row.deck_id) ?? {
+        deck: row.deck,
+        deckId: row.deck_id,
+        label: row.hero_name ?? row.hero_id ?? row.deck_id,
+        pilotA: emptySample(),
+        pilotB: emptySample(),
+        winRateDelta: null,
+      };
+      if (row.pilot === args.pilotA) current.pilotA = sample;
+      if (row.pilot === args.pilotB) current.pilotB = sample;
+      rowsByDeck.set(row.deck_id, current);
+    }
+
+    const rows = [...rowsByDeck.values()].map((row) => ({
+      ...row,
+      winRateDelta: row.pilotA.games > 0 && row.pilotB.games > 0
+        ? row.pilotA.winRate - row.pilotB.winRate
+        : null,
+    })).sort((a, b) => {
+      const aComparable = Math.min(a.pilotA.games, a.pilotB.games);
+      const bComparable = Math.min(b.pilotA.games, b.pilotB.games);
+      return bComparable - aComparable
+        || (b.pilotA.games + b.pilotB.games) - (a.pilotA.games + a.pilotB.games)
+        || a.label.localeCompare(b.label);
+    });
+
+    return {
+      pilotA: args.pilotA,
+      pilotB: args.pilotB,
+      opponentPilot: args.opponentPilot,
+      opponent: args.opponent,
+      rows,
     };
   }
 

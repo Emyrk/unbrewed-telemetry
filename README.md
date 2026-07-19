@@ -103,6 +103,16 @@ Example:
 curl 'http://localhost:8788/v1/stats/decks?format=duel&pilots=bot:hard'
 ```
 
+### `GET /v1/stats/pilot-comparison`
+
+Compares two exact pilots across 1v1 heroes while holding the opposing pilot constant. An optional `opponent` deck narrows every row to the same opposing hero.
+
+Required query parameters: `pilotA`, `pilotB`, and `opponentPilot`. `pilotA` and `pilotB` must differ.
+
+```sh
+curl 'http://localhost:8788/v1/stats/pilot-comparison?pilotA=bot:hard(64,2s)&pilotB=bot:hard&opponentPilot=bot:hard'
+```
+
 ### `GET /v1/stats/deck`
 
 Returns detailed stats for one deck. The dashboard uses the exact 1v1 filters to compare pilot assignments for the same hero matchup.

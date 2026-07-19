@@ -30,6 +30,7 @@ const TABS = [
   ['scatter', 'Pick vs Win'],
   ['formats', 'Formats'],
   ['synergy', '2v2 Synergy'],
+  ['pilot-comparisons', 'Pilot Comparisons'],
   ['scenario', 'Scenario'],
   ['submissions', 'Submissions'],
 ];
@@ -105,6 +106,12 @@ function readStateFromUrl() {
     matchup: params.get('matchup') || null,
     matchupHeroPilot: params.get('matchupHeroPilot') || null,
     matchupOpponentPilot: params.get('matchupOpponentPilot') || null,
+    pilotComparison: {
+      pilotA: params.get('pcPilotA') || null,
+      pilotB: params.get('pcPilotB') || null,
+      opponentPilot: params.get('pcOpponentPilot') || null,
+      opponent: params.get('pcOpponent') || null,
+    },
     subtab: params.get('subtab') === 'sources' ? 'sources' : 'recent',
     scenario: {
       format: normalizedParam(params.get('scFormat')),
@@ -128,6 +135,10 @@ function writeStateToUrl() {
   if (state.tab === 'matchups' && state.matchup) params.set('matchup', state.matchup);
   if (state.matchupHeroPilot) params.set('matchupHeroPilot', state.matchupHeroPilot);
   if (state.matchupOpponentPilot) params.set('matchupOpponentPilot', state.matchupOpponentPilot);
+  if (state.pilotComparison?.pilotA) params.set('pcPilotA', state.pilotComparison.pilotA);
+  if (state.pilotComparison?.pilotB) params.set('pcPilotB', state.pilotComparison.pilotB);
+  if (state.pilotComparison?.opponentPilot) params.set('pcOpponentPilot', state.pilotComparison.opponentPilot);
+  if (state.pilotComparison?.opponent) params.set('pcOpponent', state.pilotComparison.opponent);
   if (state.tab === 'submissions' && state.subtab !== 'recent') params.set('subtab', state.subtab);
   if (state.scenario?.format) params.set('scFormat', state.scenario.format);
   if (state.scenario?.map) params.set('scMap', state.scenario.map);
@@ -375,6 +386,7 @@ function renderView(data) {
   else if (state.tab === 'scatter') renderScatter(data, decks);
   else if (state.tab === 'formats') renderFormats(data);
   else if (state.tab === 'synergy') renderSynergy(data);
+  else if (state.tab === 'pilot-comparisons') { renderPilotComparisons(data); return; }
   else if (state.tab === 'scenario') { renderScenario(data); return; }
   else renderOverview(data, decks);
   bindHandlers(els.view);
@@ -1008,6 +1020,134 @@ function formatCard(row) {
     </div>
     ${boss}
   </article>`;
+}
+
+// ---------- pilot comparisons ----------
+const pilotComparisonCache = new Map();
+
+function initializePilotComparison() {
+  const comparison = state.pilotComparison || (state.pilotComparison = {});
+  const choose = (preferred, excluded = new Set()) => preferred.find((pilot) => allPilots.includes(pilot) && !excluded.has(pilot))
+    || allPilots.find((pilot) => !excluded.has(pilot))
+    || null;
+  if (!comparison.pilotA) comparison.pilotA = choose(['bot:hard(64,2s)', 'bot:hard(64,5s)', 'bot:hard']);
+  if (!comparison.pilotB) comparison.pilotB = choose(['bot:hard', 'bot:hard(64,5s)', 'human'], new Set([comparison.pilotA]));
+  if (!comparison.opponentPilot) comparison.opponentPilot = choose(['bot:hard', comparison.pilotB, comparison.pilotA].filter(Boolean));
+  return comparison;
+}
+
+async function renderPilotComparisons(data) {
+  const comparison = initializePilotComparison();
+  const pilots = allPilots.map((pilot) => [pilot, pilotLabel(pilot)]);
+  const decks = [...(data.decks || [])].sort((a, b) => a.label.localeCompare(b.label));
+  const options = (placeholder) => [['', placeholder], ...pilots];
+  els.view.innerHTML = `<div class="card panel pilot-comparison-page">
+    <div class="section-head">
+      <div>
+        <div class="section-title">Pilot Comparisons</div>
+        <div class="kicker" style="margin-top:3px">Compare two pilots on the same hero side while holding the opposing pilot—and optionally the opposing hero—constant.</div>
+      </div>
+    </div>
+    <div class="pilot-comparison-controls">
+      ${scenarioSelect('Pilot A', 'pilotA', comparison.pilotA || '', options('Choose pilot A…'))}
+      ${scenarioSelect('Pilot B', 'pilotB', comparison.pilotB || '', options('Choose pilot B…'))}
+      ${scenarioSelect('Opponent pilot', 'opponentPilot', comparison.opponentPilot || '', options('Choose opponent pilot…'))}
+      ${scenarioSelect('Opponent hero', 'opponent', comparison.opponent || '', [['', 'All opponent heroes'], ...decks.map((deck) => [deck.deck, deck.label])])}
+    </div>
+    <div class="pilot-comparison-body">${empty('Loading pilot comparison…')}</div>
+  </div>`;
+  bindPilotComparisonControls();
+
+  const body = els.view.querySelector('.pilot-comparison-body');
+  if (!comparison.pilotA || !comparison.pilotB || !comparison.opponentPilot) {
+    body.innerHTML = empty('Choose two hero pilots and an opponent pilot.');
+    return;
+  }
+  if (comparison.pilotA === comparison.pilotB) {
+    body.innerHTML = empty('Pilot A and Pilot B must be different.');
+    return;
+  }
+
+  try {
+    const detail = await fetchPilotComparison(comparison);
+    body.innerHTML = pilotComparisonTable(detail);
+    bindHandlers(body);
+  } catch (error) {
+    body.innerHTML = empty('Failed to load pilot comparison: ' + (error.message || ''));
+  }
+}
+
+function bindPilotComparisonControls() {
+  els.view.querySelectorAll('[data-scenario-field]').forEach((select) => {
+    select.addEventListener('change', () => {
+      state.pilotComparison[select.dataset.scenarioField] = select.value || null;
+      writeStateToUrl();
+      if (current) renderPilotComparisons(current);
+    });
+  });
+}
+
+async function fetchPilotComparison(comparison) {
+  const params = new URLSearchParams({
+    pilotA: comparison.pilotA,
+    pilotB: comparison.pilotB,
+    opponentPilot: comparison.opponentPilot,
+  });
+  if (comparison.opponent) params.set('opponent', comparison.opponent);
+  const key = params.toString();
+  const cached = pilotComparisonCache.get(key);
+  if (cached && Date.now() - cached.at < DASH_TTL_MS) return cached.json;
+  const json = await fetchJson(`/v1/stats/pilot-comparison?${key}`);
+  pilotComparisonCache.set(key, { at: Date.now(), json });
+  return json;
+}
+
+function pilotComparisonTable(detail) {
+  const comparable = (detail.rows || []).filter((row) => row.pilotA.games > 0 && row.pilotB.games > 0);
+  if (!comparable.length) {
+    return empty('No heroes have games for both pilots under this opponent selection. Try removing the opponent hero or choosing pilots with more games.');
+  }
+  const aTotals = comparisonTotals(comparable, 'pilotA');
+  const bTotals = comparisonTotals(comparable, 'pilotB');
+  const pooledDelta = aTotals.games > 0 && bTotals.games > 0 ? aTotals.winRate - bTotals.winRate : null;
+  return `<div>
+    <div class="comparison-overview">
+      ${deckStat(pilotLabel(detail.pilotA), pct(aTotals.winRate), `${number(aTotals.wins)}-${number(aTotals.games - aTotals.wins)} · ${number(aTotals.games)} games`, wrColor(aTotals.winRate))}
+      ${deckStat(pilotLabel(detail.pilotB), pct(bTotals.winRate), `${number(bTotals.wins)}-${number(bTotals.games - bTotals.wins)} · ${number(bTotals.games)} games`, wrColor(bTotals.winRate))}
+      ${deckStat('Pooled difference', pooledDelta == null ? '—' : signedPct(pooledDelta), `${number(comparable.length)} comparable heroes`)}
+    </div>
+    <div class="comparison-note">Pooled rates include only heroes with samples for both pilots. Per-hero differences are more useful than the pooled number when game counts differ.</div>
+    <div class="pilot-compare-grid pilot-compare-head">
+      <span>Hero</span>
+      <span>${esc(pilotLabel(detail.pilotA))}</span>
+      <span>${esc(pilotLabel(detail.pilotB))}</span>
+      <span>Difference</span>
+    </div>
+    ${comparable.map(pilotComparisonRow).join('')}
+  </div>`;
+}
+
+function comparisonTotals(rows, key) {
+  const games = rows.reduce((sum, row) => sum + row[key].games, 0);
+  const wins = rows.reduce((sum, row) => sum + row[key].wins, 0);
+  return { games, wins, winRate: games > 0 ? wins / games : 0 };
+}
+
+function pilotComparisonRow(row) {
+  const openId = registerHandler(() => openDeck(row.deck));
+  const sample = (value) => `<div class="pilot-sample">
+    <strong style="color:${wrColor(value.winRate)}">${pct(value.winRate)}</strong>
+    <span>${number(value.wins)}-${number(value.games - value.wins)} · ${number(value.games)}g</span>
+    <span>CI ${pct(value.ciLow, 0)}-${pct(value.ciHigh, 0)}${value.firstPlayer.games ? ` · first ${pct(value.firstPlayer.winRate, 0)}` : ''}</span>
+  </div>`;
+  const delta = row.winRateDelta;
+  const lowSample = Math.min(row.pilotA.games, row.pilotB.games) < 10;
+  return `<div class="pilot-compare-grid pilot-compare-row${lowSample ? ' low-sample' : ''}">
+    <button class="pilot-compare-hero" data-handler="${openId}" type="button">${labelHtml(row.label, row.deckId)}${lowSample ? '<small>small sample</small>' : ''}</button>
+    ${sample(row.pilotA)}
+    ${sample(row.pilotB)}
+    <span class="pilot-delta ${delta > 0.03 ? 'delta-up' : delta < -0.03 ? 'delta-down' : 'delta-flat'}">${delta == null ? '—' : signedPct(delta)}</span>
+  </div>`;
 }
 
 // ---------- scenario explorer ----------

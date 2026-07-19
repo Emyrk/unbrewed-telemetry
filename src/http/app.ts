@@ -85,6 +85,11 @@ async function handleRequest(
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/v1/stats/pilot-comparison') {
+    await handlePilotComparison(url, res, repo);
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/v1/stats/scenario') {
     await handleScenarioExplorer(url, res, repo);
     return;
@@ -240,6 +245,31 @@ async function handleDeckIngest(
 
   const result = await repo.upsertDeckDefinitions(parsed as DeckDefinitionSubmission, config.now());
   sendJson(res, 200, { ok: true, upserted: result.upserted });
+}
+
+async function handlePilotComparison(url: URL, res: ServerResponse, repo: PgTelemetryRepository): Promise<void> {
+  const pilotA = blankToNull(url.searchParams.get('pilotA'));
+  const pilotB = blankToNull(url.searchParams.get('pilotB'));
+  const opponentPilot = blankToNull(url.searchParams.get('opponentPilot'));
+  if (!pilotA || !pilotB || !opponentPilot) {
+    sendJson(res, 400, {
+      ok: false,
+      code: 'MISSING_PILOTS',
+      message: 'pilotA, pilotB, and opponentPilot query parameters are required',
+    });
+    return;
+  }
+  if (pilotA === pilotB) {
+    sendJson(res, 400, { ok: false, code: 'SAME_PILOT', message: 'pilotA and pilotB must be different' });
+    return;
+  }
+  const result = await repo.pilotComparison({
+    pilotA,
+    pilotB,
+    opponentPilot,
+    opponent: blankToNull(url.searchParams.get('opponent')),
+  });
+  sendJson(res, 200, { ok: true, ...result });
 }
 
 async function handleScenarioExplorer(url: URL, res: ServerResponse, repo: PgTelemetryRepository): Promise<void> {

@@ -355,6 +355,33 @@ export interface DeckStatsResponse {
   decks: DeckStat[];
 }
 
+export interface PilotComparisonSample {
+  games: number;
+  wins: number;
+  winRate: number;
+  ciLow: number;
+  ciHigh: number;
+  avgTurns: number | null;
+  firstPlayer: SplitStat;
+}
+
+export interface PilotComparisonRow {
+  deck: string;
+  deckId: string;
+  label: string;
+  pilotA: PilotComparisonSample;
+  pilotB: PilotComparisonSample;
+  winRateDelta: number | null;
+}
+
+export interface PilotComparisonResponse {
+  pilotA: string;
+  pilotB: string;
+  opponentPilot: string;
+  opponent: string | null;
+  rows: PilotComparisonRow[];
+}
+
 export interface ScenarioExplorerPartner {
   deck: string;
   deckId: string;

@@ -234,6 +234,7 @@ describeDb('telemetry api with postgres', () => {
     await postGame(baseUrl, secret, matchupGame('pilot-compare-001', 'bot:hard(64,2s)', 'bot:hard', 0), 'pilot-compare-001');
     await postGame(baseUrl, secret, matchupGame('pilot-compare-002', 'bot:hard(64,2s)', 'bot:hard', 0), 'pilot-compare-002');
     await postGame(baseUrl, secret, matchupGame('pilot-compare-003', 'bot:hard', 'bot:hard(64,2s)', 1), 'pilot-compare-003');
+    await postGame(baseUrl, secret, matchupGame('pilot-compare-004', 'bot:hard', 'bot:hard', 0), 'pilot-compare-004');
 
     const selected = await fetch(`${baseUrl}/v1/stats/deck?deck=king-kong@0.1.0&format=duel&opponent=the-mandalorian@0.1.0&heroPilot=bot%3Ahard%2864%2C2s%29&opponentPilot=bot%3Ahard`);
     expect(selected.status).toBe(200);
@@ -260,6 +261,30 @@ describeDb('telemetry api with postgres', () => {
       games: 1,
       wins: 1,
     }));
+
+    const comparison = await fetch(`${baseUrl}/v1/stats/pilot-comparison?pilotA=bot%3Ahard%2864%2C2s%29&pilotB=bot%3Ahard&opponentPilot=bot%3Ahard&opponent=the-mandalorian%400.1.0`);
+    expect(comparison.status).toBe(200);
+    const comparisonJson = await comparison.json() as {
+      pilotA: string;
+      pilotB: string;
+      rows: {
+        deckId: string;
+        pilotA: { games: number; wins: number; winRate: number };
+        pilotB: { games: number; wins: number; winRate: number };
+        winRateDelta: number | null;
+      }[];
+    };
+    expect(comparisonJson).toMatchObject({ pilotA: 'bot:hard(64,2s)', pilotB: 'bot:hard' });
+    expect(comparisonJson.rows).toContainEqual(expect.objectContaining({
+      deckId: 'king-kong',
+      pilotA: expect.objectContaining({ games: 2, wins: 2, winRate: 1 }),
+      pilotB: expect.objectContaining({ games: 1, wins: 1, winRate: 1 }),
+      winRateDelta: 0,
+    }));
+
+    const samePilot = await fetch(`${baseUrl}/v1/stats/pilot-comparison?pilotA=bot%3Ahard&pilotB=bot%3Ahard&opponentPilot=bot%3Ahard`);
+    expect(samePilot.status).toBe(400);
+    expect(await samePilot.json()).toMatchObject({ code: 'SAME_PILOT' });
 
     const missing = await fetch(`${baseUrl}/v1/stats/deck?deck=king-kong@0.1.0&format=duel&opponent=the-mandalorian@0.1.0&heroPilot=human&opponentPilot=bot%3Ahard`);
     expect(missing.status).toBe(404);
