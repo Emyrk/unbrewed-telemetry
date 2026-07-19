@@ -1993,6 +1993,9 @@ function splitDeckId(deck: string): { deckId: string; deckVersion: string | null
 }
 
 function pilotFilterSql(paramIndex = 2): string {
+  // Pilot matching is prefix-based: allowlist entry 'bot:hard' matches
+  // 'bot:hard', 'bot:hard(64,2s)', 'bot:hard(64,5s)', etc.
+  // An exact pilot_kind match is also accepted (e.g. 'bot' matches any bot seat).
   return `($${paramIndex}::text[] IS NULL OR (
               (
                 NOT EXISTS (
@@ -2006,7 +2009,7 @@ function pilotFilterSql(paramIndex = 2): string {
                     AND NOT EXISTS (
                       SELECT 1 FROM unnest($${paramIndex}::text[]) AS allowed(pilot)
                       WHERE allowed.pilot NOT LIKE 'must:%'
-                        AND (s2.pilot = allowed.pilot OR s2.pilot_kind = allowed.pilot)
+                        AND (s2.pilot LIKE allowed.pilot || '%' OR s2.pilot_kind = allowed.pilot)
                     )
                 )
               )
@@ -2018,7 +2021,7 @@ function pilotFilterSql(paramIndex = 2): string {
                     SELECT 1
                     FROM game_seats s3
                     WHERE s3.game_id = g.id
-                      AND (s3.pilot = substring(required.pilot from 6) OR s3.pilot_kind = substring(required.pilot from 6))
+                      AND (s3.pilot LIKE substring(required.pilot from 6) || '%' OR s3.pilot_kind = substring(required.pilot from 6))
                   )
               )
             ))`;

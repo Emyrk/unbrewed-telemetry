@@ -1344,9 +1344,12 @@ async function renderRecent() {
     const params = statsQuery();
     const listParams = new URLSearchParams(params);
     listParams.set('limit', '50');
+    // Hourly chart is unfiltered (format-only, no pilot filter) so it shows all submissions
+    const hourlyParams = new URLSearchParams();
+    if (state.format) hourlyParams.set('format', state.format);
     [data, hourly] = await Promise.all([
       fetchJson(`/v1/stats/recent?${listParams}`),
-      fetchJson(`/v1/stats/recent/hourly${params.toString() ? `?${params}` : ''}`),
+      fetchJson(`/v1/stats/recent/hourly${hourlyParams.toString() ? `?${hourlyParams}` : ''}`),
     ]);
   } catch (error) {
     target.innerHTML = card(empty('Failed to load recent games: ' + (error.message || '')), 'panel');
@@ -1430,8 +1433,10 @@ async function renderSources() {
   target.innerHTML = card(empty('Loading sources…'), 'panel');
   let data;
   try {
-    const params = statsQuery();
-    data = await fetchJson(`/v1/stats/sources${params.toString() ? `?${params}` : ''}`);
+    // Sources are unfiltered (format-only, no pilot filter) so they show all submissions
+    const sourceParams = new URLSearchParams();
+    if (state.format) sourceParams.set('format', state.format);
+    data = await fetchJson(`/v1/stats/sources${sourceParams.toString() ? `?${sourceParams}` : ''}`);
   } catch (error) {
     target.innerHTML = card(empty('Failed to load sources: ' + (error.message || '')), 'panel');
     return;
@@ -1442,7 +1447,7 @@ async function renderSources() {
     <div class="section-head">
       <div>
         <div class="section-title">Sources</div>
-        <div class="kicker">${number(total)} submissions ${state.format || state.excluded.size ? 'matching this view' : 'uploaded'} · grouped by source name</div>
+        <div class="kicker">${number(total)} submissions ${state.format ? 'matching this view' : 'uploaded'} · grouped by source name</div>
       </div>
     </div>
     ${sources.length ? sourcesSummary(sources, total) : empty('No source data under the current filters.')}
