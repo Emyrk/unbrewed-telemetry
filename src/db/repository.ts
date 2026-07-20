@@ -5,6 +5,7 @@ import { wilson } from '../stats/wilson.js';
 import { buildDeckProfile, type CardBucketCounts } from '../stats/profile.js';
 import { countCards, leanFrom } from '../stats/composition.js';
 import type {
+  BotExecutionStatsResponse,
   CardContextBucket,
   DashboardStatsResponse,
   DeckComposition,
@@ -214,6 +215,67 @@ export class PgTelemetryRepository {
       totalGames,
       avgTurns,
       decks,
+    };
+  }
+
+  /** Aggregate normalized bot execution summaries by pilot, implementation, and requested budget. */
+  async botExecutionStats(args: { pilot: string | null; deck: string | null }): Promise<BotExecutionStatsResponse> {
+    const result = await this.pool.query<{
+      pilot: string;
+      bot_version: string | null;
+      ms_per_move: number;
+      iteration_cap: number;
+      games: number;
+      decisions: number;
+      completed_iterations_mean: number | null;
+      clock_truncated_decisions: number;
+      early_stopped_decisions: number;
+    }>(
+      `
+        SELECT
+          pilot,
+          bot_version,
+          (bot_execution #>> '{budget,msPerMove}')::float8 AS ms_per_move,
+          (bot_execution #>> '{budget,iterationCap}')::int AS iteration_cap,
+          COUNT(*)::int AS games,
+          SUM((bot_execution #>> '{search,decisions}')::int)::int AS decisions,
+          CASE
+            WHEN SUM((bot_execution #>> '{search,decisions}')::int) = 0 THEN NULL
+            ELSE (
+              SUM(
+                (bot_execution #>> '{search,completedIterations,mean}')::float8
+                * (bot_execution #>> '{search,decisions}')::int
+              ) / SUM((bot_execution #>> '{search,decisions}')::int)
+            )::float8
+          END AS completed_iterations_mean,
+          SUM((bot_execution #>> '{search,clockTruncatedDecisions}')::int)::int AS clock_truncated_decisions,
+          SUM((bot_execution #>> '{search,earlyStoppedDecisions}')::int)::int AS early_stopped_decisions
+        FROM game_seats
+        WHERE bot_execution IS NOT NULL
+          AND ($1::text IS NULL OR pilot = $1)
+          AND ($2::text IS NULL OR deck = $2)
+        GROUP BY pilot, bot_version, ms_per_move, iteration_cap
+        ORDER BY games DESC, pilot, bot_version NULLS FIRST, ms_per_move, iteration_cap
+      `,
+      [args.pilot, args.deck],
+    );
+
+    return {
+      pilot: args.pilot,
+      deck: args.deck,
+      rows: result.rows.map((row) => ({
+        pilot: row.pilot,
+        botVersion: row.bot_version,
+        msPerMove: Number(row.ms_per_move),
+        iterationCap: Number(row.iteration_cap),
+        games: Number(row.games),
+        decisions: Number(row.decisions),
+        completedIterationsMean: row.completed_iterations_mean === null ? null : Number(row.completed_iterations_mean),
+        clockTruncatedDecisions: Number(row.clock_truncated_decisions),
+        earlyStoppedDecisions: Number(row.early_stopped_decisions),
+        clockTruncatedRate: row.decisions === 0 ? null : row.clock_truncated_decisions / row.decisions,
+        earlyStoppedRate: row.decisions === 0 ? null : row.early_stopped_decisions / row.decisions,
+      })),
     };
   }
 
@@ -2218,14 +2280,14 @@ async function insertSeats(client: PoolClient, seats: NormalizedSeat[]): Promise
         INSERT INTO game_seats (
           game_id, team_index, seat_index, runtime_player_id, deck, deck_id, deck_version,
           hero_id, hero_name, pilot, pilot_kind, bot_id, bot_difficulty, bot_version,
-          player_id, first_player, won, final_health, final_deck_count, final_hand_count,
-          final_discard_count
+          bot_execution, player_id, first_player, won, final_health, final_deck_count,
+          final_hand_count, final_discard_count
         )
         VALUES (
           $1, $2, $3, $4, $5, $6, $7,
           $8, $9, $10, $11, $12, $13, $14,
-          $15, $16, $17, $18, $19, $20,
-          $21
+          $15::jsonb, $16, $17, $18, $19, $20,
+          $21, $22
         )
       `,
       [
@@ -2243,6 +2305,7 @@ async function insertSeats(client: PoolClient, seats: NormalizedSeat[]): Promise
         seat.botId,
         seat.botDifficulty,
         seat.botVersion,
+        seat.botExecution === null ? null : JSON.stringify(seat.botExecution),
         seat.playerId,
         seat.firstPlayer,
         seat.won,

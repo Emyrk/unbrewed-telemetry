@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { validateGameSubmission } from '../src/ingest/schema.js';
 import { normalizeSubmission } from '../src/ingest/normalize.js';
 import { wilson } from '../src/stats/wilson.js';
-import { sampleGame } from './fixtures.js';
+import { sampleBotExecution, sampleGame } from './fixtures.js';
 
 describe('game submission schema', () => {
   it('accepts a valid sample game', () => {
@@ -21,6 +21,48 @@ describe('game submission schema', () => {
     expect(normalized.id).toBe('test-game-001');
     expect(normalized.seats[0]).toMatchObject({ deckId: 'king-kong', deckVersion: '0.1.0', pilotKind: 'bot', botId: 'hard', won: true });
     expect(normalized.seats[1]).toMatchObject({ deckId: 'the-mandalorian', won: false });
+  });
+
+  it('accepts and normalizes structured bot execution metadata', () => {
+    const game = sampleGame();
+    game.teams[0]!.seats[0]!.botVersion = 'mc-v1';
+    game.teams[0]!.seats[0]!.botExecution = sampleBotExecution();
+
+    expect(validateGameSubmission(game)).toEqual({ ok: true, errors: [] });
+    expect(normalizeSubmission(game, 'idem-1').seats[0]).toMatchObject({
+      pilot: 'bot:hard',
+      botVersion: 'mc-v1',
+      botExecution: sampleBotExecution(),
+    });
+  });
+
+  it('rejects bot execution metadata on human seats', () => {
+    const game = sampleGame();
+    game.teams[0]!.seats[0]!.pilot = 'human';
+    game.teams[0]!.seats[0]!.botExecution = sampleBotExecution();
+
+    const result = validateGameSubmission(game);
+    expect(result.ok).toBe(false);
+    expect(result.errors.join('\n')).toContain('only bot pilots may report execution metadata');
+  });
+
+  it('rejects inconsistent bot execution summaries', () => {
+    const game = sampleGame();
+    game.teams[0]!.seats[0]!.botExecution = {
+      budget: { msPerMove: 400, iterationCap: 64 },
+      search: {
+        decisions: 4,
+        completedIterations: { mean: 65, p50: 64, p95: 63 },
+        clockTruncatedDecisions: 3,
+        earlyStoppedDecisions: 2,
+      },
+    };
+
+    const result = validateGameSubmission(game);
+    expect(result.ok).toBe(false);
+    expect(result.errors.join('\n')).toContain('exceed total decisions');
+    expect(result.errors.join('\n')).toContain('p50 must be less than or equal to p95');
+    expect(result.errors.join('\n')).toContain('must not exceed budget.iterationCap');
   });
 
   it('normalizes card-play telemetry into deck-attributed card rows', () => {

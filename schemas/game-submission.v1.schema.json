@@ -156,10 +156,48 @@
         "heroName": { "type": "string" },
         "botDifficulty": { "type": "string" },
         "botVersion": { "type": "string" },
+        "botExecution": { "$ref": "#/$defs/botExecution" },
         "finalHealth": { "type": "integer", "minimum": 0 },
         "finalDeckCount": { "type": "integer", "minimum": 0 },
         "finalHandCount": { "type": "integer", "minimum": 0 },
         "finalDiscardCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "botExecution": {
+      "type": "object",
+      "description": "Optional per-game execution summary for a bot seat. Pilot identity stays in pilot; implementation version stays in botVersion.",
+      "required": ["budget", "search"],
+      "additionalProperties": false,
+      "properties": {
+        "budget": {
+          "type": "object",
+          "required": ["msPerMove", "iterationCap"],
+          "additionalProperties": false,
+          "properties": {
+            "msPerMove": { "type": "number", "minimum": 0 },
+            "iterationCap": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "search": {
+          "type": "object",
+          "required": ["decisions", "completedIterations", "clockTruncatedDecisions", "earlyStoppedDecisions"],
+          "additionalProperties": false,
+          "properties": {
+            "decisions": { "type": "integer", "minimum": 0 },
+            "completedIterations": {
+              "type": "object",
+              "required": ["mean", "p50", "p95"],
+              "additionalProperties": false,
+              "properties": {
+                "mean": { "type": "number", "minimum": 0 },
+                "p50": { "type": "number", "minimum": 0 },
+                "p95": { "type": "number", "minimum": 0 }
+              }
+            },
+            "clockTruncatedDecisions": { "type": "integer", "minimum": 0 },
+            "earlyStoppedDecisions": { "type": "integer", "minimum": 0 }
+          }
+        }
       }
     },
     "seatRef": {

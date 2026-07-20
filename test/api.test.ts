@@ -5,7 +5,7 @@ import { migrate } from '../src/db/migrate.js';
 import { PgTelemetryRepository } from '../src/db/repository.js';
 import { createApp } from '../src/http/app.js';
 import { signBody } from '../src/http/auth.js';
-import { sampleGame } from './fixtures.js';
+import { sampleBotExecution, sampleGame } from './fixtures.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const describeDb = databaseUrl ? describe : describe.skip;
@@ -100,6 +100,47 @@ describeDb('telemetry api with postgres', () => {
     expect(json.decks).toHaveLength(2);
     expect(json.decks.find((deck) => deck.deck === 'king-kong@0.1.0')).toMatchObject({ games: 1, wins: 1, winRate: 1 });
     expect(json.decks.find((deck) => deck.deck === 'the-mandalorian@0.1.0')).toMatchObject({ games: 1, wins: 0, winRate: 0 });
+  });
+
+  it('persists structured bot execution metadata per seat', async () => {
+    const game = sampleGame({ gameId: 'bot-execution-001', stateHash: 'bot-execution-state-001' });
+    game.teams[0]!.seats[0]!.botVersion = 'mc-v1';
+    game.teams[0]!.seats[0]!.botExecution = sampleBotExecution();
+
+    const response = await postGame(baseUrl, secret, game, 'bot-execution-001');
+    expect(response.status).toBe(201);
+
+    const stored = await pool.query<{ bot_version: string | null; bot_execution: unknown }>(
+      `SELECT bot_version, bot_execution
+       FROM game_seats
+       WHERE game_id = $1 AND team_index = 0 AND seat_index = 0`,
+      ['bot-execution-001'],
+    );
+    expect(stored.rows[0]).toEqual({
+      bot_version: 'mc-v1',
+      bot_execution: sampleBotExecution(),
+    });
+
+    const stats = await fetch(`${baseUrl}/v1/stats/bot-execution?pilot=bot%3Ahard&deck=king-kong%400.1.0`);
+    expect(stats.status).toBe(200);
+    expect(await stats.json()).toEqual({
+      ok: true,
+      pilot: 'bot:hard',
+      deck: 'king-kong@0.1.0',
+      rows: [{
+        pilot: 'bot:hard',
+        botVersion: 'mc-v1',
+        msPerMove: 2000,
+        iterationCap: 64,
+        games: 1,
+        decisions: 42,
+        completedIterationsMean: 61.5,
+        clockTruncatedDecisions: 3,
+        earlyStoppedDecisions: 0,
+        clockTruncatedRate: 3 / 42,
+        earlyStoppedRate: 0,
+      }],
+    });
   });
 
   it('supports MUST pilot filters', async () => {

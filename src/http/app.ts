@@ -85,6 +85,11 @@ async function handleRequest(
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/v1/stats/bot-execution') {
+    await handleBotExecutionStats(url, res, repo);
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/v1/stats/pilot-comparison') {
     await handlePilotComparison(url, res, repo);
     return;
@@ -245,6 +250,13 @@ async function handleDeckIngest(
 
   const result = await repo.upsertDeckDefinitions(parsed as DeckDefinitionSubmission, config.now());
   sendJson(res, 200, { ok: true, upserted: result.upserted });
+}
+
+async function handleBotExecutionStats(url: URL, res: ServerResponse, repo: PgTelemetryRepository): Promise<void> {
+  const pilot = url.searchParams.get('pilot')?.trim() || null;
+  const deck = url.searchParams.get('deck')?.trim() || null;
+  const result = await repo.botExecutionStats({ pilot, deck });
+  sendJson(res, 200, { ok: true, ...result });
 }
 
 async function handlePilotComparison(url: URL, res: ServerResponse, repo: PgTelemetryRepository): Promise<void> {

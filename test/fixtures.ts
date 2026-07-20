@@ -1,5 +1,17 @@
 import type { GameSubmission } from '../src/types.js';
 
+export function sampleBotExecution() {
+  return {
+    budget: { msPerMove: 2000, iterationCap: 64 },
+    search: {
+      decisions: 42,
+      completedIterations: { mean: 61.5, p50: 64, p95: 64 },
+      clockTruncatedDecisions: 3,
+      earlyStoppedDecisions: 0,
+    },
+  };
+}
+
 export function sampleGame(overrides: Partial<GameSubmission> = {}): GameSubmission {
   return {
     schemaVersion: 1,
