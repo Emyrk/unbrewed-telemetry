@@ -34,6 +34,27 @@ function semanticErrors(submission: GameSubmission): string[] {
   if (submission.firstPlayerTeam !== undefined && submission.firstPlayerTeam >= submission.teams.length) {
     errors.push(`/firstPlayerTeam: ${submission.firstPlayerTeam} is not a valid team index`);
   }
+  submission.teams.forEach((team, teamIndex) => {
+    team.seats.forEach((seat, seatIndex) => {
+      const execution = seat.botExecution;
+      if (!execution) return;
+      const path = `/teams/${teamIndex}/seats/${seatIndex}/botExecution`;
+      if (!seat.pilot.startsWith('bot:')) {
+        errors.push(`${path}: only bot pilots may report execution metadata`);
+      }
+      const { decisions, completedIterations, clockTruncatedDecisions, earlyStoppedDecisions } = execution.search;
+      if (clockTruncatedDecisions + earlyStoppedDecisions > decisions) {
+        errors.push(`${path}/search: truncated and early-stopped decisions exceed total decisions`);
+      }
+      if (completedIterations.p50 > completedIterations.p95) {
+        errors.push(`${path}/search/completedIterations: p50 must be less than or equal to p95`);
+      }
+      const cap = execution.budget.iterationCap;
+      if (completedIterations.mean > cap || completedIterations.p50 > cap || completedIterations.p95 > cap) {
+        errors.push(`${path}/search/completedIterations: values must not exceed budget.iterationCap`);
+      }
+    });
+  });
   const cardsPlayed = submission.telemetry?.cardsPlayed ?? [];
   for (let i = 0; i < cardsPlayed.length; i++) {
     const event = cardsPlayed[i]!;

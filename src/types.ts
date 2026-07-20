@@ -36,6 +36,23 @@ export interface TeamSubmission {
   seats: SeatSubmission[];
 }
 
+export interface BotExecutionSubmission {
+  budget: {
+    msPerMove: number;
+    iterationCap: number;
+  };
+  search: {
+    decisions: number;
+    completedIterations: {
+      mean: number;
+      p50: number;
+      p95: number;
+    };
+    clockTruncatedDecisions: number;
+    earlyStoppedDecisions: number;
+  };
+}
+
 export interface SeatSubmission {
   deck: string;
   pilot: string;
@@ -45,6 +62,7 @@ export interface SeatSubmission {
   heroName?: string;
   botDifficulty?: string;
   botVersion?: string;
+  botExecution?: BotExecutionSubmission;
   finalHealth?: number;
   finalDeckCount?: number;
   finalHandCount?: number;
@@ -136,6 +154,7 @@ export interface NormalizedSeat {
   botId: string | null;
   botDifficulty: string | null;
   botVersion: string | null;
+  botExecution: BotExecutionSubmission | null;
   playerId: string | null;
   firstPlayer: boolean;
   won: boolean;
@@ -353,6 +372,26 @@ export interface DeckStatsResponse {
   totalGames: number;
   avgTurns: number | null;
   decks: DeckStat[];
+}
+
+export interface BotExecutionStat {
+  pilot: string;
+  botVersion: string | null;
+  msPerMove: number;
+  iterationCap: number;
+  games: number;
+  decisions: number;
+  completedIterationsMean: number | null;
+  clockTruncatedDecisions: number;
+  earlyStoppedDecisions: number;
+  clockTruncatedRate: number | null;
+  earlyStoppedRate: number | null;
+}
+
+export interface BotExecutionStatsResponse {
+  pilot: string | null;
+  deck: string | null;
+  rows: BotExecutionStat[];
 }
 
 export interface PilotComparisonSample {

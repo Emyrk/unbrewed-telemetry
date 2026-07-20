@@ -85,6 +85,7 @@ export function normalizeSubmission(
         botId,
         botDifficulty: nullableString(seat.botDifficulty),
         botVersion: nullableString(seat.botVersion),
+        botExecution: seat.botExecution ?? null,
         playerId: nullableString(seat.playerId),
         firstPlayer: submission.firstPlayerTeam === teamIndex,
         won: winnerTeam === teamIndex,

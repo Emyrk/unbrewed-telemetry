@@ -70,6 +70,60 @@ The HMAC signs this exact byte sequence:
 
 Use `src/http/auth.ts`'s `signBody()` helper from Node clients.
 
+#### Bot execution metadata
+
+Bot seats may include an optional `botExecution` summary. Keep the stable cohort
+or experiment name in `pilot` and the implementation revision in `botVersion`.
+The execution block records the requested budget and aggregate work completed
+across that seat's decisions in this game:
+
+```json
+{
+  "deck": "hollow-oak-spice@0.10.0",
+  "pilot": "bot:hard(64,2s)",
+  "botVersion": "mc-v1",
+  "botExecution": {
+    "budget": {
+      "msPerMove": 2000,
+      "iterationCap": 64
+    },
+    "search": {
+      "decisions": 42,
+      "completedIterations": {
+        "mean": 61.5,
+        "p50": 64,
+        "p95": 64
+      },
+      "clockTruncatedDecisions": 3,
+      "earlyStoppedDecisions": 0
+    }
+  }
+}
+```
+
+`iterationCap` and `completedIterations` are algorithm-neutral names used for
+both flat-MC sweeps and ISMCTS iterations. Clock truncation and deterministic
+early stopping are separate counts. The service validates the summary and
+stores it as JSONB on the normalized seat while preserving the original game
+payload. Deploy this ingest change before producers begin sending the field,
+because the v1 schema rejects unknown properties.
+
+### `GET /v1/stats/bot-execution`
+
+Returns execution summaries grouped by exact pilot, `botVersion`, and requested
+budget. Optional exact filters are `pilot` and `deck`. Cross-game completed
+iterations are weighted by decision count; truncation and early-stop rates use
+the summed decision count as their denominator.
+
+```sh
+curl 'http://localhost:8788/v1/stats/bot-execution?pilot=bot:hard(64,2s)&deck=hollow-oak-spice@0.10.0'
+```
+
+This endpoint intentionally does not average per-game p50/p95 values because an
+average of percentiles is not a valid combined percentile. The normalized JSONB
+and immutable raw payload retain those per-game values for later distribution
+analysis.
+
 ### `GET /v1/stats/dashboard`
 
 Returns the aggregate payload used by `/dashboard`: stat cards, format chips, pilot chips, deck rows, map rows, 1v1 matchups, and 2v2 synergy rows.
