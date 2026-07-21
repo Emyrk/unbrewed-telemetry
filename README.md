@@ -126,7 +126,7 @@ Upserts versioned deck definitions. Use a named bearer credential with `decks:su
 - create and inspect simulation campaigns;
 - cancel campaigns.
 
-A campaign accepts a shared `spec` plus either `gameCount` or a `games` array containing per-game `spec` overrides. `gameCount` supports 1 through 100,000 games. The service stores one transient `sim_jobs` row per game and bulk-inserts the rows in one query.
+A campaign accepts a shared `spec` plus either `gameCount` or a `games` array containing per-game `spec` overrides. `gameCount` supports 1 through 100,000 games. The admin page includes a builder for common format, map, deck, pilot, and difficulty fields, plus a synchronized Raw JSON mode for custom specs and per-game overrides. The service stores one transient `sim_jobs` row per game and bulk-inserts the rows in one query.
 
 Example campaign body:
 

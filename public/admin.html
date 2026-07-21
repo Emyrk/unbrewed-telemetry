@@ -75,6 +75,24 @@
     .form-row input:focus, .form-row textarea:focus { border-color: var(--accent); }
     .form-row textarea { min-height: 80px; width: 100%; resize: vertical; }
 
+    .campaign-editor { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+    .campaign-mode-bar { display: flex; gap: 0.4rem; margin-bottom: 1rem; }
+    .campaign-mode { background: transparent; color: var(--text-muted); border: 1px solid var(--border); }
+    .campaign-mode.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .campaign-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.8rem; }
+    .campaign-field { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; }
+    .campaign-field.wide { grid-column: 1 / -1; }
+    .campaign-field label { color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    .campaign-field input, .campaign-field select, .campaign-field textarea { width: 100%; font-family: var(--mono); font-size: 0.82rem; padding: 0.5rem 0.6rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); outline: none; }
+    .campaign-field select[multiple] { min-height: 110px; }
+    .campaign-field textarea { min-height: 90px; resize: vertical; }
+    .campaign-field input:focus, .campaign-field select:focus, .campaign-field textarea:focus { border-color: var(--accent); }
+    .campaign-help { color: var(--text-muted); font-size: 0.75rem; line-height: 1.4; }
+    .campaign-preview { min-height: 180px !important; color: #b9f6ca !important; }
+    .campaign-actions { display: flex; align-items: center; gap: 0.8rem; margin-top: 1rem; }
+    #campaign-form-status { min-height: 1rem; }
+    @media (max-width: 700px) { .campaign-grid { grid-template-columns: 1fr; } .campaign-field.wide { grid-column: auto; } }
+
     .confirm-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 100; }
     .confirm-box { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1.5rem; max-width: 440px; width: 90%; }
     .confirm-box h3 { font-size: 1rem; margin-bottom: 0.5rem; }
@@ -145,13 +163,97 @@
         <div class="section">
           <div class="section-title">Simulation Campaigns</div>
           <div class="form-row">
-            <input id="campaign-name" placeholder="campaign name" style="width:200px">
-            <input id="campaign-seed" placeholder="base seed (0)" style="width:120px" type="number">
             <button class="btn btn-primary btn-sm" onclick="showCampaignForm()">New Campaign</button>
           </div>
-          <div id="campaign-form" style="display:none;margin-bottom:1rem">
-            <div class="form-row"><textarea id="campaign-json" placeholder='{"spec":{"format":"duel"},"gameCount":10000}' style="font-size:0.8rem"></textarea></div>
-            <div class="form-row"><button class="btn btn-primary btn-sm" onclick="createCampaign()">Create</button></div>
+          <div id="campaign-form" class="campaign-editor" style="display:none">
+            <div class="campaign-mode-bar">
+              <button id="campaign-mode-builder" class="btn btn-sm campaign-mode active" onclick="setCampaignMode('builder')">Builder</button>
+              <button id="campaign-mode-raw" class="btn btn-sm campaign-mode" onclick="setCampaignMode('raw')">Raw JSON</button>
+            </div>
+
+            <div id="campaign-builder-panel">
+              <div class="campaign-grid">
+                <div class="campaign-field">
+                  <label for="campaign-name">Campaign name</label>
+                  <input id="campaign-name" placeholder="Hard duel sweep">
+                </div>
+                <div class="campaign-field">
+                  <label for="campaign-description">Description</label>
+                  <input id="campaign-description" placeholder="Optional note">
+                </div>
+                <div class="campaign-field">
+                  <label for="campaign-game-count">Games</label>
+                  <input id="campaign-game-count" type="number" min="1" max="100000" value="10000">
+                </div>
+                <div class="campaign-field">
+                  <label for="campaign-seed">Base seed</label>
+                  <input id="campaign-seed" type="number" value="0">
+                </div>
+                <div class="campaign-field">
+                  <label for="campaign-content-version">Content version</label>
+                  <input id="campaign-content-version" placeholder="Optional version pin">
+                </div>
+                <div class="campaign-field">
+                  <label for="campaign-format">Format</label>
+                  <select id="campaign-format">
+                    <option value="duel">1v1 / duel</option>
+                    <option value="team-2v2">2v2</option>
+                    <option value="two-v-one-boss">2v1 boss</option>
+                    <option value="ffa-3">3-player FFA</option>
+                  </select>
+                </div>
+                <div class="campaign-field">
+                  <label for="campaign-difficulty">Bot difficulty</label>
+                  <input id="campaign-difficulty" list="campaign-difficulty-options" value="hard" placeholder="hard">
+                  <datalist id="campaign-difficulty-options"><option value="easy"><option value="medium"><option value="hard"><option value="expert"></datalist>
+                </div>
+                <div class="campaign-field">
+                  <label for="campaign-pilot">Pilot</label>
+                  <input id="campaign-pilot" value="bot" placeholder="bot">
+                </div>
+                <div class="campaign-field wide">
+                  <label for="campaign-maps">Known maps</label>
+                  <select id="campaign-maps" multiple></select>
+                  <div class="campaign-help">Choose one or more maps already present in telemetry. Use the custom field for new map IDs.</div>
+                </div>
+                <div class="campaign-field wide">
+                  <label for="campaign-custom-maps">Additional map IDs</label>
+                  <input id="campaign-custom-maps" placeholder="sarpedon, heorot">
+                </div>
+                <div class="campaign-field wide">
+                  <label for="campaign-decks">Registered decks</label>
+                  <select id="campaign-decks" multiple></select>
+                  <div class="campaign-help">Deck options come from the versioned deck registry.</div>
+                </div>
+                <div class="campaign-field wide">
+                  <label for="campaign-custom-decks">Additional deck IDs</label>
+                  <input id="campaign-custom-decks" placeholder="king-kong@1.0.0, medusa@1.0.0">
+                </div>
+                <div class="campaign-field wide">
+                  <label for="campaign-extra-spec">Extra spec JSON</label>
+                  <textarea id="campaign-extra-spec" placeholder='{"swapStartingPlayer":true}'></textarea>
+                  <div class="campaign-help">Extra fields are merged into <span class="mono">spec</span> and override builder fields with the same name.</div>
+                </div>
+                <div class="campaign-field wide">
+                  <label for="campaign-preview">Generated JSON</label>
+                  <textarea id="campaign-preview" class="campaign-preview" readonly></textarea>
+                </div>
+              </div>
+            </div>
+
+            <div id="campaign-raw-panel" style="display:none">
+              <div class="campaign-field wide">
+                <label for="campaign-json">Campaign JSON</label>
+                <textarea id="campaign-json" class="campaign-preview" spellcheck="false"></textarea>
+                <div class="campaign-help">Edit the complete request body. Switching back to Builder imports recognized fields and preserves unknown spec fields.</div>
+              </div>
+            </div>
+
+            <div class="campaign-actions">
+              <button class="btn btn-primary btn-sm" onclick="createCampaign()">Create Campaign</button>
+              <button class="btn btn-ghost btn-sm" onclick="hideCampaignForm()">Cancel</button>
+              <span id="campaign-form-status" class="error-msg"></span>
+            </div>
           </div>
           <div id="campaigns-list"></div>
           <div id="campaign-detail" style="display:none"></div>
@@ -172,6 +274,10 @@
   </div>
 
   <script>
+    let adminDecks = [];
+    let campaignMode = 'builder';
+    const campaignKnownSpecKeys = new Set(['format', 'maps', 'map', 'decks', 'difficulty', 'pilot']);
+
     // ----- API helper -----
     async function api(method, path, body) {
       const opts = { method, headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin' };
@@ -210,6 +316,7 @@
       loadDecks();
       loadSources();
       loadCampaigns();
+      loadCampaignBuilderOptions();
     }
 
     async function doLogout() {
@@ -224,6 +331,8 @@
     }
 
     function renderDecks(data) {
+      adminDecks = data.decks || [];
+      populateCampaignDeckOptions();
       const statsBar = document.getElementById('stats-bar');
       statsBar.innerHTML = `
         <div class="stat-item"><div class="stat-value">${data.totalDecks ?? 0}</div><div class="stat-label">Definitions</div></div>
@@ -334,19 +443,237 @@
       el.innerHTML = html;
     }
 
+    async function loadCampaignBuilderOptions() {
+      try {
+        const { data } = await api('GET', '/v1/stats/dashboard');
+        populateCampaignFormatOptions(data.formats || []);
+        populateCampaignMapOptions(data.maps || []);
+      } catch {}
+    }
+
+    function populateCampaignFormatOptions(formats) {
+      const select = document.getElementById('campaign-format');
+      const selected = select.value || 'duel';
+      const defaults = [
+        ['duel', '1v1 / duel'],
+        ['team-2v2', '2v2'],
+        ['two-v-one-boss', '2v1 boss'],
+        ['ffa-3', '3-player FFA'],
+      ];
+      const options = new Map(defaults);
+      for (const format of formats) options.set(format.format, format.label || format.format);
+      select.replaceChildren(...[...options].map(([value, label]) => optionElement(value, label)));
+      select.value = options.has(selected) ? selected : 'duel';
+      updateCampaignPreview();
+    }
+
+    function populateCampaignMapOptions(maps) {
+      const select = document.getElementById('campaign-maps');
+      const selected = selectedValues(select);
+      const values = [...new Set(maps.map(row => row.map).filter(Boolean))].sort();
+      select.replaceChildren(...values.map(value => optionElement(value, value)));
+      setMultiSelect(select, selected);
+      updateCampaignPreview();
+    }
+
+    function populateCampaignDeckOptions() {
+      const select = document.getElementById('campaign-decks');
+      if (!select) return;
+      const selected = selectedValues(select);
+      const options = [];
+      for (const deck of adminDecks) {
+        for (const version of deck.versions || []) {
+          const value = `${deck.deckId}@${version}`;
+          options.push(optionElement(value, `${deck.name || deck.deckId} (${version})`));
+        }
+      }
+      select.replaceChildren(...options);
+      setMultiSelect(select, selected);
+      updateCampaignPreview();
+    }
+
+    function optionElement(value, label) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      return option;
+    }
+
+    function selectedValues(select) {
+      return Array.from(select.selectedOptions || []).map(option => option.value);
+    }
+
+    function setMultiSelect(select, values) {
+      const wanted = new Set(values);
+      for (const option of select.options) option.selected = wanted.has(option.value);
+    }
+
+    function commaValues(value) {
+      return value.split(',').map(item => item.trim()).filter(Boolean);
+    }
+
+    function uniqueValues(values) {
+      return [...new Set(values)];
+    }
+
     function showCampaignForm() {
-      document.getElementById('campaign-form').style.display = document.getElementById('campaign-form').style.display === 'none' ? '' : 'none';
+      const form = document.getElementById('campaign-form');
+      form.style.display = form.style.display === 'none' ? '' : 'none';
+      if (form.style.display !== 'none') {
+        setCampaignMode('builder');
+        updateCampaignPreview();
+      }
+    }
+
+    function hideCampaignForm() {
+      document.getElementById('campaign-form').style.display = 'none';
+      setCampaignStatus('');
+    }
+
+    function setCampaignMode(mode) {
+      if (mode === 'builder' && campaignMode === 'raw' && !importRawCampaign()) return;
+      if (mode === 'raw' && campaignMode === 'builder' && !updateCampaignPreview()) return;
+      campaignMode = mode;
+      document.getElementById('campaign-builder-panel').style.display = mode === 'builder' ? '' : 'none';
+      document.getElementById('campaign-raw-panel').style.display = mode === 'raw' ? '' : 'none';
+      document.getElementById('campaign-mode-builder').classList.toggle('active', mode === 'builder');
+      document.getElementById('campaign-mode-raw').classList.toggle('active', mode === 'raw');
+      setCampaignStatus('');
+    }
+
+    function campaignPayloadFromBuilder() {
+      let extra = {};
+      const extraText = document.getElementById('campaign-extra-spec').value.trim();
+      if (extraText) {
+        extra = JSON.parse(extraText);
+        if (!extra || Array.isArray(extra) || typeof extra !== 'object') throw new Error('Extra spec JSON must be an object');
+      }
+
+      const maps = uniqueValues([
+        ...selectedValues(document.getElementById('campaign-maps')),
+        ...commaValues(document.getElementById('campaign-custom-maps').value),
+      ]);
+      const decks = uniqueValues([
+        ...selectedValues(document.getElementById('campaign-decks')),
+        ...commaValues(document.getElementById('campaign-custom-decks').value),
+      ]);
+      const spec = {
+        format: document.getElementById('campaign-format').value,
+        ...(maps.length ? { maps } : {}),
+        ...(decks.length ? { decks } : {}),
+        ...(document.getElementById('campaign-difficulty').value.trim() ? { difficulty: document.getElementById('campaign-difficulty').value.trim() } : {}),
+        ...(document.getElementById('campaign-pilot').value.trim() ? { pilot: document.getElementById('campaign-pilot').value.trim() } : {}),
+        ...extra,
+      };
+      const payload = {
+        name: document.getElementById('campaign-name').value.trim(),
+        baseSeed: Number.parseInt(document.getElementById('campaign-seed').value, 10) || 0,
+        gameCount: Number.parseInt(document.getElementById('campaign-game-count').value, 10),
+        spec,
+      };
+      const description = document.getElementById('campaign-description').value.trim();
+      const contentVersion = document.getElementById('campaign-content-version').value.trim();
+      if (description) payload.description = description;
+      if (contentVersion) payload.contentVersion = contentVersion;
+      return payload;
+    }
+
+    function updateCampaignPreview() {
+      try {
+        const payload = campaignPayloadFromBuilder();
+        const formatted = JSON.stringify(payload, null, 2);
+        document.getElementById('campaign-preview').value = formatted;
+        document.getElementById('campaign-json').value = formatted;
+        setCampaignStatus('');
+        return true;
+      } catch (error) {
+        setCampaignStatus(error.message || 'Invalid builder values');
+        return false;
+      }
+    }
+
+    function importRawCampaign() {
+      let payload;
+      try {
+        payload = JSON.parse(document.getElementById('campaign-json').value);
+      } catch {
+        setCampaignStatus('Raw campaign JSON is invalid');
+        return false;
+      }
+      if (!payload || Array.isArray(payload) || typeof payload !== 'object') {
+        setCampaignStatus('Raw campaign JSON must be an object');
+        return false;
+      }
+      if (Array.isArray(payload.games)) {
+        setCampaignStatus('Per-game overrides are available only in Raw JSON mode');
+        return false;
+      }
+      const spec = payload.spec && !Array.isArray(payload.spec) && typeof payload.spec === 'object' ? payload.spec : {};
+      document.getElementById('campaign-name').value = payload.name || '';
+      document.getElementById('campaign-description').value = payload.description || '';
+      document.getElementById('campaign-game-count').value = payload.gameCount || '';
+      document.getElementById('campaign-seed').value = payload.baseSeed ?? 0;
+      document.getElementById('campaign-content-version').value = payload.contentVersion || '';
+      if (spec.format && !Array.from(document.getElementById('campaign-format').options).some(option => option.value === spec.format)) {
+        document.getElementById('campaign-format').append(optionElement(spec.format, spec.format));
+      }
+      document.getElementById('campaign-format').value = spec.format || 'duel';
+      document.getElementById('campaign-difficulty').value = spec.difficulty || '';
+      document.getElementById('campaign-pilot').value = spec.pilot || '';
+
+      const maps = Array.isArray(spec.maps) ? spec.maps : (spec.map ? [spec.map] : []);
+      const knownMaps = new Set(Array.from(document.getElementById('campaign-maps').options).map(option => option.value));
+      setMultiSelect(document.getElementById('campaign-maps'), maps.filter(value => knownMaps.has(value)));
+      document.getElementById('campaign-custom-maps').value = maps.filter(value => !knownMaps.has(value)).join(', ');
+
+      const decks = Array.isArray(spec.decks) ? spec.decks : [];
+      const knownDecks = new Set(Array.from(document.getElementById('campaign-decks').options).map(option => option.value));
+      setMultiSelect(document.getElementById('campaign-decks'), decks.filter(value => knownDecks.has(value)));
+      document.getElementById('campaign-custom-decks').value = decks.filter(value => !knownDecks.has(value)).join(', ');
+
+      const extra = Object.fromEntries(Object.entries(spec).filter(([key]) => !campaignKnownSpecKeys.has(key)));
+      document.getElementById('campaign-extra-spec').value = Object.keys(extra).length ? JSON.stringify(extra, null, 2) : '';
+      document.getElementById('campaign-preview').value = JSON.stringify(payload, null, 2);
+      setCampaignStatus('');
+      return true;
+    }
+
+    function setCampaignStatus(message, success = false) {
+      const status = document.getElementById('campaign-form-status');
+      status.textContent = message;
+      status.className = success ? 'success-msg' : 'error-msg';
     }
 
     async function createCampaign() {
-      const name = document.getElementById('campaign-name').value.trim();
-      if (!name) return;
-      const seed = parseInt(document.getElementById('campaign-seed').value) || 0;
-      let json;
-      try { json = JSON.parse(document.getElementById('campaign-json').value); }
-      catch { alert('Invalid JSON'); return; }
-      await api('POST', '/v1/admin/campaigns', { name, baseSeed: seed, ...json });
-      document.getElementById('campaign-form').style.display = 'none';
+      let payload;
+      try {
+        payload = campaignMode === 'builder'
+          ? campaignPayloadFromBuilder()
+          : JSON.parse(document.getElementById('campaign-json').value);
+      } catch (error) {
+        setCampaignStatus(error.message || 'Invalid campaign JSON');
+        return;
+      }
+      if (!payload.name) { setCampaignStatus('Campaign name is required'); return; }
+      const hasGameCount = Number.isInteger(payload.gameCount) && payload.gameCount >= 1 && payload.gameCount <= 100000;
+      const hasGames = Array.isArray(payload.games) && payload.games.length >= 1 && payload.games.length <= 100000;
+      if (!hasGameCount && !hasGames) {
+        setCampaignStatus('Provide gameCount or a games array with 1 to 100,000 entries');
+        return;
+      }
+      if (!payload.spec || Array.isArray(payload.spec) || typeof payload.spec !== 'object') {
+        setCampaignStatus('Campaign spec must be an object');
+        return;
+      }
+
+      setCampaignStatus('Creating…', true);
+      const { status, data } = await api('POST', '/v1/admin/campaigns', payload);
+      if (status !== 201 || !data.ok) {
+        setCampaignStatus(data.message || 'Campaign creation failed');
+        return;
+      }
+      setCampaignStatus('Campaign created', true);
+      hideCampaignForm();
       loadCampaigns();
     }
 
@@ -376,6 +703,13 @@
     function esc(s) { const el = document.createElement('span'); el.textContent = s; return el.innerHTML; }
 
     // ----- Init -----
+    document.querySelectorAll('#campaign-builder-panel input, #campaign-builder-panel select, #campaign-builder-panel textarea')
+      .forEach(element => {
+        element.addEventListener('input', updateCampaignPreview);
+        element.addEventListener('change', updateCampaignPreview);
+      });
+    document.getElementById('campaign-json').addEventListener('input', () => setCampaignStatus(''));
+    updateCampaignPreview();
     void checkSession();
   </script>
 </body>
