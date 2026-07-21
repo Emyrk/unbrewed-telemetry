@@ -44,7 +44,7 @@ Telemetry should be emitted by the Unbrewed Pro server layer when a room transit
 
 ```text
 TELEMETRY_URL=https://<telemetry-service>/v1/games
-TELEMETRY_SECRET=<server-to-server secret>
+TELEMETRY_API_KEY=<named bearer credential>
 ```
 
 Submission must be best effort. A telemetry outage must never block gameplay, delay `GAME_OVER`, break replay bundle delivery, or crash the room server. Log failures with enough context to debug them, but do not retry forever in-process.
@@ -65,14 +65,19 @@ Recommended endpoints:
 
 - `GET /healthz` returns 200 with `{ ok: true }` for Railway health checks.
 - `POST /v1/games` ingests one completed game.
-- `POST /v1/decks` upserts a batch of deck definitions into the versioned registry (same HMAC auth as `/v1/games`). Payload schema: `schemas/deck-definitions.v1.schema.json`.
+- `POST /v1/decks` upserts a batch of deck definitions into the versioned registry (named bearer credential with `decks:submit` scope). Payload schema: `schemas/deck-definitions.v1.schema.json`.
 - `GET /v1/stats/dashboard?format=&pilots=` returns all aggregates the dashboard needs (decks with deck profiles, formats with boss-side win rate + by-boss breakdown, maps, pilots, matchups, synergy, first-player).
 - `GET /v1/stats/decks?format=&pilots=` returns just the deck table slice.
 - `GET /v1/stats/pilot-comparison?pilotA=&pilotB=&opponentPilot=&hero=&opponent=` compares two exact pilots in 1v1 while holding the opposing pilot constant. Without `hero`, rows summarize active heroes; with `hero`, rows list that hero against each opposing hero and always include its mirror matchup. Powers the Pilot Comparisons dashboard tab.
 - `GET /v1/stats/deck?deck=&format=&pilots=&opponent=&heroPilot=&opponentPilot=` returns one deck's detail: play-mix profile, win rate by format and map, 1v1 matchups, and per-card influence. The exact pilot parameters support swapping pilot assignments for a fixed 1v1 hero matchup. 404s when the deck has no games under the filters.
+- `POST /v1/sim/claim` leases a batch of individual simulation jobs to a bearer credential with `sim:claim` scope.
+- `POST /v1/sim/heartbeat` renews an unexpired lease owned by the same runner credential.
+- `POST /v1/sim/complete` atomically ingests a completed game, updates campaign counters, and deletes the transient job row (`sim:complete` scope).
+- `POST /v1/sim/fail` requeues or terminally fails a leased job.
+- `/v1/admin/campaigns` and related admin routes create and inspect deterministic campaigns. Campaigns may use `gameCount` for large repeated runs or explicit per-game overrides.
 - Optional later: `POST /v1/games/batch` for AI lab backfills or simulations.
 
-Authentication should be server-to-server only. Use the telemetry secret as an HMAC key by default, signing the request body plus timestamp. Ask Steven before downgrading the ingest API to bearer-only auth for MVP speed. Never accept submissions from browsers.
+Machine authentication uses admin-created named bearer credentials over HTTPS. Credentials belong to a telemetry source, are stored as salted scrypt hashes, and carry explicit scopes (`games:submit`, `decks:submit`, `sim:claim`, `sim:complete`). Derive source attribution from the credential and never trust a producer-provided source when bearer auth succeeds. Legacy HMAC remains migration-only. Human administration uses Discord OAuth sessions and an `ADMIN_DISCORD_IDS` allowlist. Never accept machine submissions from browsers.
 
 Every accepted submission should carry or derive:
 
