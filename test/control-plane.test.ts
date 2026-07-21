@@ -1,11 +1,43 @@
 import { describe, expect, it } from 'vitest';
 import { hashSecret, verifySecret, generateCredential, parseBearer, hasScope, type Scope } from '../src/http/bearer-auth.js';
 
-import { unixNanoSeed } from '../src/db/control-plane-repository.js';
+import { resolveCampaignJobSpec, unixNanoSeed } from '../src/db/control-plane-repository.js';
 
 describe('campaign seeds', () => {
   it('builds a Unix nanosecond seed without losing integer precision', () => {
     expect(unixNanoSeed(1_000, 42)).toBe('1000000042');
+  });
+});
+
+describe('campaign pool resolution', () => {
+  const pooledSpec = {
+    format: 'duel',
+    maps: ['sarpedon', 'heorot'],
+    swapStartingPlayer: true,
+    teams: [
+      { seats: [{ decks: ['king-taranis-spice', 'thrall-spice'], pilots: ['bot:hard', 'bot:medium'] }] },
+      { seats: [{ decks: ['medusa-spice'], pilots: ['bot:easy', 'bot:medium'] }] },
+    ],
+  };
+
+  it('deterministically resolves pools into an exact runner specification', () => {
+    const first = resolveCampaignJobSpec(pooledSpec, '12345') as any;
+    const repeated = resolveCampaignJobSpec(pooledSpec, '12345') as any;
+    expect(repeated).toEqual(first);
+    expect(first.maps).toBeUndefined();
+    expect(['sarpedon', 'heorot']).toContain(first.map);
+    expect(first.teams[0].seats[0].decks).toBeUndefined();
+    expect(first.teams[0].seats[0].pilots).toBeUndefined();
+    expect(['king-taranis-spice', 'thrall-spice']).toContain(first.teams[0].seats[0].deck);
+    expect(['bot:hard', 'bot:medium']).toContain(first.teams[0].seats[0].pilot);
+    expect(first.teams[1].seats[0]).toMatchObject({ deck: 'medusa-spice' });
+  });
+
+  it('rejects empty seat pools', () => {
+    expect(() => resolveCampaignJobSpec({
+      format: 'duel',
+      teams: [{ seats: [{ decks: [], pilots: ['bot:hard'] }] }],
+    }, '1')).toThrow('campaign spec: teams[0].seats[0].decks must be a non-empty string array');
   });
 });
 
@@ -191,6 +223,34 @@ describeDb('control-plane repository with postgres', () => {
       expect(campaign.baseSeed).toMatch(/^\d{19}$/);
       const detail = await repo.getCampaign(campaign.id);
       expect(BigInt(detail!.jobs[1]!.seed) - BigInt(detail!.jobs[0]!.seed)).toBe(1n);
+    });
+
+    it('stores exact per-job assignments resolved from campaign pools', async () => {
+      const campaign = await repo.createCampaign({
+        name: 'Pool Campaign',
+        baseSeed: '500',
+        spec: {
+          format: 'duel',
+          maps: ['sarpedon', 'heorot'],
+          teams: [
+            { seats: [{ decks: ['king-taranis-spice', 'thrall-spice'], pilots: ['bot:hard'] }] },
+            { seats: [{ decks: ['medusa-spice'], pilots: ['bot:medium', 'bot:easy'] }] },
+          ],
+        },
+        games: [{}, {}, {}],
+        createdBy: 'admin',
+      });
+      const detail = await repo.getCampaign(campaign.id);
+      for (const job of detail!.jobs) {
+        const spec = job.spec as any;
+        expect(spec.maps).toBeUndefined();
+        expect(['sarpedon', 'heorot']).toContain(spec.map);
+        expect(spec.teams[0].seats[0].decks).toBeUndefined();
+        expect(['king-taranis-spice', 'thrall-spice']).toContain(spec.teams[0].seats[0].deck);
+        expect(spec.teams[0].seats[0].pilot).toBe('bot:hard');
+        expect(spec.teams[1].seats[0].deck).toBe('medusa-spice');
+        expect(['bot:medium', 'bot:easy']).toContain(spec.teams[1].seats[0].pilot);
+      }
     });
 
     it('bulk-creates 10,000 transient game jobs', async () => {

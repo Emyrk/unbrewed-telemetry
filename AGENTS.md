@@ -74,7 +74,7 @@ Recommended endpoints:
 - `POST /v1/sim/heartbeat` renews an unexpired lease owned by the same runner credential.
 - `POST /v1/sim/complete` atomically ingests a completed game, updates campaign counters, and deletes the transient job row (`sim:complete` scope).
 - `POST /v1/sim/fail` requeues or terminally fails a leased job.
-- `/v1/admin/campaigns` and related admin routes create and inspect deterministic campaigns. Campaigns may use `gameCount` for large repeated runs or explicit per-game overrides. Shared specs use stable hero deck IDs per seat, exact pilot values, and first-class `swapStartingPlayer`; omitted base seeds default to Unix nanoseconds and are returned as decimal strings.
+- `/v1/admin/campaigns` and related admin routes create and inspect deterministic campaigns. Campaigns may use `gameCount` for large repeated runs or explicit per-game overrides. Shared specs use checkbox-style `maps` pools and per-seat `decks`/`pilots` pools with stable hero IDs; the service deterministically resolves pools into exact job specs. `swapStartingPlayer` is first-class, and omitted base seeds default to Unix nanoseconds returned as decimal strings.
 - Optional later: `POST /v1/games/batch` for AI lab backfills or simulations.
 
 Machine authentication uses admin-created named bearer credentials over HTTPS. Credentials belong to a telemetry source, are stored as salted scrypt hashes, and carry explicit scopes (`games:submit`, `decks:submit`, `sim:claim`, `sim:complete`). Derive source attribution from the credential and never trust a producer-provided source when bearer auth succeeds. Legacy HMAC remains migration-only. Human administration uses Discord OAuth sessions and an `ADMIN_DISCORD_IDS` allowlist. Never accept machine submissions from browsers.

@@ -989,6 +989,10 @@ async function handleAdminCreateCampaign(
       sendJson(res, 400, { ok: false, code: 'INVALID_BASE_SEED', message: error.message });
       return;
     }
+    if (error instanceof Error && error.message.startsWith('campaign spec:')) {
+      sendJson(res, 400, { ok: false, code: 'INVALID_CAMPAIGN_SPEC', message: error.message });
+      return;
+    }
     throw error;
   }
 }

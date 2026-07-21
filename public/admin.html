@@ -95,6 +95,14 @@
     .campaign-seat-title { font-size: 0.8rem; font-weight: 600; margin-bottom: 0.6rem; }
     .campaign-seat-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
     .campaign-seat label { display: flex; flex-direction: column; gap: 0.25rem; color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    .campaign-choice-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.35rem; }
+    .campaign-choice-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.3rem 0.6rem; max-height: 170px; overflow: auto; padding: 0.55rem; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
+    .campaign-choice { display: flex !important; flex-direction: row !important; align-items: center; gap: 0.4rem !important; color: var(--text) !important; font-size: 0.75rem !important; text-transform: none !important; letter-spacing: 0 !important; min-width: 0; }
+    .campaign-choice input { width: auto !important; flex: 0 0 auto; }
+    .campaign-choice span { overflow-wrap: anywhere; }
+    .campaign-seat-pool { margin-bottom: 0.7rem; }
+    .campaign-seat-pool:last-child { margin-bottom: 0; }
+    .campaign-seat-custom { margin-top: 0.4rem; }
     .campaign-help { color: var(--text-muted); font-size: 0.75rem; line-height: 1.4; }
     .campaign-preview { min-height: 180px !important; color: #b9f6ca !important; }
     .campaign-actions { display: flex; align-items: center; gap: 0.8rem; margin-top: 1rem; }
@@ -216,9 +224,12 @@
                   <label class="campaign-check"><input id="campaign-swap-starting-player" type="checkbox" checked> Swap starting player between games</label>
                 </div>
                 <div class="campaign-field wide">
-                  <label for="campaign-maps">Known maps</label>
-                  <select id="campaign-maps" multiple></select>
-                  <div class="campaign-help">Choose one or more maps already present in telemetry. Use the custom field for new map IDs.</div>
+                  <div class="campaign-choice-header">
+                    <label>Known maps</label>
+                    <label class="campaign-choice"><input id="campaign-maps-all" type="checkbox" checked> <span>All</span></label>
+                  </div>
+                  <div id="campaign-maps" class="campaign-choice-list"></div>
+                  <div class="campaign-help">Each job deterministically selects one map from this set. Use the custom field for new map IDs.</div>
                 </div>
                 <div class="campaign-field wide">
                   <label for="campaign-custom-maps">Additional map IDs</label>
@@ -227,7 +238,7 @@
                 <div class="campaign-field wide">
                   <label>Seats</label>
                   <div id="campaign-seats" class="campaign-seats"></div>
-                  <div class="campaign-help">Choose an exact pilot and registered hero deck ID for every seat. Registered decks use IDs such as <span class="mono">king-taranis-spice</span>, never display names or versions.</div>
+                  <div class="campaign-help">Build independent hero and pilot pools for every seat, or choose All. Each job deterministically selects one value from each pool. Registered heroes use IDs such as <span class="mono">king-taranis-spice</span>, never display names or versions.</div>
                 </div>
                 <div class="campaign-field wide">
                   <label for="campaign-extra-spec">Extra spec JSON</label>
@@ -469,24 +480,17 @@
     }
 
     function populateCampaignMapOptions(maps) {
-      const select = document.getElementById('campaign-maps');
-      const selected = selectedValues(select);
+      const container = document.getElementById('campaign-maps');
+      const master = document.getElementById('campaign-maps-all');
+      const previous = checkedChoiceValues(container);
       const values = [...new Set(maps.map(row => row.map).filter(Boolean))].sort();
-      select.replaceChildren(...values.map(value => optionElement(value, value)));
-      setMultiSelect(select, selected);
+      const selected = previous.length ? previous : (master.checked ? values : []);
+      renderChoiceList(container, values.map(value => [value, value]), selected);
+      wireChoicePool(master, container);
       updateCampaignPreview();
     }
 
     function populateCampaignDeckOptions() {
-      let datalist = document.getElementById('campaign-deck-options');
-      if (!datalist) {
-        datalist = document.createElement('datalist');
-        datalist.id = 'campaign-deck-options';
-        document.body.append(datalist);
-      }
-      const decks = [...new Map(adminDecks.map(deck => [deck.deckId, deck])).values()]
-        .sort((a, b) => a.deckId.localeCompare(b.deckId));
-      datalist.replaceChildren(...decks.map(deck => optionElement(deck.deckId, deck.name || deck.deckId)));
       renderCampaignSeats();
       updateCampaignPreview();
     }
@@ -498,13 +502,54 @@
       return option;
     }
 
-    function selectedValues(select) {
-      return Array.from(select.selectedOptions || []).map(option => option.value);
+    function checkedChoiceValues(container) {
+      return Array.from(container.querySelectorAll('input[data-choice-value]:checked')).map(input => input.value);
     }
 
-    function setMultiSelect(select, values) {
+    function renderChoiceList(container, options, selected) {
+      const wanted = new Set(selected);
+      container.replaceChildren(...options.map(([value, label]) => {
+        const wrapper = document.createElement('label');
+        wrapper.className = 'campaign-choice';
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.dataset.choiceValue = '';
+        input.value = value;
+        input.checked = wanted.has(value);
+        const text = document.createElement('span');
+        text.textContent = label;
+        wrapper.append(input, text);
+        return wrapper;
+      }));
+    }
+
+    function wireChoicePool(master, container) {
+      const choices = () => Array.from(container.querySelectorAll('input[data-choice-value]'));
+      const refreshMaster = () => {
+        const inputs = choices();
+        const checked = inputs.filter(input => input.checked).length;
+        master.checked = inputs.length > 0 && checked === inputs.length;
+        master.indeterminate = checked > 0 && checked < inputs.length;
+      };
+      master.onchange = () => {
+        for (const input of choices()) input.checked = master.checked;
+        master.indeterminate = false;
+        updateCampaignPreview();
+      };
+      for (const input of choices()) input.addEventListener('change', () => {
+        refreshMaster();
+        updateCampaignPreview();
+      });
+      refreshMaster();
+    }
+
+    function setChoiceValues(master, container, values) {
       const wanted = new Set(values);
-      for (const option of select.options) option.selected = wanted.has(option.value);
+      const inputs = Array.from(container.querySelectorAll('input[data-choice-value]'));
+      for (const input of inputs) input.checked = wanted.has(input.value);
+      const checked = inputs.filter(input => input.checked).length;
+      master.checked = inputs.length > 0 && checked === inputs.length;
+      master.indeterminate = checked > 0 && checked < inputs.length;
     }
 
     function commaValues(value) {
@@ -544,16 +589,64 @@
       ];
     }
 
+    function registeredCampaignDecks() {
+      return [...new Map(adminDecks.map(deck => [deck.deckId, deck])).values()]
+        .sort((a, b) => a.deckId.localeCompare(b.deckId));
+    }
+
     function currentCampaignSeatValues() {
+      const knownDecks = new Set(registeredCampaignDecks().map(deck => deck.deckId));
+      const knownPilots = new Set(campaignPilotValues);
       return Array.from(document.querySelectorAll('.campaign-seat')).map(card => ({
-        deck: card.querySelector('[data-seat-deck]').value.trim(),
-        pilot: card.querySelector('[data-seat-pilot]').value.trim(),
+        decks: uniqueValues([
+          ...checkedChoiceValues(card.querySelector('[data-seat-deck-options]')),
+          ...commaValues(card.querySelector('[data-seat-custom-decks]').value),
+        ]),
+        pilots: uniqueValues([
+          ...checkedChoiceValues(card.querySelector('[data-seat-pilot-options]')),
+          ...commaValues(card.querySelector('[data-seat-custom-pilots]').value),
+        ]),
+        knownDecks,
+        knownPilots,
       }));
     }
 
     function flattenTeams(teams) {
       if (!Array.isArray(teams)) return [];
-      return teams.flatMap(team => Array.isArray(team?.seats) ? team.seats : []);
+      return teams.flatMap(team => Array.isArray(team?.seats) ? team.seats.map(seat => ({
+        decks: Array.isArray(seat.decks) ? seat.decks : (seat.deck ? [seat.deck] : []),
+        pilots: Array.isArray(seat.pilots) ? seat.pilots : (seat.pilot ? [seat.pilot] : []),
+      })) : []);
+    }
+
+    function seatChoicePool(titleText, allText, options, selected, customPlaceholder, customValues, datasetName) {
+      const section = document.createElement('div');
+      section.className = 'campaign-seat-pool';
+      const header = document.createElement('div');
+      header.className = 'campaign-choice-header';
+      const title = document.createElement('span');
+      title.textContent = titleText;
+      const allLabel = document.createElement('label');
+      allLabel.className = 'campaign-choice';
+      const allInput = document.createElement('input');
+      allInput.type = 'checkbox';
+      const allTextNode = document.createElement('span');
+      allTextNode.textContent = allText;
+      allLabel.append(allInput, allTextNode);
+      header.append(title, allLabel);
+      const list = document.createElement('div');
+      list.className = 'campaign-choice-list';
+      list.dataset[datasetName + 'Options'] = '';
+      renderChoiceList(list, options, selected);
+      const custom = document.createElement('input');
+      custom.className = 'campaign-seat-custom';
+      custom.dataset[datasetName === 'seatDeck' ? 'seatCustomDecks' : 'seatCustomPilots'] = '';
+      custom.placeholder = customPlaceholder;
+      custom.value = customValues.join(', ');
+      section.append(header, list, custom);
+      wireChoicePool(allInput, list);
+      custom.addEventListener('input', updateCampaignPreview);
+      return section;
     }
 
     function renderCampaignSeats(importedTeams) {
@@ -569,57 +662,62 @@
           })))
         : [];
       const layout = importedLayout.length && importedLayout.length !== defaultLayout.length ? importedLayout : defaultLayout;
+      const decks = registeredCampaignDecks();
+      const deckIds = decks.map(deck => deck.deckId);
+      const deckIdSet = new Set(deckIds);
+      const pilotSet = new Set(campaignPilotValues);
       container.replaceChildren(...layout.map((seat, index) => {
         const values = previous[index] || {};
+        const selectedDecks = values.decks?.length ? values.decks : deckIds;
+        const selectedPilots = values.pilots?.length ? values.pilots : [index === 1 ? 'bot:medium' : 'bot:hard'];
         const card = document.createElement('div');
         card.className = 'campaign-seat';
         card.dataset.teamIndex = String(seat.teamIndex);
         if (seat.role) card.dataset.teamRole = seat.role;
-
         const title = document.createElement('div');
         title.className = 'campaign-seat-title';
         title.textContent = seat.label;
         const fields = document.createElement('div');
-        fields.className = 'campaign-seat-fields';
-        const deckLabel = document.createElement('label');
-        deckLabel.append('Hero deck ID');
-        const deckInput = document.createElement('input');
-        deckInput.dataset.seatDeck = '';
-        deckInput.setAttribute('list', 'campaign-deck-options');
-        deckInput.value = values.deck || '';
-        deckInput.placeholder = 'king-taranis-spice';
-        deckLabel.append(deckInput);
-        const pilotLabel = document.createElement('label');
-        pilotLabel.append('Pilot');
-        const pilotInput = document.createElement('input');
-        pilotInput.dataset.seatPilot = '';
-        pilotInput.setAttribute('list', 'campaign-pilot-options');
-        pilotInput.value = values.pilot || (index === 1 ? 'bot:medium' : 'bot:hard');
-        pilotInput.placeholder = 'bot:hard';
-        pilotLabel.append(pilotInput);
-        fields.append(deckLabel, pilotLabel);
+        fields.append(
+          seatChoicePool(
+            'Hero deck pool',
+            'All registered',
+            decks.map(deck => [deck.deckId, deck.name ? `${deck.deckId} — ${deck.name}` : deck.deckId]),
+            selectedDecks.filter(value => deckIdSet.has(value)),
+            'Additional hero IDs, comma separated',
+            selectedDecks.filter(value => !deckIdSet.has(value)),
+            'seatDeck',
+          ),
+          seatChoicePool(
+            'Pilot pool',
+            'All pilots',
+            campaignPilotValues.map(value => [value, value]),
+            selectedPilots.filter(value => pilotSet.has(value)),
+            'Additional pilots, comma separated',
+            selectedPilots.filter(value => !pilotSet.has(value)),
+            'seatPilot',
+          ),
+        );
         card.append(title, fields);
         return card;
       }));
-      let pilotList = document.getElementById('campaign-pilot-options');
-      if (!pilotList) {
-        pilotList = document.createElement('datalist');
-        pilotList.id = 'campaign-pilot-options';
-        document.body.append(pilotList);
-      }
-      pilotList.replaceChildren(...campaignPilotValues.map(value => optionElement(value, value)));
-      container.querySelectorAll('input').forEach(input => input.addEventListener('input', updateCampaignPreview));
     }
 
     function campaignTeamsFromBuilder() {
       const teams = [];
       for (const card of document.querySelectorAll('.campaign-seat')) {
         const teamIndex = Number(card.dataset.teamIndex);
-        const deck = card.querySelector('[data-seat-deck]').value.trim();
-        const pilot = card.querySelector('[data-seat-pilot]').value.trim();
+        const decks = uniqueValues([
+          ...checkedChoiceValues(card.querySelector('[data-seat-deck-options]')),
+          ...commaValues(card.querySelector('[data-seat-custom-decks]').value),
+        ]);
+        const pilots = uniqueValues([
+          ...checkedChoiceValues(card.querySelector('[data-seat-pilot-options]')),
+          ...commaValues(card.querySelector('[data-seat-custom-pilots]').value),
+        ]);
         if (!teams[teamIndex]) teams[teamIndex] = { seats: [] };
         if (card.dataset.teamRole) teams[teamIndex].role = card.dataset.teamRole;
-        teams[teamIndex].seats.push({ deck, pilot });
+        teams[teamIndex].seats.push({ decks, pilots });
       }
       return teams;
     }
@@ -662,14 +760,14 @@
       }
 
       const maps = uniqueValues([
-        ...selectedValues(document.getElementById('campaign-maps')),
+        ...checkedChoiceValues(document.getElementById('campaign-maps')),
         ...commaValues(document.getElementById('campaign-custom-maps').value),
       ]);
       const teams = campaignTeamsFromBuilder();
       for (const [teamIndex, team] of teams.entries()) {
         for (const [seatIndex, seat] of team.seats.entries()) {
-          if (!seat.deck) throw new Error(`Team ${teamIndex + 1}, seat ${seatIndex + 1} needs a hero deck ID`);
-          if (!seat.pilot) throw new Error(`Team ${teamIndex + 1}, seat ${seatIndex + 1} needs a pilot`);
+          if (!seat.decks.length) throw new Error(`Team ${teamIndex + 1}, seat ${seatIndex + 1} needs at least one hero deck`);
+          if (!seat.pilots.length) throw new Error(`Team ${teamIndex + 1}, seat ${seatIndex + 1} needs at least one pilot`);
         }
       }
       const spec = {
@@ -739,8 +837,9 @@
       document.getElementById('campaign-swap-starting-player').checked = spec.swapStartingPlayer !== false;
 
       const maps = Array.isArray(spec.maps) ? spec.maps : (spec.map ? [spec.map] : []);
-      const knownMaps = new Set(Array.from(document.getElementById('campaign-maps').options).map(option => option.value));
-      setMultiSelect(document.getElementById('campaign-maps'), maps.filter(value => knownMaps.has(value)));
+      const mapContainer = document.getElementById('campaign-maps');
+      const knownMaps = new Set(Array.from(mapContainer.querySelectorAll('input[data-choice-value]')).map(input => input.value));
+      setChoiceValues(document.getElementById('campaign-maps-all'), mapContainer, maps.filter(value => knownMaps.has(value)));
       document.getElementById('campaign-custom-maps').value = maps.filter(value => !knownMaps.has(value)).join(', ');
       renderCampaignSeats(spec.teams);
 

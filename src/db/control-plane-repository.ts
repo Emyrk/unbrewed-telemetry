@@ -145,6 +145,87 @@ function campaignBaseSeed(value: string | number | undefined, gameCount: number)
   return seed.toString();
 }
 
+function campaignSpecError(message: string): Error {
+  return new Error(`campaign spec: ${message}`);
+}
+
+function stringPool(value: unknown, path: string): string[] | null {
+  if (value === undefined) return null;
+  if (!Array.isArray(value) || value.length === 0) throw campaignSpecError(`${path} must be a non-empty string array`);
+  const values = value.map((item) => typeof item === 'string' ? item.trim() : '').filter(Boolean);
+  if (values.length !== value.length) throw campaignSpecError(`${path} must contain only non-empty strings`);
+  return [...new Set(values)];
+}
+
+function splitMix64(seed: bigint): () => bigint {
+  let state = BigInt.asUintN(64, seed);
+  return () => {
+    state = BigInt.asUintN(64, state + 0x9e3779b97f4a7c15n);
+    let value = state;
+    value = BigInt.asUintN(64, (value ^ (value >> 30n)) * 0xbf58476d1ce4e5b9n);
+    value = BigInt.asUintN(64, (value ^ (value >> 27n)) * 0x94d049bb133111ebn);
+    return BigInt.asUintN(64, value ^ (value >> 31n));
+  };
+}
+
+function pickFromPool(values: string[], random: () => bigint): string {
+  return values[Number(random() % BigInt(values.length))]!;
+}
+
+/** Resolve campaign pools into the exact map, hero deck, and pilot a runner executes. */
+export function resolveCampaignJobSpec(spec: unknown, seed: string | number | bigint): unknown {
+  if (!spec || Array.isArray(spec) || typeof spec !== 'object') return spec;
+  const resolved = structuredClone(spec) as Record<string, unknown>;
+  const random = splitMix64(BigInt(seed));
+
+  const maps = stringPool(resolved.maps, 'maps');
+  if (maps) {
+    resolved.map = pickFromPool(maps, random);
+    delete resolved.maps;
+  }
+
+  if (resolved.teams !== undefined) {
+    if (!Array.isArray(resolved.teams) || resolved.teams.length === 0) {
+      throw campaignSpecError('teams must be a non-empty array');
+    }
+    resolved.teams = resolved.teams.map((team, teamIndex) => {
+      if (!team || Array.isArray(team) || typeof team !== 'object') {
+        throw campaignSpecError(`teams[${teamIndex}] must be an object`);
+      }
+      const resolvedTeam = structuredClone(team) as Record<string, unknown>;
+      if (!Array.isArray(resolvedTeam.seats) || resolvedTeam.seats.length === 0) {
+        throw campaignSpecError(`teams[${teamIndex}].seats must be a non-empty array`);
+      }
+      resolvedTeam.seats = resolvedTeam.seats.map((seat, seatIndex) => {
+        if (!seat || Array.isArray(seat) || typeof seat !== 'object') {
+          throw campaignSpecError(`teams[${teamIndex}].seats[${seatIndex}] must be an object`);
+        }
+        const resolvedSeat = structuredClone(seat) as Record<string, unknown>;
+        const decks = stringPool(resolvedSeat.decks, `teams[${teamIndex}].seats[${seatIndex}].decks`);
+        const pilots = stringPool(resolvedSeat.pilots, `teams[${teamIndex}].seats[${seatIndex}].pilots`);
+        if (decks) {
+          resolvedSeat.deck = pickFromPool(decks, random);
+          delete resolvedSeat.decks;
+        }
+        if (pilots) {
+          resolvedSeat.pilot = pickFromPool(pilots, random);
+          delete resolvedSeat.pilots;
+        }
+        if (typeof resolvedSeat.deck !== 'string' || !resolvedSeat.deck.trim()) {
+          throw campaignSpecError(`teams[${teamIndex}].seats[${seatIndex}] needs deck or decks`);
+        }
+        if (typeof resolvedSeat.pilot !== 'string' || !resolvedSeat.pilot.trim()) {
+          throw campaignSpecError(`teams[${teamIndex}].seats[${seatIndex}] needs pilot or pilots`);
+        }
+        return resolvedSeat;
+      });
+      return resolvedTeam;
+    });
+  }
+
+  return resolved;
+}
+
 // ============================================================================
 // Repository
 // ============================================================================
@@ -326,8 +407,9 @@ export class ControlPlaneRepository {
       for (let i = 0; i < args.games.length; i++) {
         jobIds.push(randomUUID());
         gameIndexes.push(i);
-        seeds.push((BigInt(baseSeed) + BigInt(i)).toString());
-        specs.push(JSON.stringify(args.games[i]!.spec ?? args.spec));
+        const seed = (BigInt(baseSeed) + BigInt(i)).toString();
+        seeds.push(seed);
+        specs.push(JSON.stringify(resolveCampaignJobSpec(args.games[i]!.spec ?? args.spec, seed)));
       }
       await client.query(
         `INSERT INTO sim_jobs (id, campaign_id, game_index, seed, spec)
