@@ -952,7 +952,7 @@ async function handleAdminCreateCampaign(
     name?: string;
     description?: string;
     spec?: unknown;
-    baseSeed?: number;
+    baseSeed?: string | number;
     contentVersion?: string;
     gameCount?: number;
     games?: unknown[];
@@ -973,16 +973,24 @@ async function handleAdminCreateCampaign(
   const games = hasGames
     ? data.games!.map(g => ({ spec: (g && typeof g === 'object' && 'spec' in g) ? (g as { spec: unknown }).spec : undefined }))
     : Array.from({ length: gameCount! }, () => ({}));
-  const campaign = await cpRepo.createCampaign({
-    name: data.name,
-    description: data.description,
-    spec: data.spec,
-    baseSeed: data.baseSeed,
-    contentVersion: data.contentVersion,
-    games,
-    createdBy: admin,
-  });
-  sendJson(res, 201, { ok: true, campaign });
+  try {
+    const campaign = await cpRepo.createCampaign({
+      name: data.name,
+      description: data.description,
+      spec: data.spec,
+      baseSeed: data.baseSeed,
+      contentVersion: data.contentVersion,
+      games,
+      createdBy: admin,
+    });
+    sendJson(res, 201, { ok: true, campaign });
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('baseSeed')) {
+      sendJson(res, 400, { ok: false, code: 'INVALID_BASE_SEED', message: error.message });
+      return;
+    }
+    throw error;
+  }
 }
 
 async function handleAdminGetCampaign(

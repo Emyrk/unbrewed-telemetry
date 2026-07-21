@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { hashSecret, verifySecret, generateCredential, parseBearer, hasScope, type Scope } from '../src/http/bearer-auth.js';
 
+import { unixNanoSeed } from '../src/db/control-plane-repository.js';
+
+describe('campaign seeds', () => {
+  it('builds a Unix nanosecond seed without losing integer precision', () => {
+    expect(unixNanoSeed(1_000, 42)).toBe('1000000042');
+  });
+});
+
 describe('bearer-auth', () => {
   it('hashes and verifies a secret', () => {
     const secret = 'test-secret-value-abc123';
@@ -167,9 +175,22 @@ describeDb('control-plane repository with postgres', () => {
       const detail = await repo.getCampaign(campaign.id);
       expect(detail).not.toBeNull();
       expect(detail!.jobs.length).toBe(3);
-      expect(detail!.jobs[0]!.seed).toBe(42);
-      expect(detail!.jobs[1]!.seed).toBe(43);
-      expect(detail!.jobs[2]!.seed).toBe(44);
+      expect(campaign.baseSeed).toBe('42');
+      expect(detail!.jobs[0]!.seed).toBe('42');
+      expect(detail!.jobs[1]!.seed).toBe('43');
+      expect(detail!.jobs[2]!.seed).toBe('44');
+    });
+
+    it('defaults campaign seeds from Unix nanoseconds', async () => {
+      const campaign = await repo.createCampaign({
+        name: 'Automatic Seed',
+        spec: { format: 'duel' },
+        games: [{}, {}],
+        createdBy: 'admin',
+      });
+      expect(campaign.baseSeed).toMatch(/^\d{19}$/);
+      const detail = await repo.getCampaign(campaign.id);
+      expect(BigInt(detail!.jobs[1]!.seed) - BigInt(detail!.jobs[0]!.seed)).toBe(1n);
     });
 
     it('bulk-creates 10,000 transient game jobs', async () => {

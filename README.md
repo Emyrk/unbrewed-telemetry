@@ -126,23 +126,28 @@ Upserts versioned deck definitions. Use a named bearer credential with `decks:su
 - create and inspect simulation campaigns;
 - cancel campaigns.
 
-A campaign accepts a shared `spec` plus either `gameCount` or a `games` array containing per-game `spec` overrides. `gameCount` supports 1 through 100,000 games. The admin page includes a builder for common format, map, deck, pilot, and difficulty fields, plus a synchronized Raw JSON mode for custom specs and per-game overrides. The service stores one transient `sim_jobs` row per game and bulk-inserts the rows in one query.
+A campaign accepts a shared `spec` plus either `gameCount` or a `games` array containing per-game `spec` overrides. `gameCount` supports 1 through 100,000 games. The admin builder configures format, maps, starting-player swapping, and an exact pilot plus registered hero deck ID for every seat. Registered decks use stable IDs such as `king-taranis-spice`, not display names or versions. Raw JSON mode remains available for custom specs and per-game overrides. The service stores one transient `sim_jobs` row per game and bulk-inserts the rows in one query.
 
 Example campaign body:
 
 ```json
 {
-  "name": "Hard duel sweep",
-  "baseSeed": 1000,
+  "name": "Hard vs medium Thrall",
   "contentVersion": "2026.07",
   "spec": {
     "format": "duel",
-    "map": "sarpedon",
-    "difficulty": "hard"
+    "maps": ["sarpedon"],
+    "swapStartingPlayer": true,
+    "teams": [
+      { "seats": [{ "deck": "king-taranis-spice", "pilot": "bot:hard" }] },
+      { "seats": [{ "deck": "thrall-spice", "pilot": "bot:medium" }] }
+    ]
   },
   "gameCount": 10000
 }
 ```
+
+If `baseSeed` is omitted, the service creates a Unix-nanosecond seed with randomized sub-millisecond bits. Seeds are serialized as decimal strings to preserve 64-bit precision in JavaScript, and each job receives `baseSeed + gameIndex`.
 
 ### Simulation runner API
 

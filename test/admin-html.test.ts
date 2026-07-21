@@ -10,7 +10,12 @@ describe('admin campaign editor', () => {
     expect(html).toContain('id="campaign-game-count"');
     expect(html).toContain('id="campaign-format"');
     expect(html).toContain('id="campaign-maps"');
-    expect(html).toContain('id="campaign-decks"');
+    expect(html).toContain('id="campaign-swap-starting-player"');
+    expect(html).toContain('id="campaign-seats"');
+    expect(html).toContain('data-seat-deck');
+    expect(html).toContain('data-seat-pilot');
+    expect(html).toContain('king-taranis-spice');
+    expect(html).toContain('unixNanoString');
     expect(html).toContain('id="campaign-preview"');
     expect(html).toContain('Per-game overrides are available only in Raw JSON mode');
 

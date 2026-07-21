@@ -87,6 +87,14 @@
     .campaign-field select[multiple] { min-height: 110px; }
     .campaign-field textarea { min-height: 90px; resize: vertical; }
     .campaign-field input:focus, .campaign-field select:focus, .campaign-field textarea:focus { border-color: var(--accent); }
+    .campaign-check-field { justify-content: end; }
+    .campaign-check { display: flex !important; align-items: center; gap: 0.5rem; min-height: 36px; color: var(--text) !important; text-transform: none !important; letter-spacing: 0 !important; }
+    .campaign-check input { width: auto; }
+    .campaign-seats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.7rem; }
+    .campaign-seat { background: var(--bg); border: 1px solid var(--border); border-radius: 7px; padding: 0.8rem; }
+    .campaign-seat-title { font-size: 0.8rem; font-weight: 600; margin-bottom: 0.6rem; }
+    .campaign-seat-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
+    .campaign-seat label { display: flex; flex-direction: column; gap: 0.25rem; color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; }
     .campaign-help { color: var(--text-muted); font-size: 0.75rem; line-height: 1.4; }
     .campaign-preview { min-height: 180px !important; color: #b9f6ca !important; }
     .campaign-actions { display: flex; align-items: center; gap: 0.8rem; margin-top: 1rem; }
@@ -187,7 +195,8 @@
                 </div>
                 <div class="campaign-field">
                   <label for="campaign-seed">Base seed</label>
-                  <input id="campaign-seed" type="number" value="0">
+                  <input id="campaign-seed" inputmode="numeric" placeholder="Generated from Unix nanoseconds">
+                  <div class="campaign-help">Leave blank for a fresh Unix-nanosecond seed. Each job receives base seed + game index.</div>
                 </div>
                 <div class="campaign-field">
                   <label for="campaign-content-version">Content version</label>
@@ -202,14 +211,9 @@
                     <option value="ffa-3">3-player FFA</option>
                   </select>
                 </div>
-                <div class="campaign-field">
-                  <label for="campaign-difficulty">Bot difficulty</label>
-                  <input id="campaign-difficulty" list="campaign-difficulty-options" value="hard" placeholder="hard">
-                  <datalist id="campaign-difficulty-options"><option value="easy"><option value="medium"><option value="hard"><option value="expert"></datalist>
-                </div>
-                <div class="campaign-field">
-                  <label for="campaign-pilot">Pilot</label>
-                  <input id="campaign-pilot" value="bot" placeholder="bot">
+                <div class="campaign-field campaign-check-field">
+                  <label for="campaign-swap-starting-player">Starting player</label>
+                  <label class="campaign-check"><input id="campaign-swap-starting-player" type="checkbox" checked> Swap starting player between games</label>
                 </div>
                 <div class="campaign-field wide">
                   <label for="campaign-maps">Known maps</label>
@@ -221,18 +225,14 @@
                   <input id="campaign-custom-maps" placeholder="sarpedon, heorot">
                 </div>
                 <div class="campaign-field wide">
-                  <label for="campaign-decks">Registered decks</label>
-                  <select id="campaign-decks" multiple></select>
-                  <div class="campaign-help">Deck options come from the versioned deck registry.</div>
-                </div>
-                <div class="campaign-field wide">
-                  <label for="campaign-custom-decks">Additional deck IDs</label>
-                  <input id="campaign-custom-decks" placeholder="king-kong@1.0.0, medusa@1.0.0">
+                  <label>Seats</label>
+                  <div id="campaign-seats" class="campaign-seats"></div>
+                  <div class="campaign-help">Choose an exact pilot and registered hero deck ID for every seat. Registered decks use IDs such as <span class="mono">king-taranis-spice</span>, never display names or versions.</div>
                 </div>
                 <div class="campaign-field wide">
                   <label for="campaign-extra-spec">Extra spec JSON</label>
-                  <textarea id="campaign-extra-spec" placeholder='{"swapStartingPlayer":true}'></textarea>
-                  <div class="campaign-help">Extra fields are merged into <span class="mono">spec</span> and override builder fields with the same name.</div>
+                  <textarea id="campaign-extra-spec" placeholder='{"customRunnerOption":true}'></textarea>
+                  <div class="campaign-help">Extra fields are merged into <span class="mono">spec</span>. Common controls such as teams and swapStartingPlayer are first-class above.</div>
                 </div>
                 <div class="campaign-field wide">
                   <label for="campaign-preview">Generated JSON</label>
@@ -276,7 +276,8 @@
   <script>
     let adminDecks = [];
     let campaignMode = 'builder';
-    const campaignKnownSpecKeys = new Set(['format', 'maps', 'map', 'decks', 'difficulty', 'pilot']);
+    const campaignKnownSpecKeys = new Set(['format', 'maps', 'map', 'teams', 'swapStartingPlayer']);
+    const campaignPilotValues = ['bot:easy', 'bot:medium', 'bot:hard', 'bot:expert', 'human'];
 
     // ----- API helper -----
     async function api(method, path, body) {
@@ -477,18 +478,16 @@
     }
 
     function populateCampaignDeckOptions() {
-      const select = document.getElementById('campaign-decks');
-      if (!select) return;
-      const selected = selectedValues(select);
-      const options = [];
-      for (const deck of adminDecks) {
-        for (const version of deck.versions || []) {
-          const value = `${deck.deckId}@${version}`;
-          options.push(optionElement(value, `${deck.name || deck.deckId} (${version})`));
-        }
+      let datalist = document.getElementById('campaign-deck-options');
+      if (!datalist) {
+        datalist = document.createElement('datalist');
+        datalist.id = 'campaign-deck-options';
+        document.body.append(datalist);
       }
-      select.replaceChildren(...options);
-      setMultiSelect(select, selected);
+      const decks = [...new Map(adminDecks.map(deck => [deck.deckId, deck])).values()]
+        .sort((a, b) => a.deckId.localeCompare(b.deckId));
+      datalist.replaceChildren(...decks.map(deck => optionElement(deck.deckId, deck.name || deck.deckId)));
+      renderCampaignSeats();
       updateCampaignPreview();
     }
 
@@ -516,10 +515,123 @@
       return [...new Set(values)];
     }
 
+    function unixNanoString() {
+      const random = new Uint32Array(1);
+      crypto.getRandomValues(random);
+      return (BigInt(Date.now()) * 1_000_000n + BigInt(random[0] % 1_000_000)).toString();
+    }
+
+    function campaignSeatLayout(format) {
+      if (format === 'team-2v2' || format === '2v2') return [
+        { teamIndex: 0, label: 'Team 1 · Seat 1' },
+        { teamIndex: 0, label: 'Team 1 · Seat 2' },
+        { teamIndex: 1, label: 'Team 2 · Seat 1' },
+        { teamIndex: 1, label: 'Team 2 · Seat 2' },
+      ];
+      if (format === 'two-v-one-boss' || format === '2v1') return [
+        { teamIndex: 0, role: 'boss', label: 'Boss' },
+        { teamIndex: 1, role: 'challengers', label: 'Challenger · Seat 1' },
+        { teamIndex: 1, role: 'challengers', label: 'Challenger · Seat 2' },
+      ];
+      if (format === 'ffa-3' || format === '3ffa') return [
+        { teamIndex: 0, label: 'Player 1' },
+        { teamIndex: 1, label: 'Player 2' },
+        { teamIndex: 2, label: 'Player 3' },
+      ];
+      return [
+        { teamIndex: 0, label: 'Player 1' },
+        { teamIndex: 1, label: 'Player 2' },
+      ];
+    }
+
+    function currentCampaignSeatValues() {
+      return Array.from(document.querySelectorAll('.campaign-seat')).map(card => ({
+        deck: card.querySelector('[data-seat-deck]').value.trim(),
+        pilot: card.querySelector('[data-seat-pilot]').value.trim(),
+      }));
+    }
+
+    function flattenTeams(teams) {
+      if (!Array.isArray(teams)) return [];
+      return teams.flatMap(team => Array.isArray(team?.seats) ? team.seats : []);
+    }
+
+    function renderCampaignSeats(importedTeams) {
+      const container = document.getElementById('campaign-seats');
+      if (!container) return;
+      const previous = importedTeams ? flattenTeams(importedTeams) : currentCampaignSeatValues();
+      const defaultLayout = campaignSeatLayout(document.getElementById('campaign-format').value);
+      const importedLayout = Array.isArray(importedTeams)
+        ? importedTeams.flatMap((team, teamIndex) => (team?.seats || []).map((_, seatIndex) => ({
+            teamIndex,
+            role: team.role,
+            label: `Team ${teamIndex + 1} · Seat ${seatIndex + 1}`,
+          })))
+        : [];
+      const layout = importedLayout.length && importedLayout.length !== defaultLayout.length ? importedLayout : defaultLayout;
+      container.replaceChildren(...layout.map((seat, index) => {
+        const values = previous[index] || {};
+        const card = document.createElement('div');
+        card.className = 'campaign-seat';
+        card.dataset.teamIndex = String(seat.teamIndex);
+        if (seat.role) card.dataset.teamRole = seat.role;
+
+        const title = document.createElement('div');
+        title.className = 'campaign-seat-title';
+        title.textContent = seat.label;
+        const fields = document.createElement('div');
+        fields.className = 'campaign-seat-fields';
+        const deckLabel = document.createElement('label');
+        deckLabel.append('Hero deck ID');
+        const deckInput = document.createElement('input');
+        deckInput.dataset.seatDeck = '';
+        deckInput.setAttribute('list', 'campaign-deck-options');
+        deckInput.value = values.deck || '';
+        deckInput.placeholder = 'king-taranis-spice';
+        deckLabel.append(deckInput);
+        const pilotLabel = document.createElement('label');
+        pilotLabel.append('Pilot');
+        const pilotInput = document.createElement('input');
+        pilotInput.dataset.seatPilot = '';
+        pilotInput.setAttribute('list', 'campaign-pilot-options');
+        pilotInput.value = values.pilot || (index === 1 ? 'bot:medium' : 'bot:hard');
+        pilotInput.placeholder = 'bot:hard';
+        pilotLabel.append(pilotInput);
+        fields.append(deckLabel, pilotLabel);
+        card.append(title, fields);
+        return card;
+      }));
+      let pilotList = document.getElementById('campaign-pilot-options');
+      if (!pilotList) {
+        pilotList = document.createElement('datalist');
+        pilotList.id = 'campaign-pilot-options';
+        document.body.append(pilotList);
+      }
+      pilotList.replaceChildren(...campaignPilotValues.map(value => optionElement(value, value)));
+      container.querySelectorAll('input').forEach(input => input.addEventListener('input', updateCampaignPreview));
+    }
+
+    function campaignTeamsFromBuilder() {
+      const teams = [];
+      for (const card of document.querySelectorAll('.campaign-seat')) {
+        const teamIndex = Number(card.dataset.teamIndex);
+        const deck = card.querySelector('[data-seat-deck]').value.trim();
+        const pilot = card.querySelector('[data-seat-pilot]').value.trim();
+        if (!teams[teamIndex]) teams[teamIndex] = { seats: [] };
+        if (card.dataset.teamRole) teams[teamIndex].role = card.dataset.teamRole;
+        teams[teamIndex].seats.push({ deck, pilot });
+      }
+      return teams;
+    }
+
     function showCampaignForm() {
       const form = document.getElementById('campaign-form');
       form.style.display = form.style.display === 'none' ? '' : 'none';
       if (form.style.display !== 'none') {
+        if (!document.getElementById('campaign-seed').value.trim()) {
+          document.getElementById('campaign-seed').value = unixNanoString();
+        }
+        renderCampaignSeats();
         setCampaignMode('builder');
         updateCampaignPreview();
       }
@@ -553,21 +665,27 @@
         ...selectedValues(document.getElementById('campaign-maps')),
         ...commaValues(document.getElementById('campaign-custom-maps').value),
       ]);
-      const decks = uniqueValues([
-        ...selectedValues(document.getElementById('campaign-decks')),
-        ...commaValues(document.getElementById('campaign-custom-decks').value),
-      ]);
+      const teams = campaignTeamsFromBuilder();
+      for (const [teamIndex, team] of teams.entries()) {
+        for (const [seatIndex, seat] of team.seats.entries()) {
+          if (!seat.deck) throw new Error(`Team ${teamIndex + 1}, seat ${seatIndex + 1} needs a hero deck ID`);
+          if (!seat.pilot) throw new Error(`Team ${teamIndex + 1}, seat ${seatIndex + 1} needs a pilot`);
+        }
+      }
       const spec = {
+        ...extra,
         format: document.getElementById('campaign-format').value,
         ...(maps.length ? { maps } : {}),
-        ...(decks.length ? { decks } : {}),
-        ...(document.getElementById('campaign-difficulty').value.trim() ? { difficulty: document.getElementById('campaign-difficulty').value.trim() } : {}),
-        ...(document.getElementById('campaign-pilot').value.trim() ? { pilot: document.getElementById('campaign-pilot').value.trim() } : {}),
-        ...extra,
+        swapStartingPlayer: document.getElementById('campaign-swap-starting-player').checked,
+        teams,
       };
+      const seedInput = document.getElementById('campaign-seed');
+      const baseSeed = seedInput.value.trim() || unixNanoString();
+      if (!/^-?\d+$/.test(baseSeed)) throw new Error('Base seed must be an integer');
+      seedInput.value = baseSeed;
       const payload = {
         name: document.getElementById('campaign-name').value.trim(),
-        baseSeed: Number.parseInt(document.getElementById('campaign-seed').value, 10) || 0,
+        baseSeed,
         gameCount: Number.parseInt(document.getElementById('campaign-game-count').value, 10),
         spec,
       };
@@ -612,24 +730,19 @@
       document.getElementById('campaign-name').value = payload.name || '';
       document.getElementById('campaign-description').value = payload.description || '';
       document.getElementById('campaign-game-count').value = payload.gameCount || '';
-      document.getElementById('campaign-seed').value = payload.baseSeed ?? 0;
+      document.getElementById('campaign-seed').value = payload.baseSeed ?? unixNanoString();
       document.getElementById('campaign-content-version').value = payload.contentVersion || '';
       if (spec.format && !Array.from(document.getElementById('campaign-format').options).some(option => option.value === spec.format)) {
         document.getElementById('campaign-format').append(optionElement(spec.format, spec.format));
       }
       document.getElementById('campaign-format').value = spec.format || 'duel';
-      document.getElementById('campaign-difficulty').value = spec.difficulty || '';
-      document.getElementById('campaign-pilot').value = spec.pilot || '';
+      document.getElementById('campaign-swap-starting-player').checked = spec.swapStartingPlayer !== false;
 
       const maps = Array.isArray(spec.maps) ? spec.maps : (spec.map ? [spec.map] : []);
       const knownMaps = new Set(Array.from(document.getElementById('campaign-maps').options).map(option => option.value));
       setMultiSelect(document.getElementById('campaign-maps'), maps.filter(value => knownMaps.has(value)));
       document.getElementById('campaign-custom-maps').value = maps.filter(value => !knownMaps.has(value)).join(', ');
-
-      const decks = Array.isArray(spec.decks) ? spec.decks : [];
-      const knownDecks = new Set(Array.from(document.getElementById('campaign-decks').options).map(option => option.value));
-      setMultiSelect(document.getElementById('campaign-decks'), decks.filter(value => knownDecks.has(value)));
-      document.getElementById('campaign-custom-decks').value = decks.filter(value => !knownDecks.has(value)).join(', ');
+      renderCampaignSeats(spec.teams);
 
       const extra = Object.fromEntries(Object.entries(spec).filter(([key]) => !campaignKnownSpecKeys.has(key)));
       document.getElementById('campaign-extra-spec').value = Object.keys(extra).length ? JSON.stringify(extra, null, 2) : '';
@@ -673,6 +786,7 @@
         return;
       }
       setCampaignStatus('Campaign created', true);
+      document.getElementById('campaign-seed').value = unixNanoString();
       hideCampaignForm();
       loadCampaigns();
     }
@@ -708,7 +822,13 @@
         element.addEventListener('input', updateCampaignPreview);
         element.addEventListener('change', updateCampaignPreview);
       });
+    document.getElementById('campaign-format').addEventListener('change', () => {
+      renderCampaignSeats();
+      updateCampaignPreview();
+    });
     document.getElementById('campaign-json').addEventListener('input', () => setCampaignStatus(''));
+    document.getElementById('campaign-seed').value = unixNanoString();
+    renderCampaignSeats();
     updateCampaignPreview();
     void checkSession();
   </script>

@@ -2,7 +2,7 @@
  * Control-plane database operations: admin sessions, telemetry sources,
  * source credentials, simulation campaigns, and simulation jobs.
  */
-import { randomUUID, randomBytes } from 'node:crypto';
+import { randomUUID, randomBytes, randomInt } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { hashSecret, verifySecret, generateCredential, type Scope } from '../http/bearer-auth.js';
 
@@ -72,7 +72,7 @@ export interface SimCampaign {
   name: string;
   description: string | null;
   spec: unknown;
-  baseSeed: number;
+  baseSeed: string;
   contentVersion: string | null;
   totalGames: number;
   completedGames: number;
@@ -88,7 +88,7 @@ export interface CreateCampaignArgs {
   name: string;
   description?: string | undefined;
   spec: unknown;
-  baseSeed?: number | undefined;
+  baseSeed?: string | number | undefined;
   contentVersion?: string | undefined;
   games: CampaignGameSpec[];
   createdBy: string;
@@ -106,7 +106,7 @@ export interface SimJob {
   id: string;
   campaignId: string;
   gameIndex: number;
-  seed: number;
+  seed: string;
   spec: unknown;
   status: string;
   leaseToken: string | null;
@@ -120,6 +120,29 @@ export interface SimJob {
 
 export interface ClaimResult {
   jobs: SimJob[];
+}
+
+const PG_BIGINT_MIN = -(1n << 63n);
+const PG_BIGINT_MAX = (1n << 63n) - 1n;
+
+/** Current Unix time in nanoseconds with a randomized sub-millisecond component. */
+export function unixNanoSeed(nowMs = Date.now(), subMillisecondNanos = randomInt(0, 1_000_000)): string {
+  return (BigInt(nowMs) * 1_000_000n + BigInt(subMillisecondNanos)).toString();
+}
+
+function campaignBaseSeed(value: string | number | undefined, gameCount: number): string {
+  const raw = value ?? unixNanoSeed();
+  if (typeof raw === 'number' && !Number.isSafeInteger(raw)) {
+    throw new Error('baseSeed numbers must be safe integers; send large seeds as decimal strings');
+  }
+  const text = String(raw).trim();
+  if (!/^-?\d+$/.test(text)) throw new Error('baseSeed must be an integer or decimal integer string');
+  const seed = BigInt(text);
+  const finalSeed = seed + BigInt(Math.max(0, gameCount - 1));
+  if (seed < PG_BIGINT_MIN || finalSeed > PG_BIGINT_MAX) {
+    throw new Error('baseSeed and generated job seeds must fit in a signed 64-bit integer');
+  }
+  return seed.toString();
 }
 
 // ============================================================================
@@ -285,7 +308,7 @@ export class ControlPlaneRepository {
 
   async createCampaign(args: CreateCampaignArgs): Promise<SimCampaign> {
     const id = randomUUID();
-    const baseSeed = args.baseSeed ?? 0;
+    const baseSeed = campaignBaseSeed(args.baseSeed, args.games.length);
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -298,12 +321,12 @@ export class ControlPlaneRepository {
 
       const jobIds: string[] = [];
       const gameIndexes: number[] = [];
-      const seeds: number[] = [];
+      const seeds: string[] = [];
       const specs: string[] = [];
       for (let i = 0; i < args.games.length; i++) {
         jobIds.push(randomUUID());
         gameIndexes.push(i);
-        seeds.push(baseSeed + i);
+        seeds.push((BigInt(baseSeed) + BigInt(i)).toString());
         specs.push(JSON.stringify(args.games[i]!.spec ?? args.spec));
       }
       await client.query(
@@ -342,7 +365,7 @@ export class ControlPlaneRepository {
     );
     return result.rows.map(r => ({
       id: r.id, name: r.name, description: r.description, spec: r.spec,
-      baseSeed: Number(r.base_seed), contentVersion: r.content_version,
+      baseSeed: r.base_seed, contentVersion: r.content_version,
       totalGames: r.total_games, completedGames: r.completed_games, failedGames: r.failed_games,
       status: r.status, createdAt: r.created_at.toISOString(), createdBy: r.created_by,
       cancelledAt: r.cancelled_at?.toISOString() ?? null,
@@ -380,7 +403,7 @@ export class ControlPlaneRepository {
 
     return {
       id: row.id, name: row.name, description: row.description, spec: row.spec,
-      baseSeed: Number(row.base_seed), contentVersion: row.content_version,
+      baseSeed: row.base_seed, contentVersion: row.content_version,
       totalGames: row.total_games, completedGames: row.completed_games, failedGames: row.failed_games,
       status: row.status, createdAt: row.created_at.toISOString(), createdBy: row.created_by,
       cancelledAt: row.cancelled_at?.toISOString() ?? null,
@@ -388,7 +411,7 @@ export class ControlPlaneRepository {
       remainingJobs: Number(remainingResult.rows[0]?.count ?? 0),
       jobs: jobsResult.rows.map(j => ({
         id: j.id, campaignId: j.campaign_id, gameIndex: j.game_index,
-        seed: Number(j.seed), spec: j.spec, status: j.status,
+        seed: j.seed, spec: j.spec, status: j.status,
         leaseToken: j.lease_token, leasedBy: j.leased_by,
         leasedAt: j.leased_at?.toISOString() ?? null,
         leaseExpiresAt: j.lease_expires_at?.toISOString() ?? null,
@@ -519,7 +542,7 @@ export class ControlPlaneRepository {
         id: j.id,
         campaignId: j.campaign_id,
         gameIndex: j.game_index,
-        seed: Number(j.seed),
+        seed: j.seed,
         spec: j.spec,
         status: 'leased',
         leaseToken,
@@ -567,7 +590,7 @@ export class ControlPlaneRepository {
   async completeJob(
     jobId: string,
     leaseToken: string,
-  ): Promise<{ campaignId: string; gameIndex: number; seed: number } | null> {
+  ): Promise<{ campaignId: string; gameIndex: number; seed: string } | null> {
     const completed = await this.completeJobWith(jobId, leaseToken, async () => undefined);
     return completed?.provenance ?? null;
   }
@@ -581,10 +604,10 @@ export class ControlPlaneRepository {
     leaseToken: string,
     operation: (
       client: PoolClient,
-      provenance: { campaignId: string; gameIndex: number; seed: number },
+      provenance: { campaignId: string; gameIndex: number; seed: string },
     ) => Promise<T>,
     leasedBy?: string,
-  ): Promise<{ provenance: { campaignId: string; gameIndex: number; seed: number }; result: T } | null> {
+  ): Promise<{ provenance: { campaignId: string; gameIndex: number; seed: string }; result: T } | null> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -605,7 +628,7 @@ export class ControlPlaneRepository {
       const provenance = {
         campaignId: job.campaign_id,
         gameIndex: job.game_index,
-        seed: Number(job.seed),
+        seed: job.seed,
       };
       const result = await operation(client, provenance);
 
