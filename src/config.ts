@@ -36,6 +36,13 @@ export interface Config {
   allowUnauthenticatedIngest: boolean;
   bodyLimitBytes: number;
   runMigrationsOnStart: boolean;
+  discordClientId: string;
+  discordClientSecret: string;
+  discordRedirectUri: string;
+  adminDiscordIds: string[];
+  sessionSecret: string;
+  publicUrl: string;
+  secureCookies: boolean;
 }
 
 function intFromEnv(value: string | undefined, fallback: number): number {
@@ -61,6 +68,10 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
   if (!telemetrySecret && !allowUnauthenticatedIngest) {
     throw new Error('TELEMETRY_SECRET is required unless ALLOW_UNAUTHENTICATED_INGEST=1');
   }
+  const publicUrl = env.PUBLIC_URL?.replace(/\/$/, '') ?? '';
+  const discordRedirectUri = env.DISCORD_REDIRECT_URI || (publicUrl ? `${publicUrl}/auth/discord/callback` : '');
+  const adminIds = (env.ADMIN_DISCORD_IDS ?? '').split(',').map(s => s.trim()).filter(Boolean);
+
   return {
     port: intFromEnv(env.PORT, 8788),
     databaseUrl,
@@ -68,5 +79,12 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     allowUnauthenticatedIngest,
     bodyLimitBytes: intFromEnv(env.MAX_BODY_BYTES, 1024 * 1024),
     runMigrationsOnStart: boolFromEnv(env.RUN_MIGRATIONS_ON_START, false),
+    discordClientId: env.DISCORD_CLIENT_ID ?? '',
+    discordClientSecret: env.DISCORD_CLIENT_SECRET ?? '',
+    discordRedirectUri,
+    adminDiscordIds: adminIds,
+    sessionSecret: env.SESSION_SECRET ?? telemetrySecret,
+    publicUrl,
+    secureCookies: boolFromEnv(env.SECURE_COOKIES, env.NODE_ENV === 'production'),
   };
 }

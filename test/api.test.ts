@@ -3,6 +3,7 @@ import { Pool } from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { migrate } from '../src/db/migrate.js';
 import { PgTelemetryRepository } from '../src/db/repository.js';
+import { ControlPlaneRepository } from '../src/db/control-plane-repository.js';
 import { createApp } from '../src/http/app.js';
 import { signBody } from '../src/http/auth.js';
 import { sampleBotExecution, sampleGame } from './fixtures.js';
@@ -21,13 +22,21 @@ describeDb('telemetry api with postgres', () => {
     pool = new Pool({ connectionString: databaseUrl });
     await migrate(pool);
     const repo = new PgTelemetryRepository(pool);
+    const cpRepo = new ControlPlaneRepository(pool);
     server = createServer(createApp({
       repo,
+      cpRepo,
       config: {
         telemetrySecret: secret,
         allowUnauthenticatedIngest: false,
         bodyLimitBytes: 1024 * 1024,
         now: () => now,
+        discordClientId: '',
+        discordClientSecret: '',
+        discordRedirectUri: '',
+        adminDiscordIds: [],
+        sessionSecret: secret,
+        secureCookies: false,
       },
     }));
     await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -38,6 +47,7 @@ describeDb('telemetry api with postgres', () => {
 
   beforeEach(async () => {
     await pool.query('TRUNCATE game_submissions, deck_definitions CASCADE');
+    await pool.query('TRUNCATE admin_sessions, telemetry_sources, source_credentials, sim_campaigns, sim_jobs CASCADE');
   });
 
   afterAll(async () => {

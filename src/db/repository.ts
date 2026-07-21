@@ -37,6 +37,10 @@ export interface IngestArgs {
   idempotencyKey: string;
   receivedAt: Date;
   authKeyId: string | null;
+  sourceOverride?: string | null;
+  sourceId?: string | null;
+  campaignId?: string | null;
+  campaignGameIndex?: number | null;
 }
 
 export interface InvalidIngestArgs {
@@ -45,6 +49,8 @@ export interface InvalidIngestArgs {
   receivedAt: Date;
   authKeyId: string | null;
   errors: string[];
+  sourceOverride?: string | null;
+  sourceId?: string | null;
 }
 
 export interface DeckStatsFilters {
@@ -70,6 +76,10 @@ export class PgTelemetryRepository {
 
   async ingestValid(args: IngestArgs): Promise<IngestCreated | IngestDuplicate> {
     const normalized = normalizeSubmission(args.payload, args.idempotencyKey);
+    // Server-side source override: credential-derived source takes precedence over payload
+    if (args.sourceOverride) {
+      normalized.source = args.sourceOverride;
+    }
     const submissionId = randomUUID();
     const client = await this.pool.connect();
     try {
@@ -83,13 +93,15 @@ export class PgTelemetryRepository {
         validationStatus: 'valid',
         validationErrors: null,
         receivedAt: args.receivedAt,
+        sourceId: args.sourceId,
+        campaignId: args.campaignId,
       });
       if (duplicate) {
         await client.query('ROLLBACK');
         return { kind: 'duplicate', submissionId: duplicate.id, gameId: duplicate.game_id };
       }
 
-      await insertGame(client, submissionId, args.receivedAt, normalized, args.payload);
+      await insertGame(client, submissionId, args.receivedAt, normalized, args.payload, args.campaignId, args.campaignGameIndex);
       await insertTeams(client, normalized.teams);
       await insertSeats(client, normalized.seats);
       await insertCards(client, normalized.cards);
@@ -106,7 +118,7 @@ export class PgTelemetryRepository {
 
   async ingestInvalid(args: InvalidIngestArgs): Promise<IngestInvalid | IngestDuplicate> {
     const submissionId = randomUUID();
-    const source = sourceFromPayload(args.payload);
+    const source = args.sourceOverride ?? sourceFromPayload(args.payload);
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -119,6 +131,7 @@ export class PgTelemetryRepository {
         validationStatus: 'invalid',
         validationErrors: args.errors,
         receivedAt: args.receivedAt,
+        sourceId: args.sourceId,
       });
       await client.query('COMMIT');
       if (duplicate) return { kind: 'duplicate', submissionId: duplicate.id, gameId: duplicate.game_id };
@@ -2175,15 +2188,18 @@ interface InsertSubmissionArgs {
   validationStatus: 'valid' | 'invalid';
   validationErrors: unknown;
   receivedAt: Date;
+  sourceId?: string | null | undefined;
+  campaignId?: string | null | undefined;
 }
 
 async function insertSubmission(client: PoolClient, args: InsertSubmissionArgs): Promise<DuplicateRow | null> {
   const inserted = await client.query(
     `
       INSERT INTO game_submissions (
-        id, idempotency_key, source, auth_key_id, payload, validation_status, validation_errors, received_at
+        id, idempotency_key, source, auth_key_id, payload, validation_status, validation_errors, received_at,
+        source_id, campaign_id
       )
-      VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, $8)
+      VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, $8, $9, $10)
       ON CONFLICT (idempotency_key) DO NOTHING
     `,
     [
@@ -2195,6 +2211,8 @@ async function insertSubmission(client: PoolClient, args: InsertSubmissionArgs):
       args.validationStatus,
       args.validationErrors === null ? null : JSON.stringify(args.validationErrors),
       args.receivedAt,
+      args.sourceId ?? null,
+      args.campaignId ?? null,
     ],
   );
   if (inserted.rowCount && inserted.rowCount > 0) return null;
@@ -2216,6 +2234,8 @@ async function insertGame(
   receivedAt: Date,
   game: NormalizedGame,
   payload: GameSubmission,
+  campaignId?: string | null,
+  campaignGameIndex?: number | null,
 ): Promise<void> {
   await client.query(
     `
@@ -2223,12 +2243,14 @@ async function insertGame(
         id, submission_id, schema_version, submitted_at, ended_at, received_at, source, format,
         format_label, boss, map, map_version, winner_team, draw, end_condition, turns,
         duration_seconds, first_player_team, engine_schema_version, engine_dsl_version,
-        protocol_version, content_version, replay_hash, state_hash, payload
+        protocol_version, content_version, replay_hash, state_hash, payload,
+        campaign_id, campaign_game_index
       )
       VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8,
         $9, $10, $11, $12, $13, $14, $15, $16,
-        $17, $18, $19, $20, $21, $22, $23, $24, $25::jsonb
+        $17, $18, $19, $20, $21, $22, $23, $24, $25::jsonb,
+        $26, $27
       )
     `,
     [
@@ -2257,6 +2279,8 @@ async function insertGame(
       game.replayHash,
       game.stateHash,
       JSON.stringify(payload),
+      campaignId ?? null,
+      campaignGameIndex ?? null,
     ],
   );
 }

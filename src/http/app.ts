@@ -1,10 +1,12 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHmac } from 'node:crypto';
 import { validateGameSubmission } from '../ingest/schema.js';
 import { validateDeckDefinitions } from '../ingest/deck-schema.js';
 import type { PgTelemetryRepository } from '../db/repository.js';
+import type { ControlPlaneRepository } from '../db/control-plane-repository.js';
 import type { DeckDefinitionSubmission, GameSubmission, RecentHourlyResponse } from '../types.js';
 import { verifyIngestAuth } from './auth.js';
+import { parseBearer, verifySecret, hasScope, type Scope } from './bearer-auth.js';
 import { serveDashboardAsset } from './static.js';
 
 const RECENT_HOURLY_CACHE_MS = 5 * 60 * 1000;
@@ -22,16 +24,31 @@ export interface AppConfig {
   allowUnauthenticatedIngest: boolean;
   bodyLimitBytes: number;
   now: () => Date;
+  discordClientId: string;
+  discordClientSecret: string;
+  discordRedirectUri: string;
+  adminDiscordIds: string[];
+  sessionSecret: string;
+  secureCookies: boolean;
 }
 
 export interface AppDeps {
   repo: PgTelemetryRepository;
+  cpRepo: ControlPlaneRepository;
   config: AppConfig;
 }
 
-export function createApp({ repo, config }: AppDeps): (req: IncomingMessage, res: ServerResponse) => void {
+/** Authenticated bearer credential context resolved from the request. */
+interface BearerContext {
+  credentialId: string;
+  sourceId: string;
+  sourceName: string;
+  scopes: string[];
+}
+
+export function createApp({ repo, cpRepo, config }: AppDeps): (req: IncomingMessage, res: ServerResponse) => void {
   return (req, res) => {
-    void handleRequest(req, res, repo, config).catch((error) => {
+    void handleRequest(req, res, repo, cpRepo, config).catch((error) => {
       console.error('[telemetry] unhandled request error', error);
       sendJson(res, 500, { ok: false, code: 'SERVER_ERROR', message: 'Internal server error' });
     });
@@ -42,6 +59,7 @@ async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
   repo: PgTelemetryRepository,
+  cpRepo: ControlPlaneRepository,
   config: AppConfig,
 ): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://localhost');
@@ -116,12 +134,84 @@ async function handleRequest(
   }
 
   if (req.method === 'GET' && url.pathname === '/v1/admin/decks') {
-    await handleAdminListDecks(req, res, repo, config);
+    await handleAdminListDecks(req, res, repo, cpRepo, config);
     return;
   }
 
   if (req.method === 'DELETE' && url.pathname === '/v1/admin/deck') {
-    await handleAdminDeleteDeck(req, url, res, repo, config);
+    await handleAdminDeleteDeck(req, url, res, repo, cpRepo, config);
+    return;
+  }
+
+  // ---- Discord OAuth ----
+  if (req.method === 'GET' && url.pathname === '/auth/discord') {
+    handleDiscordLogin(res, config);
+    return;
+  }
+  if (req.method === 'GET' && url.pathname === '/auth/discord/callback') {
+    await handleDiscordCallback(req, url, res, cpRepo, config);
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/auth/logout') {
+    await handleLogout(req, res, cpRepo);
+    return;
+  }
+  if (req.method === 'GET' && url.pathname === '/v1/admin/me') {
+    await handleAdminMe(req, res, cpRepo, config);
+    return;
+  }
+
+  // ---- Source & credential management ----
+  if (req.method === 'GET' && url.pathname === '/v1/admin/sources') {
+    await handleAdminListSources(req, res, cpRepo, config);
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/v1/admin/sources') {
+    await handleAdminCreateSource(req, res, cpRepo, config);
+    return;
+  }
+  if (req.method === 'DELETE' && url.pathname === '/v1/admin/sources') {
+    await handleAdminDeleteSource(req, url, res, cpRepo, config);
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/v1/admin/credentials') {
+    await handleAdminCreateCredential(req, res, cpRepo, config);
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/v1/admin/credentials/revoke') {
+    await handleAdminRevokeCredential(req, res, cpRepo, config);
+    return;
+  }
+
+  // ---- Simulation campaigns ----
+  if (req.method === 'GET' && url.pathname === '/v1/admin/campaigns') {
+    await handleAdminListCampaigns(req, res, cpRepo, config);
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/v1/admin/campaigns') {
+    await handleAdminCreateCampaign(req, res, cpRepo, config);
+    return;
+  }
+  if (req.method === 'GET' && url.pathname === '/v1/admin/campaign') {
+    await handleAdminGetCampaign(req, url, res, cpRepo, config);
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/v1/admin/campaign/cancel') {
+    await handleAdminCancelCampaign(req, res, cpRepo, config);
+    return;
+  }
+
+  // ---- Runner sim endpoints (bearer auth) ----
+  if (req.method === 'POST' && url.pathname === '/v1/sim/claim') {
+    await handleSimClaim(req, res, cpRepo, config);
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/v1/sim/complete') {
+    await handleSimComplete(req, res, repo, cpRepo, config);
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/v1/sim/fail') {
+    await handleSimFail(req, res, cpRepo, config);
     return;
   }
 
@@ -142,6 +232,7 @@ async function handleGameIngest(
   res: ServerResponse,
   repo: PgTelemetryRepository,
   config: AppConfig,
+  cpRepo?: ControlPlaneRepository,
 ): Promise<void> {
   const contentType = req.headers['content-type'];
   if (contentType && !String(contentType).toLowerCase().includes('application/json')) {
@@ -155,15 +246,33 @@ async function handleGameIngest(
     return;
   }
 
-  const auth = verifyIngestAuth(req.headers, body.body, {
-    secret: config.telemetrySecret,
-    allowUnauthenticated: config.allowUnauthenticatedIngest,
-    toleranceMs: 5 * 60 * 1000,
-    nowMs: () => config.now().getTime(),
-  });
-  if (!auth.ok) {
-    sendJson(res, auth.status, { ok: false, code: auth.code, message: auth.message });
+  // Try bearer auth first, then fall back to HMAC
+  let authKeyId: string | null = null;
+  let sourceOverride: string | null = null;
+  let sourceId: string | null = null;
+
+  const bearerCtx = cpRepo ? await verifyBearerAuth(req, cpRepo, 'games:submit') : null;
+  if (bearerCtx) {
+    authKeyId = bearerCtx.credentialId;
+    sourceOverride = bearerCtx.sourceName;
+    sourceId = bearerCtx.sourceId;
+  } else if (bearerCtx === undefined) {
+    // bearer was present but invalid/revoked/missing scope
+    sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Invalid or revoked API key, or missing games:submit scope' });
     return;
+  } else {
+    // No bearer token found — fall back to HMAC
+    const auth = verifyIngestAuth(req.headers, body.body, {
+      secret: config.telemetrySecret,
+      allowUnauthenticated: config.allowUnauthenticatedIngest,
+      toleranceMs: 5 * 60 * 1000,
+      nowMs: () => config.now().getTime(),
+    });
+    if (!auth.ok) {
+      sendJson(res, auth.status, { ok: false, code: auth.code, message: auth.message });
+      return;
+    }
+    authKeyId = auth.authKeyId;
   }
 
   let parsed: unknown;
@@ -181,8 +290,10 @@ async function handleGameIngest(
       payload: parsed,
       idempotencyKey,
       receivedAt: config.now(),
-      authKeyId: auth.authKeyId,
+      authKeyId,
       errors: validation.errors,
+      sourceOverride,
+      sourceId,
     });
     if (result.kind === 'duplicate') {
       sendJson(res, 200, { ok: true, duplicate: true, submissionId: result.submissionId, gameId: result.gameId });
@@ -196,7 +307,9 @@ async function handleGameIngest(
     payload: parsed as GameSubmission,
     idempotencyKey,
     receivedAt: config.now(),
-    authKeyId: auth.authKeyId,
+    authKeyId,
+    sourceOverride,
+    sourceId,
   });
   if (result.kind === 'duplicate') {
     sendJson(res, 200, { ok: true, duplicate: true, submissionId: result.submissionId, gameId: result.gameId });
@@ -453,7 +566,8 @@ async function readBody(req: IncomingMessage, maxBytes: number): Promise<BodyRes
   return { ok: true, body: Buffer.concat(chunks) };
 }
 
-function verifyAdminAuth(req: IncomingMessage, config: AppConfig): boolean {
+/** Legacy admin auth: Bearer token matches TELEMETRY_SECRET. */
+function verifyLegacyAdminAuth(req: IncomingMessage, config: AppConfig): boolean {
   if (!config.telemetrySecret) return false;
   const authHeader = header(req, 'authorization');
   if (!authHeader) return false;
@@ -462,14 +576,69 @@ function verifyAdminAuth(req: IncomingMessage, config: AppConfig): boolean {
   return match[1] === config.telemetrySecret;
 }
 
+/** Session-based admin auth from Discord OAuth. Returns discord username or null. */
+async function verifySessionAuth(
+  req: IncomingMessage,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<{ discordId: string; discordUsername: string } | null> {
+  const sessionId = parseCookie(req, 'session');
+  if (!sessionId) return null;
+  const session = await cpRepo.getSession(sessionId);
+  if (!session) return null;
+  if (!config.adminDiscordIds.includes(session.discordId)) return null;
+  return { discordId: session.discordId, discordUsername: session.discordUsername };
+}
+
+/** Combined admin auth: session OR legacy Bearer secret. */
+async function verifyAdminAuth(
+  req: IncomingMessage,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<string | null> {
+  const session = await verifySessionAuth(req, cpRepo, config);
+  if (session) return session.discordUsername;
+  if (verifyLegacyAdminAuth(req, config)) return 'legacy-admin';
+  return null;
+}
+
+/**
+ * Verify a bearer API key. Returns BearerContext if valid with required scope,
+ * undefined if bearer was present but invalid/revoked/wrong scope,
+ * null if no bearer token was present at all.
+ */
+async function verifyBearerAuth(
+  req: IncomingMessage,
+  cpRepo: ControlPlaneRepository,
+  requiredScope: Scope,
+): Promise<BearerContext | null | undefined> {
+  const parsed = parseBearer(req.headers);
+  if (!parsed) return null;
+  const cred = await cpRepo.lookupCredential(parsed.keyId);
+  if (!cred) return undefined;
+  if (cred.revoked_at) return undefined;
+  if (!verifySecret(parsed.secret, cred.salt, cred.hash)) return undefined;
+  if (!hasScope(cred.scopes, requiredScope)) return undefined;
+  // Touch last_used_at in background (fire-and-forget)
+  void cpRepo.touchCredentialLastUsed(cred.id).catch(() => {});
+  return {
+    credentialId: cred.id,
+    sourceId: cred.source_id,
+    sourceName: cred.source_name,
+    scopes: cred.scopes,
+  };
+}
+
 async function handleAdminListDecks(
   req: IncomingMessage,
   res: ServerResponse,
   repo: PgTelemetryRepository,
+  cpRepo: ControlPlaneRepository,
   config: AppConfig,
 ): Promise<void> {
-  if (!verifyAdminAuth(req, config)) {
-    sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Invalid admin secret' });
+  const admin = await verifyAdminAuth(req, cpRepo, config);
+  if (!admin) {
+    sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Admin authentication required' });
     return;
   }
   const data = await repo.adminListDecks();
@@ -481,10 +650,12 @@ async function handleAdminDeleteDeck(
   url: URL,
   res: ServerResponse,
   repo: PgTelemetryRepository,
+  cpRepo: ControlPlaneRepository,
   config: AppConfig,
 ): Promise<void> {
-  if (!verifyAdminAuth(req, config)) {
-    sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Invalid admin secret' });
+  const admin = await verifyAdminAuth(req, cpRepo, config);
+  if (!admin) {
+    sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Admin authentication required' });
     return;
   }
   const deck = blankToNull(url.searchParams.get('deck'));
@@ -493,8 +664,446 @@ async function handleAdminDeleteDeck(
     return;
   }
   const result = await repo.adminDeleteDeck(deck);
-  console.log(`[admin] deleted deck ${deck}: ${result.deletedDefinitions} definitions, ${result.deletedGames} games`);
+  console.log(`[admin] ${admin} deleted deck ${deck}: ${result.deletedDefinitions} definitions, ${result.deletedGames} games`);
   sendJson(res, 200, { ok: true, ...result });
+}
+
+// ============================================================================
+// Discord OAuth handlers
+// ============================================================================
+
+function handleDiscordLogin(res: ServerResponse, config: AppConfig): void {
+  if (!config.discordClientId || !config.discordRedirectUri) {
+    sendJson(res, 503, { ok: false, code: 'OAUTH_NOT_CONFIGURED', message: 'Discord OAuth is not configured' });
+    return;
+  }
+  const state = randomUUID();
+  const params = new URLSearchParams({
+    client_id: config.discordClientId,
+    redirect_uri: config.discordRedirectUri,
+    response_type: 'code',
+    scope: 'identify',
+    state,
+  });
+  const cookieOpts = cookieOptions(config, 300); // 5 min
+  res.writeHead(302, {
+    location: `https://discord.com/api/oauth2/authorize?${params.toString()}`,
+    'set-cookie': `oauth_state=${state}; ${cookieOpts}; Path=/auth`,
+  });
+  res.end();
+}
+
+async function handleDiscordCallback(
+  req: IncomingMessage,
+  url: URL,
+  res: ServerResponse,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<void> {
+  const code = url.searchParams.get('code');
+  const state = url.searchParams.get('state');
+  const storedState = parseCookie(req, 'oauth_state');
+
+  if (!code || !state || !storedState || state !== storedState) {
+    sendJson(res, 400, { ok: false, code: 'INVALID_STATE', message: 'OAuth state mismatch' });
+    return;
+  }
+
+  // Exchange code for token
+  let tokenData: { access_token?: string };
+  try {
+    const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: config.discordClientId,
+        client_secret: config.discordClientSecret,
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: config.discordRedirectUri,
+      }),
+    });
+    tokenData = await tokenRes.json() as { access_token?: string };
+  } catch {
+    sendJson(res, 502, { ok: false, code: 'DISCORD_ERROR', message: 'Failed to exchange code with Discord' });
+    return;
+  }
+
+  if (!tokenData.access_token) {
+    sendJson(res, 401, { ok: false, code: 'DISCORD_ERROR', message: 'Failed to obtain access token' });
+    return;
+  }
+
+  // Fetch user identity
+  let user: { id?: string; username?: string };
+  try {
+    const userRes = await fetch('https://discord.com/api/users/@me', {
+      headers: { authorization: `Bearer ${tokenData.access_token}` },
+    });
+    user = await userRes.json() as { id?: string; username?: string };
+  } catch {
+    sendJson(res, 502, { ok: false, code: 'DISCORD_ERROR', message: 'Failed to fetch Discord user info' });
+    return;
+  }
+
+  if (!user.id || !user.username) {
+    sendJson(res, 401, { ok: false, code: 'DISCORD_ERROR', message: 'Discord did not return valid user info' });
+    return;
+  }
+
+  // Check allowlist
+  if (!config.adminDiscordIds.includes(user.id)) {
+    sendJson(res, 403, { ok: false, code: 'FORBIDDEN', message: 'Your Discord account is not in the admin allowlist' });
+    return;
+  }
+
+  // Create session
+  const session = await cpRepo.createSession({
+    discordId: user.id,
+    discordUsername: user.username,
+  });
+
+  const cookieOpts = cookieOptions(config, 7 * 24 * 3600);
+  const clearState = `oauth_state=; ${cookieOptions(config, 0)}; Path=/auth`;
+  res.writeHead(302, {
+    location: '/admin',
+    'set-cookie': [
+      `session=${session.id}; ${cookieOpts}; Path=/`,
+      clearState,
+    ],
+  });
+  res.end();
+}
+
+async function handleLogout(
+  req: IncomingMessage,
+  res: ServerResponse,
+  cpRepo: ControlPlaneRepository,
+): Promise<void> {
+  const sessionId = parseCookie(req, 'session');
+  if (sessionId) {
+    await cpRepo.deleteSession(sessionId);
+  }
+  res.writeHead(200, {
+    'content-type': 'application/json',
+    'set-cookie': `session=; Max-Age=0; Path=/`,
+  });
+  res.end(JSON.stringify({ ok: true }));
+}
+
+async function handleAdminMe(
+  req: IncomingMessage,
+  res: ServerResponse,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<void> {
+  const session = await verifySessionAuth(req, cpRepo, config);
+  if (!session) {
+    // Also allow legacy auth
+    if (verifyLegacyAdminAuth(req, config)) {
+      sendJson(res, 200, { ok: true, discordId: null, discordUsername: 'legacy-admin', authMethod: 'legacy' });
+      return;
+    }
+    sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Not authenticated' });
+    return;
+  }
+  sendJson(res, 200, { ok: true, ...session, authMethod: 'discord' });
+}
+
+// ============================================================================
+// Source & credential admin handlers
+// ============================================================================
+
+async function handleAdminListSources(
+  req: IncomingMessage,
+  res: ServerResponse,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<void> {
+  const admin = await verifyAdminAuth(req, cpRepo, config);
+  if (!admin) { sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Admin authentication required' }); return; }
+  const sources = await cpRepo.listSources();
+  sendJson(res, 200, { ok: true, sources });
+}
+
+async function handleAdminCreateSource(
+  req: IncomingMessage,
+  res: ServerResponse,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<void> {
+  const admin = await verifyAdminAuth(req, cpRepo, config);
+  if (!admin) { sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Admin authentication required' }); return; }
+  const body = await readBody(req, config.bodyLimitBytes);
+  if (!body.ok) { sendJson(res, body.status, { ok: false, code: body.code, message: body.message }); return; }
+  let data: { name?: string; description?: string };
+  try { data = JSON.parse(body.body.toString('utf8')) as { name?: string; description?: string }; }
+  catch { sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Invalid JSON' }); return; }
+  if (!data.name || typeof data.name !== 'string') {
+    sendJson(res, 400, { ok: false, code: 'MISSING_NAME', message: 'name is required' }); return;
+  }
+  try {
+    const source = await cpRepo.createSource(data.name, data.description ?? null, admin);
+    sendJson(res, 201, { ok: true, source });
+  } catch (error: unknown) {
+    if (error instanceof Error && error.message.includes('duplicate key')) {
+      sendJson(res, 409, { ok: false, code: 'DUPLICATE_NAME', message: 'Source name already exists' });
+    } else throw error;
+  }
+}
+
+async function handleAdminDeleteSource(
+  req: IncomingMessage,
+  url: URL,
+  res: ServerResponse,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<void> {
+  const admin = await verifyAdminAuth(req, cpRepo, config);
+  if (!admin) { sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Admin authentication required' }); return; }
+  const id = url.searchParams.get('id');
+  if (!id) { sendJson(res, 400, { ok: false, code: 'MISSING_ID', message: 'id query parameter is required' }); return; }
+  const deleted = await cpRepo.deleteSource(id);
+  sendJson(res, deleted ? 200 : 404, { ok: deleted });
+}
+
+async function handleAdminCreateCredential(
+  req: IncomingMessage,
+  res: ServerResponse,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<void> {
+  const admin = await verifyAdminAuth(req, cpRepo, config);
+  if (!admin) { sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Admin authentication required' }); return; }
+  const body = await readBody(req, config.bodyLimitBytes);
+  if (!body.ok) { sendJson(res, body.status, { ok: false, code: body.code, message: body.message }); return; }
+  let data: { sourceId?: string; label?: string; scopes?: string[] };
+  try { data = JSON.parse(body.body.toString('utf8')) as { sourceId?: string; label?: string; scopes?: string[] }; }
+  catch { sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Invalid JSON' }); return; }
+  if (!data.sourceId || !data.label) {
+    sendJson(res, 400, { ok: false, code: 'MISSING_FIELDS', message: 'sourceId and label are required' }); return;
+  }
+  const validScopes = ['games:submit', 'decks:submit', 'sim:claim', 'sim:complete'] as const;
+  const scopes = (data.scopes ?? []).filter(s => (validScopes as readonly string[]).includes(s)) as Scope[];
+  const result = await cpRepo.createCredential(data.sourceId, data.label, scopes, admin);
+  sendJson(res, 201, { ok: true, credential: result });
+}
+
+async function handleAdminRevokeCredential(
+  req: IncomingMessage,
+  res: ServerResponse,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<void> {
+  const admin = await verifyAdminAuth(req, cpRepo, config);
+  if (!admin) { sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Admin authentication required' }); return; }
+  const body = await readBody(req, config.bodyLimitBytes);
+  if (!body.ok) { sendJson(res, body.status, { ok: false, code: body.code, message: body.message }); return; }
+  let data: { credentialId?: string };
+  try { data = JSON.parse(body.body.toString('utf8')) as { credentialId?: string }; }
+  catch { sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Invalid JSON' }); return; }
+  if (!data.credentialId) {
+    sendJson(res, 400, { ok: false, code: 'MISSING_ID', message: 'credentialId is required' }); return;
+  }
+  const revoked = await cpRepo.revokeCredential(data.credentialId);
+  sendJson(res, revoked ? 200 : 404, { ok: revoked });
+}
+
+// ============================================================================
+// Campaign admin handlers
+// ============================================================================
+
+async function handleAdminListCampaigns(
+  req: IncomingMessage,
+  res: ServerResponse,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<void> {
+  const admin = await verifyAdminAuth(req, cpRepo, config);
+  if (!admin) { sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Admin authentication required' }); return; }
+  const campaigns = await cpRepo.listCampaigns();
+  sendJson(res, 200, { ok: true, campaigns });
+}
+
+async function handleAdminCreateCampaign(
+  req: IncomingMessage,
+  res: ServerResponse,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<void> {
+  const admin = await verifyAdminAuth(req, cpRepo, config);
+  if (!admin) { sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Admin authentication required' }); return; }
+  const body = await readBody(req, config.bodyLimitBytes);
+  if (!body.ok) { sendJson(res, body.status, { ok: false, code: body.code, message: body.message }); return; }
+  let data: { name?: string; description?: string; spec?: unknown; baseSeed?: number; contentVersion?: string; games?: unknown[] };
+  try { data = JSON.parse(body.body.toString('utf8')); }
+  catch { sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Invalid JSON' }); return; }
+  if (!data.name || !data.spec || !Array.isArray(data.games) || data.games.length === 0) {
+    sendJson(res, 400, { ok: false, code: 'INVALID_CAMPAIGN', message: 'name, spec, and non-empty games array are required' }); return;
+  }
+  const campaign = await cpRepo.createCampaign({
+    name: data.name,
+    description: data.description,
+    spec: data.spec,
+    baseSeed: data.baseSeed,
+    contentVersion: data.contentVersion,
+    games: data.games.map(g => ({ spec: (g && typeof g === 'object' && 'spec' in g) ? (g as { spec: unknown }).spec : undefined })),
+    createdBy: admin,
+  });
+  sendJson(res, 201, { ok: true, campaign });
+}
+
+async function handleAdminGetCampaign(
+  req: IncomingMessage,
+  url: URL,
+  res: ServerResponse,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<void> {
+  const admin = await verifyAdminAuth(req, cpRepo, config);
+  if (!admin) { sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Admin authentication required' }); return; }
+  const id = url.searchParams.get('id');
+  if (!id) { sendJson(res, 400, { ok: false, code: 'MISSING_ID', message: 'id query parameter required' }); return; }
+  const campaign = await cpRepo.getCampaign(id);
+  if (!campaign) { sendJson(res, 404, { ok: false, code: 'NOT_FOUND', message: 'Campaign not found' }); return; }
+  sendJson(res, 200, { ok: true, campaign });
+}
+
+async function handleAdminCancelCampaign(
+  req: IncomingMessage,
+  res: ServerResponse,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<void> {
+  const admin = await verifyAdminAuth(req, cpRepo, config);
+  if (!admin) { sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Admin authentication required' }); return; }
+  const body = await readBody(req, config.bodyLimitBytes);
+  if (!body.ok) { sendJson(res, body.status, { ok: false, code: body.code, message: body.message }); return; }
+  let data: { campaignId?: string };
+  try { data = JSON.parse(body.body.toString('utf8')) as { campaignId?: string }; }
+  catch { sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Invalid JSON' }); return; }
+  if (!data.campaignId) {
+    sendJson(res, 400, { ok: false, code: 'MISSING_ID', message: 'campaignId is required' }); return;
+  }
+  const cancelled = await cpRepo.cancelCampaign(data.campaignId);
+  sendJson(res, cancelled ? 200 : 404, { ok: cancelled });
+}
+
+// ============================================================================
+// Runner simulation endpoints (bearer auth)
+// ============================================================================
+
+async function handleSimClaim(
+  req: IncomingMessage,
+  res: ServerResponse,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<void> {
+  const bearerCtx = await verifyBearerAuth(req, cpRepo, 'sim:claim');
+  if (bearerCtx === null || bearerCtx === undefined) {
+    sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Valid API key with sim:claim scope required' }); return;
+  }
+  const body = await readBody(req, config.bodyLimitBytes);
+  if (!body.ok) { sendJson(res, body.status, { ok: false, code: body.code, message: body.message }); return; }
+  let data: { campaignId?: string; count?: number; leaseDurationMs?: number };
+  try { data = JSON.parse(body.body.toString('utf8')) as { campaignId?: string; count?: number; leaseDurationMs?: number }; }
+  catch { sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Invalid JSON' }); return; }
+  const count = Math.min(Math.max(data.count ?? 10, 1), 100);
+  const leaseDurationMs = data.leaseDurationMs ?? 5 * 60 * 1000;
+  const jobs = await cpRepo.claimJobs(data.campaignId ?? null, count, bearerCtx.credentialId, leaseDurationMs);
+  sendJson(res, 200, { ok: true, jobs });
+}
+
+async function handleSimComplete(
+  req: IncomingMessage,
+  res: ServerResponse,
+  repo: PgTelemetryRepository,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<void> {
+  const bearerCtx = await verifyBearerAuth(req, cpRepo, 'sim:complete');
+  if (bearerCtx === null || bearerCtx === undefined) {
+    sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Valid API key with sim:complete scope required' }); return;
+  }
+  const body = await readBody(req, config.bodyLimitBytes);
+  if (!body.ok) { sendJson(res, body.status, { ok: false, code: body.code, message: body.message }); return; }
+  let data: { jobId?: string; leaseToken?: string; game?: unknown };
+  try { data = JSON.parse(body.body.toString('utf8')); }
+  catch { sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Invalid JSON' }); return; }
+  if (!data.jobId || !data.leaseToken || !data.game) {
+    sendJson(res, 400, { ok: false, code: 'MISSING_FIELDS', message: 'jobId, leaseToken, and game are required' }); return;
+  }
+
+  // Validate game payload
+  const validation = validateGameSubmission(data.game);
+  if (!validation.ok) {
+    sendJson(res, 400, { ok: false, code: 'VALIDATION_FAILED', errors: validation.errors }); return;
+  }
+
+  // Complete job atomically — get provenance
+  const provenance = await cpRepo.completeJob(data.jobId, data.leaseToken);
+  if (!provenance) {
+    sendJson(res, 409, { ok: false, code: 'INVALID_JOB', message: 'Job not found, not leased, or lease token mismatch' }); return;
+  }
+
+  // Ingest the game with campaign provenance and source override
+  const gamePayload = data.game as GameSubmission;
+  const idempotencyKey = idempotencyKeyFor(req, gamePayload) || `sim:${provenance.campaignId}:${provenance.gameIndex}`;
+  const result = await repo.ingestValid({
+    payload: gamePayload,
+    idempotencyKey,
+    receivedAt: config.now(),
+    authKeyId: bearerCtx.credentialId,
+    sourceOverride: bearerCtx.sourceName,
+    sourceId: bearerCtx.sourceId,
+    campaignId: provenance.campaignId,
+    campaignGameIndex: provenance.gameIndex,
+  });
+
+  sendJson(res, 201, { ok: true, ...result, campaignId: provenance.campaignId, gameIndex: provenance.gameIndex });
+}
+
+async function handleSimFail(
+  req: IncomingMessage,
+  res: ServerResponse,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<void> {
+  const bearerCtx = await verifyBearerAuth(req, cpRepo, 'sim:claim');
+  if (bearerCtx === null || bearerCtx === undefined) {
+    sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Valid API key with sim:claim scope required' }); return;
+  }
+  const body = await readBody(req, config.bodyLimitBytes);
+  if (!body.ok) { sendJson(res, body.status, { ok: false, code: body.code, message: body.message }); return; }
+  let data: { jobId?: string; leaseToken?: string; error?: string };
+  try { data = JSON.parse(body.body.toString('utf8')) as { jobId?: string; leaseToken?: string; error?: string }; }
+  catch { sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Invalid JSON' }); return; }
+  if (!data.jobId || !data.leaseToken) {
+    sendJson(res, 400, { ok: false, code: 'MISSING_FIELDS', message: 'jobId and leaseToken are required' }); return;
+  }
+  const ok = await cpRepo.failJob(data.jobId, data.leaseToken, data.error ?? 'unknown error');
+  sendJson(res, ok ? 200 : 409, { ok });
+}
+
+// ============================================================================
+// Cookie helpers
+// ============================================================================
+
+function parseCookie(req: IncomingMessage, name: string): string | null {
+  const cookieHeader = req.headers['cookie'];
+  if (!cookieHeader) return null;
+  const prefix = `${name}=`;
+  for (const part of cookieHeader.split(';')) {
+    const trimmed = part.trim();
+    if (trimmed.startsWith(prefix)) return trimmed.slice(prefix.length);
+  }
+  return null;
+}
+
+function cookieOptions(config: AppConfig, maxAge: number): string {
+  const parts = [`Max-Age=${maxAge}`, 'HttpOnly', 'SameSite=Lax'];
+  if (config.secureCookies) parts.push('Secure');
+  return parts.join('; ');
 }
 
 function sendJson(res: ServerResponse, status: number, payload: unknown, headers: Record<string, string> = {}): void {

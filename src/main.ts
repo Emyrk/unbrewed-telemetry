@@ -3,6 +3,7 @@ import { Pool } from 'pg';
 import { loadConfig, loadEnvFile } from './config.js';
 import { migrate } from './db/migrate.js';
 import { PgTelemetryRepository } from './db/repository.js';
+import { ControlPlaneRepository } from './db/control-plane-repository.js';
 import { createApp } from './http/app.js';
 
 loadEnvFile();
@@ -17,13 +18,21 @@ if (config.runMigrationsOnStart) {
 }
 
 const repo = new PgTelemetryRepository(pool);
+const cpRepo = new ControlPlaneRepository(pool);
 const server = createServer(createApp({
   repo,
+  cpRepo,
   config: {
     telemetrySecret: config.telemetrySecret,
     allowUnauthenticatedIngest: config.allowUnauthenticatedIngest,
     bodyLimitBytes: config.bodyLimitBytes,
     now: () => new Date(),
+    discordClientId: config.discordClientId,
+    discordClientSecret: config.discordClientSecret,
+    discordRedirectUri: config.discordRedirectUri,
+    adminDiscordIds: config.adminDiscordIds,
+    sessionSecret: config.sessionSecret,
+    secureCookies: config.secureCookies,
   },
 }));
 
