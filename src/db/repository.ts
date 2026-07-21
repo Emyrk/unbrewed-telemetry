@@ -75,45 +75,47 @@ export class PgTelemetryRepository {
   }
 
   async ingestValid(args: IngestArgs): Promise<IngestCreated | IngestDuplicate> {
-    const normalized = normalizeSubmission(args.payload, args.idempotencyKey);
-    // Server-side source override: credential-derived source takes precedence over payload
-    if (args.sourceOverride) {
-      normalized.source = args.sourceOverride;
-    }
-    const submissionId = randomUUID();
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      const duplicate = await insertSubmission(client, {
-        id: submissionId,
-        idempotencyKey: args.idempotencyKey,
-        source: normalized.source,
-        authKeyId: args.authKeyId,
-        payload: args.payload,
-        validationStatus: 'valid',
-        validationErrors: null,
-        receivedAt: args.receivedAt,
-        sourceId: args.sourceId,
-        campaignId: args.campaignId,
-      });
-      if (duplicate) {
-        await client.query('ROLLBACK');
-        return { kind: 'duplicate', submissionId: duplicate.id, gameId: duplicate.game_id };
-      }
-
-      await insertGame(client, submissionId, args.receivedAt, normalized, args.payload, args.campaignId, args.campaignGameIndex);
-      await insertTeams(client, normalized.teams);
-      await insertSeats(client, normalized.seats);
-      await insertCards(client, normalized.cards);
-      await insertStartingCards(client, normalized.startingCards);
+      const result = await this.ingestValidWithClient(client, args);
       await client.query('COMMIT');
-      return { kind: 'created', submissionId, gameId: normalized.id };
+      return result;
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
     } finally {
       client.release();
     }
+  }
+
+  /** Ingest a valid game using an existing transaction. The caller owns commit/rollback. */
+  async ingestValidWithClient(client: PoolClient, args: IngestArgs): Promise<IngestCreated | IngestDuplicate> {
+    const normalized = normalizeSubmission(args.payload, args.idempotencyKey);
+    if (args.sourceOverride) normalized.source = args.sourceOverride;
+    const submissionId = randomUUID();
+    const duplicate = await insertSubmission(client, {
+      id: submissionId,
+      idempotencyKey: args.idempotencyKey,
+      source: normalized.source,
+      authKeyId: args.authKeyId,
+      payload: args.payload,
+      validationStatus: 'valid',
+      validationErrors: null,
+      receivedAt: args.receivedAt,
+      sourceId: args.sourceId,
+      campaignId: args.campaignId,
+    });
+    if (duplicate) {
+      return { kind: 'duplicate', submissionId: duplicate.id, gameId: duplicate.game_id };
+    }
+
+    await insertGame(client, submissionId, args.receivedAt, normalized, args.payload, args.campaignId, args.campaignGameIndex);
+    await insertTeams(client, normalized.teams);
+    await insertSeats(client, normalized.seats);
+    await insertCards(client, normalized.cards);
+    await insertStartingCards(client, normalized.startingCards);
+    return { kind: 'created', submissionId, gameId: normalized.id };
   }
 
   async ingestInvalid(args: InvalidIngestArgs): Promise<IngestInvalid | IngestDuplicate> {
@@ -145,8 +147,12 @@ export class PgTelemetryRepository {
   }
 
   /** Upsert a batch of pushed deck definitions into the versioned registry. */
-  async upsertDeckDefinitions(payload: DeckDefinitionSubmission, receivedAt: Date): Promise<{ upserted: number }> {
-    const source = payload.source ?? 'unknown';
+  async upsertDeckDefinitions(
+    payload: DeckDefinitionSubmission,
+    receivedAt: Date,
+    sourceOverride?: string | null,
+  ): Promise<{ upserted: number }> {
+    const source = sourceOverride ?? payload.source ?? 'unknown';
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');

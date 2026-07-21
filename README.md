@@ -30,14 +30,24 @@ The local Postgres container listens on port `55432` so it does not collide with
 ```sh
 PORT=8788
 DATABASE_URL=postgres://unbrewed:unbrewed@localhost:55432/unbrewed_telemetry
+PUBLIC_URL=http://localhost:8788
+DISCORD_CLIENT_ID=
+DISCORD_CLIENT_SECRET=
+DISCORD_REDIRECT_URI=http://localhost:8788/auth/discord/callback
+ADMIN_DISCORD_IDS=
+SECURE_COOKIES=0
+TELEMETRY_API_KEY=
 TELEMETRY_SECRET=dev-telemetry-secret-change-me
 TELEMETRY_SOURCE=
 ALLOW_UNAUTHENTICATED_INGEST=0
 RUN_MIGRATIONS_ON_START=0
 ```
 
-`TELEMETRY_SECRET` signs ingest requests. Production should keep `ALLOW_UNAUTHENTICATED_INGEST=0`.
-`TELEMETRY_SOURCE` labels locally generated simulation/seed submissions; when unset, command-line producers default to `<hostname>:<user>:lab`.
+Discord OAuth protects `/admin`. `ADMIN_DISCORD_IDS` is a comma-separated allowlist of Discord user IDs. Production should set `PUBLIC_URL`, use its matching OAuth callback URL, and leave secure cookies enabled.
+
+Named bearer credentials created by an admin are the primary machine authentication. A credential belongs to a named telemetry source, has explicit scopes, is displayed only once, and is stored as a salted scrypt hash. The service derives submission `source` from the credential rather than trusting the payload. `TELEMETRY_SECRET` remains only for legacy HMAC producer compatibility and may be unset once all producers use bearer keys.
+
+`TELEMETRY_SOURCE` is used only by direct local seed tooling; authenticated HTTP submissions ignore payload-provided source names.
 
 ## API
 
@@ -53,22 +63,15 @@ Returns process health. The `db` field reports whether a simple Postgres ping su
 
 Ingests one completed game matching `schemas/game-submission.v1.schema.json`.
 
-Required request headers:
+Required request headers for a named bearer credential with `games:submit` scope:
 
 ```text
+Authorization: Bearer ubk_<key-id>.<secret>
 Content-Type: application/json
 Idempotency-Key: <stable game key>
-X-Unbrewed-Timestamp: <ISO timestamp or unix timestamp>
-X-Unbrewed-Signature: sha256=<hmac hex>
 ```
 
-The HMAC signs this exact byte sequence:
-
-```text
-<timestamp>.<raw request body>
-```
-
-Use `src/http/auth.ts`'s `signBody()` helper from Node clients.
+The credential's source name overrides any `source` field in the payload. Legacy producers may still send `X-Unbrewed-Timestamp` and `X-Unbrewed-Signature`; the HMAC signs `<timestamp>.<raw request body>` with `TELEMETRY_SECRET`.
 
 #### Bot execution metadata
 
@@ -107,6 +110,50 @@ early stopping are separate counts. The service validates the summary and
 stores it as JSONB on the normalized seat while preserving the original game
 payload. Deploy this ingest change before producers begin sending the field,
 because the v1 schema rejects unknown properties.
+
+### `POST /v1/decks`
+
+Upserts versioned deck definitions. Use a named bearer credential with `decks:submit` scope. The credential's source name overrides the payload source.
+
+### Admin control plane
+
+`GET /admin` uses Discord OAuth and the `ADMIN_DISCORD_IDS` allowlist. Admins can:
+
+- create named telemetry sources;
+- create scoped bearer credentials and copy each secret once;
+- revoke credentials;
+- manage deck definitions;
+- create and inspect simulation campaigns;
+- cancel campaigns.
+
+A campaign accepts a shared `spec` plus either `gameCount` or a `games` array containing per-game `spec` overrides. `gameCount` supports 1 through 100,000 games. The service stores one transient `sim_jobs` row per game and bulk-inserts the rows in one query.
+
+Example campaign body:
+
+```json
+{
+  "name": "Hard duel sweep",
+  "baseSeed": 1000,
+  "contentVersion": "2026.07",
+  "spec": {
+    "format": "duel",
+    "map": "sarpedon",
+    "difficulty": "hard"
+  },
+  "gameCount": 10000
+}
+```
+
+### Simulation runner API
+
+Runner requests use named bearer credentials. A typical runner credential has `sim:claim`, `sim:complete`, and `games:submit` scopes.
+
+- `POST /v1/sim/claim` with `{ "count": 50, "campaignId": "optional" }` leases up to 100 individual jobs using `FOR UPDATE SKIP LOCKED`.
+- `POST /v1/sim/heartbeat` with `{ "jobId", "leaseToken", "leaseDurationMs" }` renews an unexpired lease owned by the same credential.
+- `POST /v1/sim/complete` with `{ "jobId", "leaseToken", "game" }` validates and ingests the game, increments campaign progress, and deletes the completed job in one transaction.
+- `POST /v1/sim/fail` with `{ "jobId", "leaseToken", "error" }` requeues the game until its maximum attempts, then retains it as a terminal failed job.
+
+Leases are bound to the credential that claimed them. Expired leases are reaped during subsequent claim requests. Successful games retain `campaign_id` and `campaign_game_index` provenance while their transient job rows are deleted.
 
 ### `GET /v1/stats/bot-execution`
 
@@ -199,10 +246,12 @@ Override the target or fixture:
 
 ```sh
 TELEMETRY_URL=http://localhost:8788/v1/games \
-TELEMETRY_SECRET=dev-telemetry-secret-change-me \
+TELEMETRY_API_KEY='ubk_<key-id>.<secret>' \
 SAMPLE_GAME_FILE=examples/sample-game.json \
 npm run submit:sample
 ```
+
+If `TELEMETRY_API_KEY` is unset, the script uses the legacy `TELEMETRY_SECRET` HMAC flow for local compatibility.
 
 ## Tests
 

@@ -31,7 +31,6 @@ const server = createServer(createApp({
     discordClientSecret: config.discordClientSecret,
     discordRedirectUri: config.discordRedirectUri,
     adminDiscordIds: config.adminDiscordIds,
-    sessionSecret: config.sessionSecret,
     secureCookies: config.secureCookies,
   },
 }));

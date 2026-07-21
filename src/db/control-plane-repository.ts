@@ -296,18 +296,23 @@ export class ControlPlaneRepository {
          args.contentVersion ?? null, args.games.length, args.createdBy],
       );
 
-      // Insert jobs
+      const jobIds: string[] = [];
+      const gameIndexes: number[] = [];
+      const seeds: number[] = [];
+      const specs: string[] = [];
       for (let i = 0; i < args.games.length; i++) {
-        const game = args.games[i]!;
-        const jobId = randomUUID();
-        const seed = baseSeed + i;
-        const jobSpec = game.spec ?? args.spec;
-        await client.query(
-          `INSERT INTO sim_jobs (id, campaign_id, game_index, seed, spec)
-           VALUES ($1, $2, $3, $4, $5::jsonb)`,
-          [jobId, id, i, seed, JSON.stringify(jobSpec)],
-        );
+        jobIds.push(randomUUID());
+        gameIndexes.push(i);
+        seeds.push(baseSeed + i);
+        specs.push(JSON.stringify(args.games[i]!.spec ?? args.spec));
       }
+      await client.query(
+        `INSERT INTO sim_jobs (id, campaign_id, game_index, seed, spec)
+         SELECT jobs.id, $1, jobs.game_index, jobs.seed, jobs.spec::jsonb
+         FROM unnest($2::text[], $3::integer[], $4::bigint[], $5::text[])
+           AS jobs(id, game_index, seed, spec)`,
+        [id, jobIds, gameIndexes, seeds, specs],
+      );
 
       await client.query('COMMIT');
       return {
@@ -345,7 +350,7 @@ export class ControlPlaneRepository {
     }));
   }
 
-  async getCampaign(id: string): Promise<(SimCampaign & { jobs: SimJob[] }) | null> {
+  async getCampaign(id: string): Promise<(SimCampaign & { jobs: SimJob[]; remainingJobs: number }) | null> {
     const result = await this.pool.query<{
       id: string; name: string; description: string | null; spec: unknown;
       base_seed: string; content_version: string | null;
@@ -365,7 +370,11 @@ export class ControlPlaneRepository {
       leased_by: string | null; leased_at: Date | null; lease_expires_at: Date | null;
       attempts: number; max_attempts: number; last_error: string | null;
     }>(
-      `SELECT * FROM sim_jobs WHERE campaign_id = $1 ORDER BY game_index`,
+      `SELECT * FROM sim_jobs WHERE campaign_id = $1 ORDER BY game_index LIMIT 500`,
+      [id],
+    );
+    const remainingResult = await this.pool.query<{ count: string }>(
+      `SELECT COUNT(*) AS count FROM sim_jobs WHERE campaign_id = $1`,
       [id],
     );
 
@@ -376,6 +385,7 @@ export class ControlPlaneRepository {
       status: row.status, createdAt: row.created_at.toISOString(), createdBy: row.created_by,
       cancelledAt: row.cancelled_at?.toISOString() ?? null,
       completedAt: row.completed_at?.toISOString() ?? null,
+      remainingJobs: Number(remainingResult.rows[0]?.count ?? 0),
       jobs: jobsResult.rows.map(j => ({
         id: j.id, campaignId: j.campaign_id, gameIndex: j.game_index,
         seed: Number(j.seed), spec: j.spec, status: j.status,
@@ -431,16 +441,37 @@ export class ControlPlaneRepository {
     try {
       await client.query('BEGIN');
 
-      // Reap expired leases: reset to pending (or fail if max attempts)
+      // Reap terminal expired leases and account for them exactly once.
+      await client.query(
+        `WITH expired AS (
+           UPDATE sim_jobs
+           SET status = 'failed', lease_token = NULL, leased_by = NULL,
+               leased_at = NULL, lease_expires_at = NULL,
+               last_error = COALESCE(last_error, 'lease expired after maximum attempts')
+           WHERE status = 'leased' AND lease_expires_at < now() AND attempts >= max_attempts
+           RETURNING campaign_id
+         ), counts AS (
+           SELECT campaign_id, COUNT(*)::int AS failed_count
+           FROM expired
+           GROUP BY campaign_id
+         )
+         UPDATE sim_campaigns sc
+         SET failed_games = sc.failed_games + counts.failed_count
+         FROM counts
+         WHERE sc.id = counts.campaign_id`,
+      );
       await client.query(
         `UPDATE sim_jobs
-         SET status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'pending' END,
-             lease_token = NULL, leased_by = NULL, leased_at = NULL, lease_expires_at = NULL
-         WHERE status = 'leased' AND lease_expires_at < now()`,
+         SET status = 'pending', lease_token = NULL, leased_by = NULL,
+             leased_at = NULL, lease_expires_at = NULL,
+             last_error = COALESCE(last_error, 'lease expired')
+         WHERE status = 'leased' AND lease_expires_at < now() AND attempts < max_attempts`,
       );
-
-      // Update campaign failed counters for newly failed jobs from reaping
-      // This is approximate; exact counting happens in completeJob/failJob
+      await client.query(
+        `UPDATE sim_campaigns
+         SET status = 'completed', completed_at = now()
+         WHERE status = 'active' AND completed_games + failed_games >= total_games`,
+      );
 
       const params: (string | number)[] = [count];
       let campaignFilter = '';
@@ -507,6 +538,27 @@ export class ControlPlaneRepository {
     }
   }
 
+  async renewLease(
+    jobId: string,
+    leaseToken: string,
+    leasedBy: string,
+    leaseDurationMs: number,
+  ): Promise<Date | null> {
+    const expiresAt = new Date(Date.now() + leaseDurationMs);
+    const result = await this.pool.query<{ lease_expires_at: Date }>(
+      `UPDATE sim_jobs
+       SET lease_expires_at = $4
+       WHERE id = $1
+         AND status = 'leased'
+         AND lease_token = $2
+         AND leased_by = $3
+         AND lease_expires_at > now()
+       RETURNING lease_expires_at`,
+      [jobId, leaseToken, leasedBy, expiresAt],
+    );
+    return result.rows[0]?.lease_expires_at ?? null;
+  }
+
   /**
    * Complete a job: validate lease token, atomically delete the job,
    * increment campaign completed counter, and return the campaign_id
@@ -516,34 +568,52 @@ export class ControlPlaneRepository {
     jobId: string,
     leaseToken: string,
   ): Promise<{ campaignId: string; gameIndex: number; seed: number } | null> {
+    const completed = await this.completeJobWith(jobId, leaseToken, async () => undefined);
+    return completed?.provenance ?? null;
+  }
+
+  /**
+   * Complete a job and run the supplied operation in the same transaction.
+   * This is used to make telemetry ingest, queue deletion, and campaign counters atomic.
+   */
+  async completeJobWith<T>(
+    jobId: string,
+    leaseToken: string,
+    operation: (
+      client: PoolClient,
+      provenance: { campaignId: string; gameIndex: number; seed: number },
+    ) => Promise<T>,
+    leasedBy?: string,
+  ): Promise<{ provenance: { campaignId: string; gameIndex: number; seed: number }; result: T } | null> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-
       const jobResult = await client.query<{
         id: string; campaign_id: string; game_index: number; seed: string;
-        lease_token: string | null; status: string;
+        lease_token: string | null; leased_by: string | null; status: string;
       }>(
-        `SELECT id, campaign_id, game_index, seed, lease_token, status
+        `SELECT id, campaign_id, game_index, seed, lease_token, leased_by, status
          FROM sim_jobs WHERE id = $1 FOR UPDATE`,
         [jobId],
       );
       const job = jobResult.rows[0];
-      if (!job || job.status !== 'leased' || job.lease_token !== leaseToken) {
+      if (!job || job.status !== 'leased' || job.lease_token !== leaseToken || (leasedBy && job.leased_by !== leasedBy)) {
         await client.query('ROLLBACK');
         return null;
       }
 
-      // Delete the job row
-      await client.query('DELETE FROM sim_jobs WHERE id = $1', [jobId]);
+      const provenance = {
+        campaignId: job.campaign_id,
+        gameIndex: job.game_index,
+        seed: Number(job.seed),
+      };
+      const result = await operation(client, provenance);
 
-      // Increment completed counter
+      await client.query('DELETE FROM sim_jobs WHERE id = $1', [jobId]);
       await client.query(
         `UPDATE sim_campaigns SET completed_games = completed_games + 1 WHERE id = $1`,
         [job.campaign_id],
       );
-
-      // Check if campaign is now complete
       await client.query(
         `UPDATE sim_campaigns SET status = 'completed', completed_at = now()
          WHERE id = $1 AND completed_games + failed_games >= total_games AND status = 'active'`,
@@ -551,7 +621,7 @@ export class ControlPlaneRepository {
       );
 
       await client.query('COMMIT');
-      return { campaignId: job.campaign_id, gameIndex: job.game_index, seed: Number(job.seed) };
+      return { provenance, result };
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
@@ -563,21 +633,21 @@ export class ControlPlaneRepository {
   /**
    * Fail a job: requeue if attempts < max, otherwise mark terminal failed.
    */
-  async failJob(jobId: string, leaseToken: string, errorMessage: string): Promise<boolean> {
+  async failJob(jobId: string, leaseToken: string, errorMessage: string, leasedBy?: string): Promise<boolean> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
 
       const jobResult = await client.query<{
-        id: string; campaign_id: string; lease_token: string | null; status: string;
+        id: string; campaign_id: string; lease_token: string | null; leased_by: string | null; status: string;
         attempts: number; max_attempts: number;
       }>(
-        `SELECT id, campaign_id, lease_token, status, attempts, max_attempts
+        `SELECT id, campaign_id, lease_token, leased_by, status, attempts, max_attempts
          FROM sim_jobs WHERE id = $1 FOR UPDATE`,
         [jobId],
       );
       const job = jobResult.rows[0];
-      if (!job || job.status !== 'leased' || job.lease_token !== leaseToken) {
+      if (!job || job.status !== 'leased' || job.lease_token !== leaseToken || (leasedBy && job.leased_by !== leasedBy)) {
         await client.query('ROLLBACK');
         return false;
       }

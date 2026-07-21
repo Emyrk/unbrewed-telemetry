@@ -105,10 +105,6 @@
   <div class="container">
     <div id="auth-gate">
       <a class="btn btn-primary" href="/auth/discord">Login with Discord</a>
-      <div class="or-divider">— or —</div>
-      <label for="secret-input">Enter admin secret</label>
-      <input id="secret-input" type="password" placeholder="telemetry secret" autocomplete="off">
-      <button class="btn btn-ghost" onclick="doLegacyAuth()">Authenticate</button>
       <div id="auth-error" class="error-msg"></div>
     </div>
 
@@ -154,7 +150,7 @@
             <button class="btn btn-primary btn-sm" onclick="showCampaignForm()">New Campaign</button>
           </div>
           <div id="campaign-form" style="display:none;margin-bottom:1rem">
-            <div class="form-row"><textarea id="campaign-json" placeholder='{"spec":{...},"games":[{},{},...]}' style="font-size:0.8rem"></textarea></div>
+            <div class="form-row"><textarea id="campaign-json" placeholder='{"spec":{"format":"duel"},"gameCount":10000}' style="font-size:0.8rem"></textarea></div>
             <div class="form-row"><button class="btn btn-primary btn-sm" onclick="createCampaign()">Create</button></div>
           </div>
           <div id="campaigns-list"></div>
@@ -176,13 +172,9 @@
   </div>
 
   <script>
-    let secret = '';
-    let authMethod = null; // 'discord' | 'legacy'
-
     // ----- API helper -----
     async function api(method, path, body) {
       const opts = { method, headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin' };
-      if (secret) opts.headers['Authorization'] = `Bearer ${secret}`;
       if (body !== undefined) opts.body = JSON.stringify(body);
       const res = await fetch(path, opts);
       return { status: res.status, data: await res.json() };
@@ -203,7 +195,6 @@
       try {
         const { status, data } = await api('GET', '/v1/admin/me');
         if (status === 200 && data.ok) {
-          authMethod = data.authMethod;
           showAdmin(data.discordUsername || 'admin');
           return true;
         }
@@ -211,26 +202,11 @@
       return false;
     }
 
-    async function doLegacyAuth() {
-      secret = document.getElementById('secret-input').value.trim();
-      if (!secret) return;
-      try {
-        const { status } = await api('GET', '/v1/admin/decks');
-        if (status === 401 || status === 403) {
-          document.getElementById('auth-error').textContent = 'Invalid secret';
-          return;
-        }
-        authMethod = 'legacy';
-        sessionStorage.setItem('admin-secret', secret);
-        showAdmin('legacy-admin');
-      } catch { document.getElementById('auth-error').textContent = 'Connection error'; }
-    }
-
     function showAdmin(username) {
       document.getElementById('auth-gate').style.display = 'none';
       document.getElementById('admin-content').style.display = 'block';
       document.getElementById('user-info').textContent = username;
-      if (authMethod === 'discord') document.getElementById('logout-btn').style.display = '';
+      document.getElementById('logout-btn').style.display = '';
       loadDecks();
       loadSources();
       loadCampaigns();
@@ -238,9 +214,6 @@
 
     async function doLogout() {
       await api('POST', '/auth/logout');
-      secret = '';
-      authMethod = null;
-      sessionStorage.removeItem('admin-secret');
       location.reload();
     }
 
@@ -386,7 +359,7 @@
       const { data } = await api('GET', `/v1/admin/campaign?id=${id}`);
       if (!data.ok) return;
       const c = data.campaign;
-      let html = `<h3>${esc(c.name)}</h3><div class="muted" style="margin:0.5rem 0">Status: ${c.status} | ${c.completedGames}/${c.totalGames} completed, ${c.failedGames} failed | Base seed: ${c.baseSeed}</div>`;
+      let html = `<h3>${esc(c.name)}</h3><div class="muted" style="margin:0.5rem 0">Status: ${c.status} | ${c.completedGames}/${c.totalGames} completed, ${c.failedGames} failed, ${c.remainingJobs} remaining | Base seed: ${c.baseSeed}</div>`;
       if (c.jobs && c.jobs.length) {
         html += `<table class="admin-table"><thead><tr><th>#</th><th>Seed</th><th>Status</th><th>Attempts</th><th>Error</th></tr></thead><tbody>`;
         for (const j of c.jobs) {
@@ -403,12 +376,7 @@
     function esc(s) { const el = document.createElement('span'); el.textContent = s; return el.innerHTML; }
 
     // ----- Init -----
-    (async function() {
-      if (await checkSession()) return;
-      const saved = sessionStorage.getItem('admin-secret');
-      if (saved) { secret = saved; if (await checkSession()) return; doLegacyAuth(); }
-      document.getElementById('secret-input').addEventListener('keydown', e => { if (e.key === 'Enter') doLegacyAuth(); });
-    })();
+    void checkSession();
   </script>
 </body>
 </html>

@@ -15,6 +15,7 @@ describeDb('telemetry api with postgres', () => {
   let pool: Pool;
   let server: Server;
   let baseUrl: string;
+  let cpRepo: ControlPlaneRepository;
   const secret = 'test-secret';
   const now = new Date('2026-07-14T16:30:00.000Z');
 
@@ -22,7 +23,7 @@ describeDb('telemetry api with postgres', () => {
     pool = new Pool({ connectionString: databaseUrl });
     await migrate(pool);
     const repo = new PgTelemetryRepository(pool);
-    const cpRepo = new ControlPlaneRepository(pool);
+    cpRepo = new ControlPlaneRepository(pool);
     server = createServer(createApp({
       repo,
       cpRepo,
@@ -34,8 +35,7 @@ describeDb('telemetry api with postgres', () => {
         discordClientId: '',
         discordClientSecret: '',
         discordRedirectUri: '',
-        adminDiscordIds: [],
-        sessionSecret: secret,
+        adminDiscordIds: ['admin-123'],
         secureCookies: false,
       },
     }));
@@ -84,6 +84,148 @@ describeDb('telemetry api with postgres', () => {
       body: JSON.stringify(sampleGame()),
     });
     expect(response.status).toBe(401);
+  });
+
+  it('protects admin APIs with an allowlisted Discord session', async () => {
+    const denied = await fetch(`${baseUrl}/v1/admin/sources`, {
+      headers: { authorization: `Bearer ${secret}` },
+    });
+    expect(denied.status).toBe(401);
+
+    const session = await cpRepo.createSession({ discordId: 'admin-123', discordUsername: 'test-admin' });
+    const allowed = await fetch(`${baseUrl}/v1/admin/sources`, {
+      headers: { cookie: `session=${session.id}` },
+    });
+    expect(allowed.status).toBe(200);
+    expect(await allowed.json()).toMatchObject({ ok: true, sources: [] });
+  });
+
+  it('uses a named bearer credential as the trusted game source', async () => {
+    const source = await cpRepo.createSource('runner-alpha', null, 'test-admin');
+    const credential = await cpRepo.createCredential(source.id, 'games', ['games:submit'], 'test-admin');
+    const payload = sampleGame({ gameId: 'bearer-game-001', stateHash: 'bearer-state-001', source: 'spoofed-source' });
+    const response = await fetch(`${baseUrl}/v1/games`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${credential.fullKey}`,
+        'content-type': 'application/json',
+        'idempotency-key': 'bearer-game-001',
+      },
+      body: JSON.stringify(payload),
+    });
+    expect(response.status).toBe(201);
+
+    const stored = await pool.query<{ source: string; auth_key_id: string; source_id: string }>(
+      `SELECT source, auth_key_id, source_id FROM game_submissions WHERE idempotency_key = $1`,
+      ['bearer-game-001'],
+    );
+    expect(stored.rows[0]).toEqual({ source: 'runner-alpha', auth_key_id: credential.id, source_id: source.id });
+  });
+
+  it('uses a scoped bearer credential for deck source attribution', async () => {
+    const source = await cpRepo.createSource('deck-publisher', null, 'test-admin');
+    const credential = await cpRepo.createCredential(source.id, 'decks', ['decks:submit'], 'test-admin');
+    const payload = sampleDeckBatch() as { source?: string };
+    payload.source = 'spoofed-source';
+    const response = await fetch(`${baseUrl}/v1/decks`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${credential.fullKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    expect(response.status).toBe(200);
+    const stored = await pool.query<{ source: string }>(
+      `SELECT source FROM deck_definitions WHERE deck_id = 'king-kong' AND version = '0.1.0'`,
+    );
+    expect(stored.rows[0]?.source).toBe('deck-publisher');
+  });
+
+  it('claims and atomically completes simulation jobs through bearer APIs', async () => {
+    const source = await cpRepo.createSource('sim-runner', null, 'test-admin');
+    const credential = await cpRepo.createCredential(
+      source.id,
+      'worker',
+      ['sim:claim', 'sim:complete'],
+      'test-admin',
+    );
+    const campaign = await cpRepo.createCampaign({
+      name: 'API campaign',
+      spec: { format: 'duel' },
+      baseSeed: 900,
+      games: [{}],
+      createdBy: 'test-admin',
+    });
+
+    const claim = await fetch(`${baseUrl}/v1/sim/claim`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${credential.fullKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ campaignId: campaign.id, count: 1 }),
+    });
+    expect(claim.status).toBe(200);
+    const claimed = await claim.json() as { jobs: { id: string; leaseToken: string }[] };
+    expect(claimed.jobs).toHaveLength(1);
+
+    const heartbeat = await fetch(`${baseUrl}/v1/sim/heartbeat`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${credential.fullKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jobId: claimed.jobs[0]!.id,
+        leaseToken: claimed.jobs[0]!.leaseToken,
+        leaseDurationMs: 60_000,
+      }),
+    });
+    expect(heartbeat.status).toBe(200);
+
+    const complete = await fetch(`${baseUrl}/v1/sim/complete`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${credential.fullKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jobId: claimed.jobs[0]!.id,
+        leaseToken: claimed.jobs[0]!.leaseToken,
+        game: sampleGame({ gameId: 'sim-api-game-001', stateHash: 'sim-api-state-001', source: 'spoofed' }),
+      }),
+    });
+    expect(complete.status).toBe(201);
+
+    const detail = await cpRepo.getCampaign(campaign.id);
+    expect(detail).toMatchObject({ completedGames: 1, failedGames: 0, status: 'completed' });
+    expect(detail?.jobs).toHaveLength(0);
+    const game = await pool.query<{ source: string; campaign_id: string; campaign_game_index: number }>(
+      `SELECT source, campaign_id, campaign_game_index FROM games WHERE id = 'sim-api-game-001'`,
+    );
+    expect(game.rows[0]).toEqual({ source: 'sim-runner', campaign_id: campaign.id, campaign_game_index: 0 });
+  });
+
+  it('rolls back job completion when telemetry ingest fails', async () => {
+    await postGame(baseUrl, secret, sampleGame({ gameId: 'sim-conflict', stateHash: 'existing-state' }), 'existing-sim-conflict');
+    const source = await cpRepo.createSource('sim-rollback-runner', null, 'test-admin');
+    const credential = await cpRepo.createCredential(source.id, 'worker', ['sim:claim', 'sim:complete'], 'test-admin');
+    const campaign = await cpRepo.createCampaign({
+      name: 'Rollback campaign',
+      spec: {},
+      games: [{}],
+      createdBy: 'test-admin',
+    });
+    const [job] = await cpRepo.claimJobs(campaign.id, 1, credential.id);
+
+    const response = await fetch(`${baseUrl}/v1/sim/complete`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${credential.fullKey}`,
+        'content-type': 'application/json',
+        'idempotency-key': 'new-idempotency-key',
+      },
+      body: JSON.stringify({
+        jobId: job!.id,
+        leaseToken: job!.leaseToken,
+        game: sampleGame({ gameId: 'sim-conflict', stateHash: 'different-state' }),
+      }),
+    });
+    expect(response.status).toBe(500);
+
+    const detail = await cpRepo.getCampaign(campaign.id);
+    expect(detail).toMatchObject({ completedGames: 0, status: 'active' });
+    expect(detail?.jobs).toHaveLength(1);
+    expect(detail?.jobs[0]?.status).toBe('leased');
   });
 
   it('ingests valid games idempotently and reports deck stats', async () => {

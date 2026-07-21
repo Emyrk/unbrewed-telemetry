@@ -28,7 +28,6 @@ export interface AppConfig {
   discordClientSecret: string;
   discordRedirectUri: string;
   adminDiscordIds: string[];
-  sessionSecret: string;
   secureCookies: boolean;
 }
 
@@ -74,12 +73,12 @@ async function handleRequest(
   }
 
   if (req.method === 'POST' && url.pathname === '/v1/games') {
-    await handleGameIngest(req, res, repo, config);
+    await handleGameIngest(req, res, repo, config, cpRepo);
     return;
   }
 
   if (req.method === 'POST' && url.pathname === '/v1/decks') {
-    await handleDeckIngest(req, res, repo, config);
+    await handleDeckIngest(req, res, repo, config, cpRepo);
     return;
   }
 
@@ -206,6 +205,10 @@ async function handleRequest(
     await handleSimClaim(req, res, cpRepo, config);
     return;
   }
+  if (req.method === 'POST' && url.pathname === '/v1/sim/heartbeat') {
+    await handleSimHeartbeat(req, res, cpRepo, config);
+    return;
+  }
   if (req.method === 'POST' && url.pathname === '/v1/sim/complete') {
     await handleSimComplete(req, res, repo, cpRepo, config);
     return;
@@ -323,6 +326,7 @@ async function handleDeckIngest(
   res: ServerResponse,
   repo: PgTelemetryRepository,
   config: AppConfig,
+  cpRepo: ControlPlaneRepository,
 ): Promise<void> {
   const contentType = req.headers['content-type'];
   if (contentType && !String(contentType).toLowerCase().includes('application/json')) {
@@ -336,15 +340,24 @@ async function handleDeckIngest(
     return;
   }
 
-  const auth = verifyIngestAuth(req.headers, body.body, {
-    secret: config.telemetrySecret,
-    allowUnauthenticated: config.allowUnauthenticatedIngest,
-    toleranceMs: 5 * 60 * 1000,
-    nowMs: () => config.now().getTime(),
-  });
-  if (!auth.ok) {
-    sendJson(res, auth.status, { ok: false, code: auth.code, message: auth.message });
+  let sourceOverride: string | null = null;
+  const bearerCtx = await verifyBearerAuth(req, cpRepo, 'decks:submit');
+  if (bearerCtx) {
+    sourceOverride = bearerCtx.sourceName;
+  } else if (bearerCtx === undefined) {
+    sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Invalid or revoked API key, or missing decks:submit scope' });
     return;
+  } else {
+    const auth = verifyIngestAuth(req.headers, body.body, {
+      secret: config.telemetrySecret,
+      allowUnauthenticated: config.allowUnauthenticatedIngest,
+      toleranceMs: 5 * 60 * 1000,
+      nowMs: () => config.now().getTime(),
+    });
+    if (!auth.ok) {
+      sendJson(res, auth.status, { ok: false, code: auth.code, message: auth.message });
+      return;
+    }
   }
 
   let parsed: unknown;
@@ -361,7 +374,7 @@ async function handleDeckIngest(
     return;
   }
 
-  const result = await repo.upsertDeckDefinitions(parsed as DeckDefinitionSubmission, config.now());
+  const result = await repo.upsertDeckDefinitions(parsed as DeckDefinitionSubmission, config.now(), sourceOverride);
   sendJson(res, 200, { ok: true, upserted: result.upserted });
 }
 
@@ -526,6 +539,21 @@ function idempotencyKeyFor(req: IncomingMessage, parsed: unknown): string {
   return `generated:${randomUUID()}`;
 }
 
+function simulationIdempotencyKeyFor(
+  req: IncomingMessage,
+  payload: GameSubmission,
+  campaignId: string,
+  gameIndex: number,
+): string {
+  const headerKey = header(req, 'idempotency-key') ?? header(req, 'x-idempotency-key');
+  if (headerKey) return headerKey;
+  if (payload.idempotencyKey) return payload.idempotencyKey;
+  if (payload.gameId) return payload.gameId;
+  if (payload.stateHash) return `state:${payload.stateHash}`;
+  if (payload.replayHash) return `replay:${payload.replayHash}`;
+  return `sim:${campaignId}:${gameIndex}`;
+}
+
 function header(req: IncomingMessage, name: string): string | null {
   const value = req.headers[name];
   if (Array.isArray(value)) return value[0] ?? null;
@@ -566,16 +594,6 @@ async function readBody(req: IncomingMessage, maxBytes: number): Promise<BodyRes
   return { ok: true, body: Buffer.concat(chunks) };
 }
 
-/** Legacy admin auth: Bearer token matches TELEMETRY_SECRET. */
-function verifyLegacyAdminAuth(req: IncomingMessage, config: AppConfig): boolean {
-  if (!config.telemetrySecret) return false;
-  const authHeader = header(req, 'authorization');
-  if (!authHeader) return false;
-  const match = authHeader.match(/^Bearer\s+(.+)$/i);
-  if (!match) return false;
-  return match[1] === config.telemetrySecret;
-}
-
 /** Session-based admin auth from Discord OAuth. Returns discord username or null. */
 async function verifySessionAuth(
   req: IncomingMessage,
@@ -590,16 +608,14 @@ async function verifySessionAuth(
   return { discordId: session.discordId, discordUsername: session.discordUsername };
 }
 
-/** Combined admin auth: session OR legacy Bearer secret. */
+/** Discord session-based admin authentication. */
 async function verifyAdminAuth(
   req: IncomingMessage,
   cpRepo: ControlPlaneRepository,
   config: AppConfig,
 ): Promise<string | null> {
   const session = await verifySessionAuth(req, cpRepo, config);
-  if (session) return session.discordUsername;
-  if (verifyLegacyAdminAuth(req, config)) return 'legacy-admin';
-  return null;
+  return session?.discordUsername ?? null;
 }
 
 /**
@@ -723,6 +739,7 @@ async function handleDiscordCallback(
         redirect_uri: config.discordRedirectUri,
       }),
     });
+    if (!tokenRes.ok) throw new Error(`Discord token exchange returned ${tokenRes.status}`);
     tokenData = await tokenRes.json() as { access_token?: string };
   } catch {
     sendJson(res, 502, { ok: false, code: 'DISCORD_ERROR', message: 'Failed to exchange code with Discord' });
@@ -740,6 +757,7 @@ async function handleDiscordCallback(
     const userRes = await fetch('https://discord.com/api/users/@me', {
       headers: { authorization: `Bearer ${tokenData.access_token}` },
     });
+    if (!userRes.ok) throw new Error(`Discord user lookup returned ${userRes.status}`);
     user = await userRes.json() as { id?: string; username?: string };
   } catch {
     sendJson(res, 502, { ok: false, code: 'DISCORD_ERROR', message: 'Failed to fetch Discord user info' });
@@ -799,15 +817,10 @@ async function handleAdminMe(
 ): Promise<void> {
   const session = await verifySessionAuth(req, cpRepo, config);
   if (!session) {
-    // Also allow legacy auth
-    if (verifyLegacyAdminAuth(req, config)) {
-      sendJson(res, 200, { ok: true, discordId: null, discordUsername: 'legacy-admin', authMethod: 'legacy' });
-      return;
-    }
     sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Not authenticated' });
     return;
   }
-  sendJson(res, 200, { ok: true, ...session, authMethod: 'discord' });
+  sendJson(res, 200, { ok: true, ...session });
 }
 
 // ============================================================================
@@ -935,19 +948,38 @@ async function handleAdminCreateCampaign(
   if (!admin) { sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Admin authentication required' }); return; }
   const body = await readBody(req, config.bodyLimitBytes);
   if (!body.ok) { sendJson(res, body.status, { ok: false, code: body.code, message: body.message }); return; }
-  let data: { name?: string; description?: string; spec?: unknown; baseSeed?: number; contentVersion?: string; games?: unknown[] };
+  let data: {
+    name?: string;
+    description?: string;
+    spec?: unknown;
+    baseSeed?: number;
+    contentVersion?: string;
+    gameCount?: number;
+    games?: unknown[];
+  };
   try { data = JSON.parse(body.body.toString('utf8')); }
   catch { sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Invalid JSON' }); return; }
-  if (!data.name || !data.spec || !Array.isArray(data.games) || data.games.length === 0) {
-    sendJson(res, 400, { ok: false, code: 'INVALID_CAMPAIGN', message: 'name, spec, and non-empty games array are required' }); return;
+  const gameCount = data.gameCount;
+  const hasCount = Number.isInteger(gameCount) && (gameCount ?? 0) > 0 && (gameCount ?? 0) <= 100_000;
+  const hasGames = Array.isArray(data.games) && data.games.length > 0 && data.games.length <= 100_000;
+  if (!data.name || data.spec === undefined || (!hasCount && !hasGames)) {
+    sendJson(res, 400, {
+      ok: false,
+      code: 'INVALID_CAMPAIGN',
+      message: 'name, spec, and either gameCount (1-100000) or a non-empty games array are required',
+    });
+    return;
   }
+  const games = hasGames
+    ? data.games!.map(g => ({ spec: (g && typeof g === 'object' && 'spec' in g) ? (g as { spec: unknown }).spec : undefined }))
+    : Array.from({ length: gameCount! }, () => ({}));
   const campaign = await cpRepo.createCampaign({
     name: data.name,
     description: data.description,
     spec: data.spec,
     baseSeed: data.baseSeed,
     contentVersion: data.contentVersion,
-    games: data.games.map(g => ({ spec: (g && typeof g === 'object' && 'spec' in g) ? (g as { spec: unknown }).spec : undefined })),
+    games,
     createdBy: admin,
   });
   sendJson(res, 201, { ok: true, campaign });
@@ -1008,10 +1040,47 @@ async function handleSimClaim(
   let data: { campaignId?: string; count?: number; leaseDurationMs?: number };
   try { data = JSON.parse(body.body.toString('utf8')) as { campaignId?: string; count?: number; leaseDurationMs?: number }; }
   catch { sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Invalid JSON' }); return; }
-  const count = Math.min(Math.max(data.count ?? 10, 1), 100);
-  const leaseDurationMs = data.leaseDurationMs ?? 5 * 60 * 1000;
+  const requestedCount = Number.isFinite(data.count) ? Math.trunc(data.count!) : 10;
+  const count = Math.min(Math.max(requestedCount, 1), 100);
+  const requestedDuration = Number.isFinite(data.leaseDurationMs) ? Math.trunc(data.leaseDurationMs!) : 5 * 60 * 1000;
+  const leaseDurationMs = Math.min(Math.max(requestedDuration, 10_000), 60 * 60 * 1000);
   const jobs = await cpRepo.claimJobs(data.campaignId ?? null, count, bearerCtx.credentialId, leaseDurationMs);
   sendJson(res, 200, { ok: true, jobs });
+}
+
+async function handleSimHeartbeat(
+  req: IncomingMessage,
+  res: ServerResponse,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<void> {
+  const bearerCtx = await verifyBearerAuth(req, cpRepo, 'sim:claim');
+  if (!bearerCtx) {
+    sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Valid API key with sim:claim scope required' });
+    return;
+  }
+  const body = await readBody(req, config.bodyLimitBytes);
+  if (!body.ok) { sendJson(res, body.status, { ok: false, code: body.code, message: body.message }); return; }
+  let data: { jobId?: string; leaseToken?: string; leaseDurationMs?: number };
+  try { data = JSON.parse(body.body.toString('utf8')) as { jobId?: string; leaseToken?: string; leaseDurationMs?: number }; }
+  catch { sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Invalid JSON' }); return; }
+  if (!data.jobId || !data.leaseToken) {
+    sendJson(res, 400, { ok: false, code: 'MISSING_FIELDS', message: 'jobId and leaseToken are required' });
+    return;
+  }
+  const requestedDuration = Number.isFinite(data.leaseDurationMs) ? Math.trunc(data.leaseDurationMs!) : 5 * 60 * 1000;
+  const leaseDurationMs = Math.min(Math.max(requestedDuration, 10_000), 60 * 60 * 1000);
+  const expiresAt = await cpRepo.renewLease(
+    data.jobId,
+    data.leaseToken,
+    bearerCtx.credentialId,
+    leaseDurationMs,
+  );
+  if (!expiresAt) {
+    sendJson(res, 409, { ok: false, code: 'INVALID_LEASE', message: 'Lease is missing, expired, or owned by another credential' });
+    return;
+  }
+  sendJson(res, 200, { ok: true, leaseExpiresAt: expiresAt.toISOString() });
 }
 
 async function handleSimComplete(
@@ -1040,27 +1109,30 @@ async function handleSimComplete(
     sendJson(res, 400, { ok: false, code: 'VALIDATION_FAILED', errors: validation.errors }); return;
   }
 
-  // Complete job atomically — get provenance
-  const provenance = await cpRepo.completeJob(data.jobId, data.leaseToken);
-  if (!provenance) {
+  const gamePayload = data.game as GameSubmission;
+  const completed = await cpRepo.completeJobWith(data.jobId, data.leaseToken, async (client, provenance) => {
+    const idempotencyKey = simulationIdempotencyKeyFor(req, gamePayload, provenance.campaignId, provenance.gameIndex);
+    return repo.ingestValidWithClient(client, {
+      payload: gamePayload,
+      idempotencyKey,
+      receivedAt: config.now(),
+      authKeyId: bearerCtx.credentialId,
+      sourceOverride: bearerCtx.sourceName,
+      sourceId: bearerCtx.sourceId,
+      campaignId: provenance.campaignId,
+      campaignGameIndex: provenance.gameIndex,
+    });
+  }, bearerCtx.credentialId);
+  if (!completed) {
     sendJson(res, 409, { ok: false, code: 'INVALID_JOB', message: 'Job not found, not leased, or lease token mismatch' }); return;
   }
 
-  // Ingest the game with campaign provenance and source override
-  const gamePayload = data.game as GameSubmission;
-  const idempotencyKey = idempotencyKeyFor(req, gamePayload) || `sim:${provenance.campaignId}:${provenance.gameIndex}`;
-  const result = await repo.ingestValid({
-    payload: gamePayload,
-    idempotencyKey,
-    receivedAt: config.now(),
-    authKeyId: bearerCtx.credentialId,
-    sourceOverride: bearerCtx.sourceName,
-    sourceId: bearerCtx.sourceId,
-    campaignId: provenance.campaignId,
-    campaignGameIndex: provenance.gameIndex,
+  sendJson(res, completed.result.kind === 'created' ? 201 : 200, {
+    ok: true,
+    ...completed.result,
+    campaignId: completed.provenance.campaignId,
+    gameIndex: completed.provenance.gameIndex,
   });
-
-  sendJson(res, 201, { ok: true, ...result, campaignId: provenance.campaignId, gameIndex: provenance.gameIndex });
 }
 
 async function handleSimFail(
@@ -1081,7 +1153,7 @@ async function handleSimFail(
   if (!data.jobId || !data.leaseToken) {
     sendJson(res, 400, { ok: false, code: 'MISSING_FIELDS', message: 'jobId and leaseToken are required' }); return;
   }
-  const ok = await cpRepo.failJob(data.jobId, data.leaseToken, data.error ?? 'unknown error');
+  const ok = await cpRepo.failJob(data.jobId, data.leaseToken, data.error ?? 'unknown error', bearerCtx.credentialId);
   sendJson(res, ok ? 200 : 409, { ok });
 }
 

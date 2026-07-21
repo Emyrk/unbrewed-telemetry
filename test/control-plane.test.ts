@@ -172,6 +172,22 @@ describeDb('control-plane repository with postgres', () => {
       expect(detail!.jobs[2]!.seed).toBe(44);
     });
 
+    it('bulk-creates 10,000 transient game jobs', async () => {
+      const campaign = await repo.createCampaign({
+        name: 'Large Campaign',
+        spec: { format: 'duel' },
+        baseSeed: 10_000,
+        games: Array.from({ length: 10_000 }, () => ({})),
+        createdBy: 'admin',
+      });
+      expect(campaign.totalGames).toBe(10_000);
+      const count = await pool.query<{ count: string }>(
+        'SELECT COUNT(*) AS count FROM sim_jobs WHERE campaign_id = $1',
+        [campaign.id],
+      );
+      expect(Number(count.rows[0]?.count ?? 0)).toBe(10_000);
+    });
+
     it('claims jobs with SKIP LOCKED exclusivity', async () => {
       const campaign = await repo.createCampaign({
         name: 'Claim Test',

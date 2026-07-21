@@ -40,8 +40,6 @@ export interface Config {
   discordClientSecret: string;
   discordRedirectUri: string;
   adminDiscordIds: string[];
-  sessionSecret: string;
-  publicUrl: string;
   secureCookies: boolean;
 }
 
@@ -62,12 +60,6 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
   if (!databaseUrl) throw new Error('DATABASE_URL is required');
   const telemetrySecret = env.TELEMETRY_SECRET ?? '';
   const allowUnauthenticatedIngest = boolFromEnv(env.ALLOW_UNAUTHENTICATED_INGEST, false);
-  if (env.NODE_ENV === 'production' && !telemetrySecret) {
-    throw new Error('TELEMETRY_SECRET is required in production');
-  }
-  if (!telemetrySecret && !allowUnauthenticatedIngest) {
-    throw new Error('TELEMETRY_SECRET is required unless ALLOW_UNAUTHENTICATED_INGEST=1');
-  }
   const publicUrl = env.PUBLIC_URL?.replace(/\/$/, '') ?? '';
   const discordRedirectUri = env.DISCORD_REDIRECT_URI || (publicUrl ? `${publicUrl}/auth/discord/callback` : '');
   const adminIds = (env.ADMIN_DISCORD_IDS ?? '').split(',').map(s => s.trim()).filter(Boolean);
@@ -83,8 +75,6 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     discordClientSecret: env.DISCORD_CLIENT_SECRET ?? '',
     discordRedirectUri,
     adminDiscordIds: adminIds,
-    sessionSecret: env.SESSION_SECRET ?? telemetrySecret,
-    publicUrl,
     secureCookies: boolFromEnv(env.SECURE_COOKIES, env.NODE_ENV === 'production'),
   };
 }
