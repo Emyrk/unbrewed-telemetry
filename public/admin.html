@@ -288,7 +288,7 @@
     let adminDecks = [];
     let campaignMode = 'builder';
     const campaignKnownSpecKeys = new Set(['format', 'maps', 'map', 'teams', 'swapStartingPlayer']);
-    const campaignPilotValues = ['bot:easy', 'bot:medium', 'bot:hard', 'bot:expert', 'human'];
+    const campaignPilotValues = ['bot:easy', 'bot:medium', 'bot:hard', 'bot:expert'];
 
     // ----- API helper -----
     async function api(method, path, body) {
@@ -669,7 +669,7 @@
       container.replaceChildren(...layout.map((seat, index) => {
         const values = previous[index] || {};
         const selectedDecks = values.decks?.length ? values.decks : deckIds;
-        const selectedPilots = values.pilots?.length ? values.pilots : [index === 1 ? 'bot:medium' : 'bot:hard'];
+        const selectedPilots = values.pilots?.length ? values.pilots : ['bot:hard'];
         const card = document.createElement('div');
         card.className = 'campaign-seat';
         card.dataset.teamIndex = String(seat.teamIndex);
@@ -690,7 +690,7 @@
           ),
           seatChoicePool(
             'Pilot pool',
-            'All pilots',
+            'All bot pilots',
             campaignPilotValues.map(value => [value, value]),
             selectedPilots.filter(value => pilotSet.has(value)),
             'Additional pilots, comma separated',

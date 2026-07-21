@@ -16,7 +16,10 @@ describe('admin campaign editor', () => {
     expect(html).toContain('Hero deck pool');
     expect(html).toContain('Pilot pool');
     expect(html).toContain('All registered');
-    expect(html).toContain('All pilots');
+    expect(html).toContain('All bot pilots');
+    expect(html).toContain("const campaignPilotValues = ['bot:easy', 'bot:medium', 'bot:hard', 'bot:expert'];");
+    expect(html).toContain("const selectedPilots = values.pilots?.length ? values.pilots : ['bot:hard'];");
+    expect(html).not.toContain("'bot:expert', 'human'");
     expect(html).toContain('data-seat-deck-options');
     expect(html).toContain('data-seat-pilot-options');
     expect(html).toContain('king-taranis-spice');
