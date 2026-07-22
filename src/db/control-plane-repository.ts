@@ -6,7 +6,7 @@ import { randomUUID, randomBytes, randomInt } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { hashSecret, verifySecret, generateCredential, type Scope } from '../http/bearer-auth.js';
 import { wilson } from '../stats/wilson.js';
-import { simJourney, type Journey } from './sim-journey.js';
+import { simJourney, stepDetail, type Journey, type StepDetail } from './sim-journey.js';
 
 export interface CampaignPilotStat {
   pilot: string;
@@ -877,6 +877,11 @@ export class ControlPlaneRepository {
   /** Public "Road to Expert+" journey view (#248) — aggregates only, no auth. */
   async journey(names: string[], nowMs: number): Promise<Journey> {
     return simJourney(this.pool, names, nowMs);
+  }
+
+  /** Expanded per-step detail for the journey page (#248) — aggregates, no auth. */
+  async journeyStep(name: string, nowMs: number): Promise<StepDetail> {
+    return stepDetail(this.pool, name, nowMs);
   }
 
 }

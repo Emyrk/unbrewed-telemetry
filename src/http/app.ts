@@ -201,6 +201,10 @@ async function handleRequest(
   }
 
   // ---- Public "Road to Expert+" journey (NO AUTH — experiment aggregates only) ----
+  if (req.method === 'GET' && url.pathname === '/v1/sim/public/journey/step') {
+    await handleSimJourneyStep(url, res, cpRepo, config);
+    return;
+  }
   if (req.method === 'GET' && url.pathname === '/v1/sim/public/journey') {
     await handleSimJourney(url, res, cpRepo, config);
     return;
@@ -1061,6 +1065,21 @@ async function handleSimJourney(
   const names = raw ? raw.split(',').map((s) => s.trim()).filter(Boolean) : DEFAULT_JOURNEY_STEPS;
   const journey = await cpRepo.journey(names.slice(0, 32), config.now().getTime());
   sendJson(res, 200, journey);
+}
+
+async function handleSimJourneyStep(
+  url: URL,
+  res: ServerResponse,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<void> {
+  const name = (url.searchParams.get('campaign') ?? '').trim();
+  if (!name) {
+    sendJson(res, 400, { ok: false, code: 'MISSING_CAMPAIGN', message: 'campaign query parameter is required' });
+    return;
+  }
+  const detail = await cpRepo.journeyStep(name, config.now().getTime());
+  sendJson(res, 200, detail);
 }
 
 async function handleSimCampaignProgress(
