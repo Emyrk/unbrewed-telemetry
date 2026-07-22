@@ -826,6 +826,22 @@ export class ControlPlaneRepository {
     return result.rows[0]?.lease_expires_at ?? null;
   }
 
+  /** Release a lease without consuming an attempt so another worker can rerun it. */
+  async releaseJob(jobId: string, leaseToken: string, leasedBy?: string): Promise<boolean> {
+    const result = await this.pool.query(
+      `UPDATE sim_jobs
+       SET status = 'pending', lease_token = NULL, leased_by = NULL,
+           leased_at = NULL, lease_expires_at = NULL,
+           attempts = GREATEST(attempts - 1, 0), last_error = NULL
+       WHERE id = $1
+         AND status = 'leased'
+         AND lease_token = $2
+         AND ($3::text IS NULL OR leased_by = $3)`,
+      [jobId, leaseToken, leasedBy ?? null],
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
   /**
    * Complete a job: validate lease token, atomically delete the job,
    * increment campaign completed counter, and return the campaign_id

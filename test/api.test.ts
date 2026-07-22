@@ -225,6 +225,27 @@ describeDb('telemetry api with postgres', () => {
     const claimed = await claim.json() as { jobs: { id: string; leaseToken: string }[] };
     expect(claimed.jobs).toHaveLength(1);
 
+    const releaseCampaign = await cpRepo.createCampaign({
+      name: 'Release API campaign',
+      spec: { format: 'duel' },
+      games: [{}],
+      createdBy: 'test-admin',
+    });
+    const releaseClaim = await fetch(`${baseUrl}/v1/sim/claim`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${credential.fullKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ campaignId: releaseCampaign.id, count: 1 }),
+    });
+    const releaseJob = (await releaseClaim.json() as { jobs: { id: string; leaseToken: string }[] }).jobs[0]!;
+    const release = await fetch(`${baseUrl}/v1/sim/release`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${credential.fullKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jobId: releaseJob.id, leaseToken: releaseJob.leaseToken }),
+    });
+    expect(release.status).toBe(200);
+    expect(await release.json()).toEqual({ ok: true });
+    expect((await cpRepo.getCampaign(releaseCampaign.id))!.jobs[0]).toMatchObject({ status: 'pending', attempts: 0 });
+
     const heartbeat = await fetch(`${baseUrl}/v1/sim/heartbeat`, {
       method: 'POST',
       headers: { authorization: `Bearer ${credential.fullKey}`, 'content-type': 'application/json' },

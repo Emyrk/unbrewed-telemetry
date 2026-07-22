@@ -72,6 +72,7 @@ Recommended endpoints:
 - `GET /v1/stats/deck?deck=&format=&pilots=&opponent=&heroPilot=&opponentPilot=` returns one deck's detail: play-mix profile, win rate by format and map, 1v1 matchups, and per-card influence. The exact pilot parameters support swapping pilot assignments for a fixed 1v1 hero matchup. 404s when the deck has no games under the filters.
 - `POST /v1/sim/claim` leases a batch of individual simulation jobs to a bearer credential with `sim:claim` scope.
 - `POST /v1/sim/heartbeat` renews an unexpired lease owned by the same runner credential.
+- `POST /v1/sim/release` returns a runner-owned lease to pending without consuming an attempt, for clean worker shutdowns.
 - `POST /v1/sim/complete` atomically ingests a completed game, updates campaign counters, and deletes the transient job row (`sim:complete` scope).
 - `POST /v1/sim/fail` requeues or terminally fails a leased job.
 - `GET /v1/sim/campaigns/{id}/progress` (any `sim:claim` credential) returns a campaign's per-pilot win rate with a Wilson 95% CI, plus completed/total/failed and a `mixedContentVersion` flag. Added for the unbrewed-engine #248 "ISMCTS road-to-expert" report, which needs a campaign-scoped win-rate view the deck-balance stats do not answer. Reads existing `games`/`game_seats`, no new tables.

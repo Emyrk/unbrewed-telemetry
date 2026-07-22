@@ -224,6 +224,10 @@ async function handleRequest(
     await handleSimClaim(req, res, cpRepo, config);
     return;
   }
+  if (req.method === 'POST' && url.pathname === '/v1/sim/release') {
+    await handleSimRelease(req, res, cpRepo, config);
+    return;
+  }
   if (req.method === 'POST' && url.pathname === '/v1/sim/heartbeat') {
     await handleSimHeartbeat(req, res, cpRepo, config);
     return;
@@ -1202,6 +1206,33 @@ async function handleSimClaim(
   const leaseDurationMs = Math.min(Math.max(requestedDuration, 10_000), 60 * 60 * 1000);
   const jobs = await cpRepo.claimJobs(data.campaignId ?? null, count, bearerCtx.credentialId, leaseDurationMs);
   sendJson(res, 200, { ok: true, jobs });
+}
+
+async function handleSimRelease(
+  req: IncomingMessage,
+  res: ServerResponse,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<void> {
+  const bearerCtx = await verifyBearerAuth(req, cpRepo, 'sim:claim');
+  if (!bearerCtx) {
+    sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Valid API key with sim:claim scope required' });
+    return;
+  }
+  const body = await readBody(req, config.bodyLimitBytes);
+  if (!body.ok) { sendJson(res, body.status, { ok: false, code: body.code, message: body.message }); return; }
+  let data: { jobId?: string; leaseToken?: string };
+  try { data = JSON.parse(body.body.toString('utf8')) as { jobId?: string; leaseToken?: string }; }
+  catch { sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Invalid JSON' }); return; }
+  if (!data.jobId || !data.leaseToken) {
+    sendJson(res, 400, { ok: false, code: 'MISSING_FIELDS', message: 'jobId and leaseToken are required' });
+    return;
+  }
+  const ok = await cpRepo.releaseJob(data.jobId, data.leaseToken, bearerCtx.credentialId);
+  sendJson(res, ok ? 200 : 409, {
+    ok,
+    ...(ok ? {} : { code: 'INVALID_LEASE', message: 'Lease is missing or owned by another credential' }),
+  });
 }
 
 async function handleSimHeartbeat(

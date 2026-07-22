@@ -364,6 +364,29 @@ describeDb('control-plane repository with postgres', () => {
       expect(batch3.length).toBe(0);
     });
 
+    it('releases a lease without consuming an attempt', async () => {
+      const campaign = await repo.createCampaign({
+        name: 'Release Test',
+        spec: { format: 'duel' },
+        games: [{}],
+        createdBy: 'admin',
+      });
+      const [job] = await repo.claimJobs(campaign.id, 1, 'runner-1');
+      expect(job!.attempts).toBe(1);
+
+      expect(await repo.releaseJob(job!.id, job!.leaseToken!, 'runner-2')).toBe(false);
+      expect(await repo.releaseJob(job!.id, job!.leaseToken!, 'runner-1')).toBe(true);
+
+      const detail = await repo.getCampaign(campaign.id);
+      expect(detail!.jobs[0]).toMatchObject({
+        status: 'pending',
+        attempts: 0,
+        leaseToken: null,
+        leasedBy: null,
+      });
+      expect(await repo.claimJobs(campaign.id, 1, 'runner-2')).toHaveLength(1);
+    });
+
     it('completes a job, deletes it, and increments counter', async () => {
       const campaign = await repo.createCampaign({
         name: 'Complete Test',
