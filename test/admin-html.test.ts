@@ -61,6 +61,13 @@ describe('admin campaign editor', () => {
     expect(html).toContain('Mark active');
     expect(html).toContain("api('POST', '/v1/admin/campaign/active'");
 
+    expect(html).toContain('id="toggle-revoked-keys"');
+    expect(html).toContain('Show revoked');
+    expect(html).toContain('Hide revoked');
+    expect(html).toContain('let showRevokedCredentials = false;');
+    expect(html).toContain('s.credentials.filter(credential => !credential.revokedAt)');
+    expect(html).toContain('function toggleRevokedCredentials()');
+
     const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
     expect(scripts).toHaveLength(1);
     const script = scripts[0]?.[1];

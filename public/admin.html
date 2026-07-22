@@ -206,6 +206,9 @@
         <div class="section">
           <div class="section-title">Telemetry Sources</div>
           <div class="form-row">
+            <button id="toggle-revoked-keys" class="btn btn-ghost btn-sm" style="display:none" onclick="toggleRevokedCredentials()">Show revoked</button>
+          </div>
+          <div class="form-row">
             <input id="new-source-name" placeholder="source name" style="width:200px">
             <input id="new-source-desc" placeholder="description (optional)" style="width:300px">
             <button class="btn btn-primary btn-sm" onclick="createSource()">Create Source</button>
@@ -348,6 +351,8 @@
 
   <script>
     let adminDecks = [];
+    let adminSources = [];
+    let showRevokedCredentials = false;
     let adminCampaigns = [];
     let campaignView = 'queue';
     let campaignScheduleEditing = false;
@@ -450,7 +455,12 @@
     }
 
     function renderSources(sources) {
+      adminSources = sources;
       const el = document.getElementById('sources-list');
+      const revokedCount = sources.reduce((sum, source) => sum + source.credentials.filter(credential => credential.revokedAt).length, 0);
+      const toggle = document.getElementById('toggle-revoked-keys');
+      toggle.style.display = revokedCount > 0 ? '' : 'none';
+      toggle.textContent = showRevokedCredentials ? `Hide revoked (${revokedCount})` : `Show revoked (${revokedCount})`;
       if (sources.length === 0) { el.innerHTML = '<div class="empty-state">No sources.</div>'; return; }
       let html = '';
       for (const s of sources) {
@@ -458,9 +468,12 @@
         html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.6rem"><strong>${esc(s.name)}</strong><button class="btn btn-danger btn-sm" onclick="deleteSource('${s.id}')">Delete</button></div>`;
         html += `<div class="muted" style="margin-bottom:0.5rem">${esc(s.description||'')}</div>`;
         html += `<div class="form-row"><input id="cred-label-${s.id}" placeholder="key label" style="width:160px"><select id="cred-scopes-${s.id}" multiple style="width:300px;height:60px"><option value="games:submit" selected>games:submit</option><option value="decks:submit">decks:submit</option><option value="sim:claim">sim:claim</option><option value="sim:complete">sim:complete</option></select><button class="btn btn-primary btn-sm" onclick="createCredential('${s.id}')">Create Key</button></div>`;
-        if (s.credentials.length) {
+        const visibleCredentials = showRevokedCredentials
+          ? s.credentials
+          : s.credentials.filter(credential => !credential.revokedAt);
+        if (visibleCredentials.length) {
           html += `<table class="admin-table" style="margin-top:0.5rem"><thead><tr><th>Key ID</th><th>Label</th><th>Scopes</th><th>Status</th><th>Last Used</th><th></th></tr></thead><tbody>`;
-          for (const c of s.credentials) {
+          for (const c of visibleCredentials) {
             const revoked = !!c.revokedAt;
             html += `<tr><td class="mono">${esc(c.id)}</td><td>${esc(c.label)}</td><td>${c.scopes.map(sc=>`<span class="badge badge-scope">${esc(sc)}</span>`).join('')}</td><td>${revoked?'<span class="badge badge-revoked">revoked</span>':'<span class="badge badge-active">active</span>'}</td><td class="muted">${c.lastUsedAt?new Date(c.lastUsedAt).toLocaleString():'never'}</td><td>${!revoked?`<button class="btn btn-danger btn-sm" onclick="revokeCredential('${c.id}')">Revoke</button>`:''}</td></tr>`;
           }
@@ -469,6 +482,11 @@
         html += '</div>';
       }
       el.innerHTML = html;
+    }
+
+    function toggleRevokedCredentials() {
+      showRevokedCredentials = !showRevokedCredentials;
+      renderSources(adminSources);
     }
 
     async function createSource() {
