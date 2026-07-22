@@ -113,6 +113,14 @@
     .campaign-json-editor:focus { outline: none; border-color: var(--accent); }
     .campaign-detail-actions { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin: 0.7rem 0; }
     .campaign-detail-status { min-height: 1rem; }
+    .campaign-buckets { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.65rem; margin: 1rem 0; }
+    .campaign-bucket { text-align: left; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 0.8rem; color: var(--text); cursor: pointer; }
+    .campaign-bucket:hover, .campaign-bucket.active { border-color: var(--accent); background: var(--surface-hover); }
+    .campaign-bucket-count { display: block; font-family: var(--mono); font-size: 1.2rem; font-weight: 600; }
+    .campaign-bucket-label { display: block; color: var(--text-muted); font-size: 0.75rem; margin-top: 0.2rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    .campaign-items { margin-top: 0.8rem; }
+    .campaign-pagination { display: flex; align-items: center; justify-content: space-between; gap: 0.7rem; margin: 0.8rem 0; }
+    @media (max-width: 700px) { .campaign-buckets { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
     details.campaign-jobs-json { margin: 0.8rem 0; }
     details.campaign-jobs-json summary { cursor: pointer; color: var(--text-muted); font-size: 0.82rem; }
 
@@ -939,16 +947,13 @@
       const { data } = await api('GET', `/v1/admin/campaign?id=${encodeURIComponent(id)}`);
       if (!data.ok) return;
       const c = data.campaign;
-      let jobsTable = '';
-      if (c.jobs && c.jobs.length) {
-        jobsTable = `<table class="admin-table"><thead><tr><th>#</th><th>Seed</th><th>Status</th><th>Attempts</th><th>Error</th></tr></thead><tbody>`;
-        for (const j of c.jobs) {
-          jobsTable += `<tr><td class="mono">${j.gameIndex}</td><td class="mono">${j.seed}</td><td>${j.status}</td><td class="mono">${j.attempts}/${j.maxAttempts}</td><td class="muted">${esc(j.lastError||'')}</td></tr>`;
-        }
-        jobsTable += '</tbody></table>';
-      } else {
-        jobsTable = '<div class="muted" style="margin-top:0.5rem">All jobs completed or deleted.</div>';
-      }
+      const counts = c.jobCounts || { succeeded: c.completedGames, failed: c.failedGames, leased: 0, idle: c.remainingJobs };
+      const bucketLabels = { succeeded: 'Succeeded', failed: 'Failed', leased: 'Leased', idle: 'Idle' };
+      const buckets = Object.entries(bucketLabels).map(([bucket, label]) => `
+        <button class="campaign-bucket" data-campaign-bucket="${bucket}" onclick="loadCampaignItems('${esc(c.id)}', '${bucket}', 1)">
+          <span class="campaign-bucket-count">${counts[bucket] || 0}</span>
+          <span class="campaign-bucket-label">${label}</span>
+        </button>`).join('');
 
       const detail = document.getElementById('campaign-detail');
       detail.innerHTML = `
@@ -967,17 +972,55 @@
           <button class="btn btn-ghost btn-sm" onclick="document.getElementById('campaign-detail').style.display='none'">Close</button>
           <span id="campaign-detail-status" class="campaign-detail-status"></span>
         </div>
-        <details class="campaign-jobs-json">
-          <summary>Resolved job JSON (${c.jobs?.length || 0} shown)</summary>
-          <textarea id="campaign-jobs-json" class="campaign-json-editor" readonly></textarea>
-        </details>
-        ${jobsTable}`;
+        <div class="campaign-buckets">${buckets}</div>
+        <div id="campaign-items" class="campaign-items"><div class="muted">Select a bucket to inspect individual entries.</div></div>`;
       document.getElementById('campaign-detail-json').value = JSON.stringify(editableCampaignJson(c), null, 2);
-      document.getElementById('campaign-jobs-json').value = JSON.stringify(c.jobs || [], null, 2);
       const status = document.getElementById('campaign-detail-status');
       status.textContent = message;
       status.className = message ? 'success-msg campaign-detail-status' : 'campaign-detail-status';
       detail.style.display = '';
+    }
+
+    async function loadCampaignItems(id, bucket, page) {
+      const container = document.getElementById('campaign-items');
+      if (!container) return;
+      container.innerHTML = '<div class="muted">Loading…</div>';
+      document.querySelectorAll('[data-campaign-bucket]').forEach(button => {
+        button.classList.toggle('active', button.dataset.campaignBucket === bucket);
+      });
+      const { status, data } = await api('GET', `/v1/admin/campaign/items?id=${encodeURIComponent(id)}&bucket=${encodeURIComponent(bucket)}&page=${page}&pageSize=50`);
+      if (status !== 200 || !data.ok) {
+        container.innerHTML = `<div class="error-msg">${esc(data.message || 'Could not load campaign entries')}</div>`;
+        return;
+      }
+      const labels = { succeeded: 'Succeeded', failed: 'Failed', leased: 'Leased', idle: 'Idle' };
+      let html = `<div class="campaign-pagination"><strong>${labels[bucket]} (${data.total})</strong><span class="muted">Page ${data.page} of ${Math.max(data.totalPages, 1)}</span></div>`;
+      if (!data.items.length) {
+        html += '<div class="empty-state">No entries in this bucket.</div>';
+      } else if (bucket === 'succeeded') {
+        html += '<table class="admin-table"><thead><tr><th>#</th><th>Game</th><th>Completed</th></tr></thead><tbody>';
+        for (const item of data.items) {
+          html += `<tr><td class="mono">${item.gameIndex}</td><td class="mono">${esc(item.gameId || '—')}</td><td class="muted">${item.completedAt ? new Date(item.completedAt).toLocaleString() : '—'}</td></tr>`;
+        }
+        html += '</tbody></table>';
+      } else {
+        html += '<table class="admin-table"><thead><tr><th>#</th><th>Seed</th><th>Attempts</th><th>Worker / lease</th><th>Error</th></tr></thead><tbody>';
+        for (const item of data.items) {
+          const lease = item.leasedBy
+            ? `${esc(item.leasedBy)}${item.leaseExpiresAt ? `<div class="muted">until ${new Date(item.leaseExpiresAt).toLocaleString()}</div>` : ''}`
+            : '—';
+          html += `<tr><td class="mono">${item.gameIndex}</td><td class="mono">${esc(item.seed || '—')}</td><td class="mono">${item.attempts ?? '—'}/${item.maxAttempts ?? '—'}</td><td class="mono">${lease}</td><td class="muted">${esc(item.lastError || '')}</td></tr>`;
+        }
+        html += '</tbody></table>';
+      }
+      const previous = data.page > 1
+        ? `<button class="btn btn-ghost btn-sm" onclick="loadCampaignItems('${esc(id)}', '${bucket}', ${data.page - 1})">Previous</button>`
+        : '<span></span>';
+      const next = data.page < data.totalPages
+        ? `<button class="btn btn-ghost btn-sm" onclick="loadCampaignItems('${esc(id)}', '${bucket}', ${data.page + 1})">Next</button>`
+        : '<span></span>';
+      html += `<div class="campaign-pagination">${previous}${next}</div>`;
+      container.innerHTML = html;
     }
 
     async function saveCampaignJson(id) {

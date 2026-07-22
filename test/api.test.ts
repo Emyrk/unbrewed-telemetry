@@ -134,6 +134,44 @@ describeDb('telemetry api with postgres', () => {
     expect(detail!.jobs[0]!.spec).toMatchObject({ format: 'duel', map: 'mended-drum' });
   });
 
+  it('returns campaign bucket counts and paginated idle jobs', async () => {
+    const session = await cpRepo.createSession({ discordId: 'admin-123', discordUsername: 'test-admin' });
+    const campaign = await cpRepo.createCampaign({
+      name: 'Bucket API campaign',
+      spec: { format: 'duel' },
+      baseSeed: 300,
+      games: [{}, {}, {}],
+      createdBy: 'test-admin',
+    });
+    await cpRepo.claimJobs(campaign.id, 1, 'runner');
+
+    const detail = await fetch(`${baseUrl}/v1/admin/campaign?id=${campaign.id}`, {
+      headers: { cookie: `session=${session.id}` },
+    });
+    expect(detail.status).toBe(200);
+    expect(await detail.json()).toMatchObject({
+      ok: true,
+      campaign: {
+        jobs: [],
+        jobCounts: { succeeded: 0, failed: 0, leased: 1, idle: 2 },
+      },
+    });
+
+    const idle = await fetch(`${baseUrl}/v1/admin/campaign/items?id=${campaign.id}&bucket=idle&page=2&pageSize=1`, {
+      headers: { cookie: `session=${session.id}` },
+    });
+    expect(idle.status).toBe(200);
+    expect(await idle.json()).toMatchObject({
+      ok: true,
+      bucket: 'idle',
+      page: 2,
+      pageSize: 1,
+      total: 2,
+      totalPages: 2,
+      items: [{ gameIndex: 2, status: 'idle', seed: '302' }],
+    });
+  });
+
   it('lets an admin toggle a campaign inactive and active', async () => {
     const session = await cpRepo.createSession({ discordId: 'admin-123', discordUsername: 'test-admin' });
     const campaign = await cpRepo.createCampaign({
@@ -275,6 +313,40 @@ describeDb('telemetry api with postgres', () => {
       `SELECT source, campaign_id, campaign_game_index FROM games WHERE id = 'sim-api-game-001'`,
     );
     expect(game.rows[0]).toEqual({ source: 'sim-runner', campaign_id: campaign.id, campaign_game_index: 0 });
+  });
+
+  it('paginates succeeded campaign games from stored telemetry', async () => {
+    const session = await cpRepo.createSession({ discordId: 'admin-123', discordUsername: 'test-admin' });
+    const source = await cpRepo.createSource('success-list-runner', null, 'test-admin');
+    const credential = await cpRepo.createCredential(source.id, 'worker', ['sim:claim', 'sim:complete'], 'test-admin');
+    const campaign = await cpRepo.createCampaign({
+      name: 'Succeeded list campaign',
+      spec: { format: 'duel' },
+      games: [{}],
+      createdBy: 'test-admin',
+    });
+    const [job] = await cpRepo.claimJobs(campaign.id, 1, credential.id);
+    const complete = await fetch(`${baseUrl}/v1/sim/complete`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${credential.fullKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jobId: job!.id,
+        leaseToken: job!.leaseToken,
+        game: sampleGame({ gameId: 'bucket-success-001', stateHash: 'bucket-success-state-001' }),
+      }),
+    });
+    expect(complete.status).toBe(201);
+
+    const succeeded = await fetch(`${baseUrl}/v1/admin/campaign/items?id=${campaign.id}&bucket=succeeded&page=1&pageSize=50`, {
+      headers: { cookie: `session=${session.id}` },
+    });
+    expect(succeeded.status).toBe(200);
+    expect(await succeeded.json()).toMatchObject({
+      ok: true,
+      bucket: 'succeeded',
+      total: 1,
+      items: [{ gameIndex: 0, status: 'succeeded', gameId: 'bucket-success-001' }],
+    });
   });
 
   it('rolls back job completion when telemetry ingest fails', async () => {

@@ -28,7 +28,15 @@ describe('admin campaign editor', () => {
     expect(html).toContain('Per-game overrides are available only in Raw JSON mode');
 
     expect(html).toContain('id="campaign-detail-json"');
-    expect(html).toContain('id="campaign-jobs-json"');
+    expect(html).toContain('class="campaign-buckets"');
+    expect(html).toContain('id="campaign-items"');
+    expect(html).toContain('Succeeded');
+    expect(html).toContain('Failed');
+    expect(html).toContain('Leased');
+    expect(html).toContain('Idle');
+    expect(html).toContain('/v1/admin/campaign/items');
+    expect(html).toContain('pageSize=50');
+    expect(html).not.toContain('id="campaign-jobs-json"');
     expect(html).toContain('Save JSON &amp; Requeue');
     expect(html).toContain("api('PATCH', '/v1/admin/campaign'");
     expect(html).toContain('Saving regenerates every unfinished job');

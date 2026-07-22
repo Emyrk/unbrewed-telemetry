@@ -154,6 +154,37 @@ export interface SimJob {
   lastError: string | null;
 }
 
+export type CampaignItemBucket = 'succeeded' | 'failed' | 'leased' | 'idle';
+
+export interface CampaignJobCounts {
+  succeeded: number;
+  failed: number;
+  leased: number;
+  idle: number;
+}
+
+export interface CampaignListItem {
+  gameIndex: number;
+  status: CampaignItemBucket;
+  gameId: string | null;
+  seed: string | null;
+  attempts: number | null;
+  maxAttempts: number | null;
+  leasedBy: string | null;
+  leaseExpiresAt: string | null;
+  lastError: string | null;
+  completedAt: string | null;
+}
+
+export interface CampaignItemsPage {
+  bucket: CampaignItemBucket;
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  items: CampaignListItem[];
+}
+
 export interface ClaimResult {
   jobs: SimJob[];
 }
@@ -491,7 +522,11 @@ export class ControlPlaneRepository {
     }));
   }
 
-  async getCampaign(id: string): Promise<(SimCampaign & { jobs: SimJob[]; remainingJobs: number }) | null> {
+  async getCampaign(id: string, includeJobs: boolean = true): Promise<(SimCampaign & {
+    jobs: SimJob[];
+    remainingJobs: number;
+    jobCounts: CampaignJobCounts;
+  }) | null> {
     const result = await this.pool.query<{
       id: string; name: string; description: string | null; spec: unknown;
       base_seed: string; content_version: string | null;
@@ -505,19 +540,29 @@ export class ControlPlaneRepository {
     const row = result.rows[0];
     if (!row) return null;
 
-    const jobsResult = await this.pool.query<{
-      id: string; campaign_id: string; game_index: number; seed: string;
-      spec: unknown; status: string; lease_token: string | null;
-      leased_by: string | null; leased_at: Date | null; lease_expires_at: Date | null;
-      attempts: number; max_attempts: number; last_error: string | null;
-    }>(
-      `SELECT * FROM sim_jobs WHERE campaign_id = $1 ORDER BY game_index LIMIT 500`,
+    const jobsResult = includeJobs
+      ? await this.pool.query<{
+          id: string; campaign_id: string; game_index: number; seed: string;
+          spec: unknown; status: string; lease_token: string | null;
+          leased_by: string | null; leased_at: Date | null; lease_expires_at: Date | null;
+          attempts: number; max_attempts: number; last_error: string | null;
+        }>(
+          `SELECT * FROM sim_jobs WHERE campaign_id = $1 ORDER BY game_index LIMIT 500`,
+          [id],
+        )
+      : { rows: [] };
+    const countsResult = await this.pool.query<{ status: string; count: string }>(
+      `SELECT status, COUNT(*)::bigint AS count
+       FROM sim_jobs WHERE campaign_id = $1 GROUP BY status`,
       [id],
     );
-    const remainingResult = await this.pool.query<{ count: string }>(
-      `SELECT COUNT(*) AS count FROM sim_jobs WHERE campaign_id = $1`,
-      [id],
-    );
+    const statusCounts = new Map(countsResult.rows.map(count => [count.status, Number(count.count)]));
+    const jobCounts: CampaignJobCounts = {
+      succeeded: row.completed_games,
+      failed: statusCounts.get('failed') ?? 0,
+      leased: statusCounts.get('leased') ?? 0,
+      idle: statusCounts.get('pending') ?? 0,
+    };
 
     return {
       id: row.id, name: row.name, description: row.description, spec: row.spec,
@@ -526,7 +571,8 @@ export class ControlPlaneRepository {
       status: row.status, createdAt: row.created_at.toISOString(), createdBy: row.created_by,
       cancelledAt: row.cancelled_at?.toISOString() ?? null,
       completedAt: row.completed_at?.toISOString() ?? null,
-      remainingJobs: Number(remainingResult.rows[0]?.count ?? 0),
+      remainingJobs: jobCounts.failed + jobCounts.leased + jobCounts.idle,
+      jobCounts,
       jobs: jobsResult.rows.map(j => ({
         id: j.id, campaignId: j.campaign_id, gameIndex: j.game_index,
         seed: j.seed, spec: j.spec, status: j.status,
@@ -534,6 +580,83 @@ export class ControlPlaneRepository {
         leasedAt: j.leased_at?.toISOString() ?? null,
         leaseExpiresAt: j.lease_expires_at?.toISOString() ?? null,
         attempts: j.attempts, maxAttempts: j.max_attempts, lastError: j.last_error,
+      })),
+    };
+  }
+
+  async listCampaignItems(
+    campaignId: string,
+    bucket: CampaignItemBucket,
+    page: number,
+    pageSize: number,
+  ): Promise<CampaignItemsPage | null> {
+    const exists = await this.pool.query('SELECT 1 FROM sim_campaigns WHERE id = $1', [campaignId]);
+    if ((exists.rowCount ?? 0) === 0) return null;
+
+    const offset = (page - 1) * pageSize;
+    if (bucket === 'succeeded') {
+      const countResult = await this.pool.query<{ count: string }>(
+        'SELECT COUNT(*)::bigint AS count FROM games WHERE campaign_id = $1',
+        [campaignId],
+      );
+      const result = await this.pool.query<{
+        id: string; campaign_game_index: number; ended_at: Date | null; received_at: Date;
+      }>(
+        `SELECT id, campaign_game_index, ended_at, received_at
+         FROM games
+         WHERE campaign_id = $1
+         ORDER BY campaign_game_index
+         LIMIT $2 OFFSET $3`,
+        [campaignId, pageSize, offset],
+      );
+      const total = Number(countResult.rows[0]?.count ?? 0);
+      return {
+        bucket, page, pageSize, total, totalPages: Math.ceil(total / pageSize),
+        items: result.rows.map(row => ({
+          gameIndex: row.campaign_game_index,
+          status: 'succeeded',
+          gameId: row.id,
+          seed: null,
+          attempts: null,
+          maxAttempts: null,
+          leasedBy: null,
+          leaseExpiresAt: null,
+          lastError: null,
+          completedAt: (row.ended_at ?? row.received_at).toISOString(),
+        })),
+      };
+    }
+
+    const jobStatus = bucket === 'idle' ? 'pending' : bucket;
+    const countResult = await this.pool.query<{ count: string }>(
+      'SELECT COUNT(*)::bigint AS count FROM sim_jobs WHERE campaign_id = $1 AND status = $2',
+      [campaignId, jobStatus],
+    );
+    const result = await this.pool.query<{
+      game_index: number; seed: string; attempts: number; max_attempts: number;
+      leased_by: string | null; lease_expires_at: Date | null; last_error: string | null;
+    }>(
+      `SELECT game_index, seed, attempts, max_attempts, leased_by, lease_expires_at, last_error
+       FROM sim_jobs
+       WHERE campaign_id = $1 AND status = $2
+       ORDER BY game_index
+       LIMIT $3 OFFSET $4`,
+      [campaignId, jobStatus, pageSize, offset],
+    );
+    const total = Number(countResult.rows[0]?.count ?? 0);
+    return {
+      bucket, page, pageSize, total, totalPages: Math.ceil(total / pageSize),
+      items: result.rows.map(row => ({
+        gameIndex: row.game_index,
+        status: bucket,
+        gameId: null,
+        seed: row.seed,
+        attempts: row.attempts,
+        maxAttempts: row.max_attempts,
+        leasedBy: row.leased_by,
+        leaseExpiresAt: row.lease_expires_at?.toISOString() ?? null,
+        lastError: row.last_error,
+        completedAt: null,
       })),
     };
   }

@@ -364,6 +364,42 @@ describeDb('control-plane repository with postgres', () => {
       expect(batch3.length).toBe(0);
     });
 
+    it('summarizes jobs into buckets and paginates bucket entries', async () => {
+      const campaign = await repo.createCampaign({
+        name: 'Bucket Test',
+        spec: { format: 'duel' },
+        baseSeed: 100,
+        games: [{}, {}, {}, {}, {}],
+        createdBy: 'admin',
+      });
+      const [failedJob, leasedJob] = await repo.claimJobs(campaign.id, 2, 'runner');
+      await pool.query(
+        `UPDATE sim_jobs
+         SET status = 'failed', lease_token = NULL, leased_by = NULL,
+             leased_at = NULL, lease_expires_at = NULL, attempts = max_attempts,
+             last_error = 'bad map'
+         WHERE id = $1`,
+        [failedJob!.id],
+      );
+      await pool.query('UPDATE sim_campaigns SET failed_games = 1 WHERE id = $1', [campaign.id]);
+
+      const summary = await repo.getCampaign(campaign.id, false);
+      expect(summary!.jobs).toEqual([]);
+      expect(summary!.jobCounts).toEqual({ succeeded: 0, failed: 1, leased: 1, idle: 3 });
+      expect(summary!.remainingJobs).toBe(5);
+
+      const idlePage1 = await repo.listCampaignItems(campaign.id, 'idle', 1, 2);
+      expect(idlePage1).toMatchObject({ bucket: 'idle', page: 1, pageSize: 2, total: 3, totalPages: 2 });
+      expect(idlePage1!.items.map(item => item.gameIndex)).toEqual([2, 3]);
+      const idlePage2 = await repo.listCampaignItems(campaign.id, 'idle', 2, 2);
+      expect(idlePage2!.items.map(item => item.gameIndex)).toEqual([4]);
+
+      const failed = await repo.listCampaignItems(campaign.id, 'failed', 1, 50);
+      expect(failed!.items[0]).toMatchObject({ gameIndex: failedJob!.gameIndex, lastError: 'bad map' });
+      const leased = await repo.listCampaignItems(campaign.id, 'leased', 1, 50);
+      expect(leased!.items[0]).toMatchObject({ gameIndex: leasedJob!.gameIndex, leasedBy: 'runner' });
+    });
+
     it('releases a lease without consuming an attempt', async () => {
       const campaign = await repo.createCampaign({
         name: 'Release Test',
