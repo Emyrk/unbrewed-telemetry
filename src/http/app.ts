@@ -203,6 +203,10 @@ async function handleRequest(
     await handleAdminUpdateCampaign(req, res, cpRepo, config);
     return;
   }
+  if (req.method === 'PUT' && url.pathname === '/v1/admin/campaign/schedule') {
+    await handleAdminUpdateCampaignSchedule(req, res, cpRepo, config);
+    return;
+  }
   if (req.method === 'POST' && url.pathname === '/v1/admin/campaign/active') {
     await handleAdminSetCampaignActive(req, res, cpRepo, config);
     return;
@@ -1117,6 +1121,35 @@ async function handleAdminUpdateCampaign(
   } catch (error) {
     if (error instanceof Error && error.message.startsWith('campaign spec:')) {
       sendJson(res, 400, { ok: false, code: 'INVALID_CAMPAIGN_SPEC', message: error.message });
+      return;
+    }
+    throw error;
+  }
+}
+
+async function handleAdminUpdateCampaignSchedule(
+  req: IncomingMessage,
+  res: ServerResponse,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<void> {
+  const admin = await verifyAdminAuth(req, cpRepo, config);
+  if (!admin) { sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Admin authentication required' }); return; }
+  const body = await readBody(req, config.bodyLimitBytes);
+  if (!body.ok) { sendJson(res, body.status, { ok: false, code: body.code, message: body.message }); return; }
+  let data: { tiers?: unknown };
+  try { data = JSON.parse(body.body.toString('utf8')) as { tiers?: unknown }; }
+  catch { sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Invalid JSON' }); return; }
+  if (!Array.isArray(data.tiers) || data.tiers.some(tier => !Array.isArray(tier) || tier.length === 0 || tier.some(id => typeof id !== 'string' || !id))) {
+    sendJson(res, 400, { ok: false, code: 'INVALID_SCHEDULE', message: 'tiers must be an array of non-empty campaign-id arrays' });
+    return;
+  }
+  try {
+    const campaigns = await cpRepo.updateCampaignSchedule(data.tiers as string[][]);
+    sendJson(res, 200, { ok: true, campaigns });
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('campaign schedule')) {
+      sendJson(res, 409, { ok: false, code: 'STALE_SCHEDULE', message: error.message });
       return;
     }
     throw error;

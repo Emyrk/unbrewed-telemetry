@@ -341,6 +341,76 @@ describeDb('control-plane repository with postgres', () => {
       expect(detail!.jobs[0]!.status).toBe('leased');
     });
 
+    it('schedules priority tiers and round-robins campaigns side by side', async () => {
+      const first = await repo.createCampaign({
+        name: 'First created', spec: { format: 'duel' }, games: [{}, {}, {}], createdBy: 'admin',
+      });
+      const roundRobinA = await repo.createCampaign({
+        name: 'Round robin A', spec: { format: 'duel' }, games: [{}, {}, {}], createdBy: 'admin',
+      });
+      const roundRobinB = await repo.createCampaign({
+        name: 'Round robin B', spec: { format: 'duel' }, games: [{}, {}, {}], createdBy: 'admin',
+      });
+
+      expect(first.priorityTier).toBe(0);
+      expect(roundRobinA.priorityTier).toBe(1);
+      expect(roundRobinB.priorityTier).toBe(2);
+
+      const scheduled = await repo.updateCampaignSchedule([
+        [roundRobinA.id, roundRobinB.id],
+        [first.id],
+      ]);
+      expect(scheduled.filter(c => c.status === 'active').map(c => [c.id, c.priorityTier, c.priorityPosition])).toEqual([
+        [roundRobinA.id, 0, 0],
+        [roundRobinB.id, 0, 1],
+        [first.id, 1, 0],
+      ]);
+
+      const batch = await repo.claimJobs(null, 7, 'runner');
+      expect(batch.map(job => job.campaignId)).toEqual([
+        roundRobinA.id,
+        roundRobinB.id,
+        roundRobinA.id,
+        roundRobinB.id,
+        roundRobinA.id,
+        roundRobinB.id,
+      ]);
+      // Lower tiers remain blocked even when every higher-tier job is leased.
+      expect(await repo.claimJobs(null, 1, 'other-runner')).toEqual([]);
+      for (const job of batch) await repo.completeJob(job.id, job.leaseToken!);
+      const [next] = await repo.claimJobs(null, 1, 'other-runner');
+      expect(next!.campaignId).toBe(first.id);
+    });
+
+    it('rotates single-job claims across campaigns in one priority tier', async () => {
+      const a = await repo.createCampaign({
+        name: 'A', spec: { format: 'duel' }, games: [{}, {}], createdBy: 'admin',
+      });
+      const b = await repo.createCampaign({
+        name: 'B', spec: { format: 'duel' }, games: [{}, {}], createdBy: 'admin',
+      });
+      await repo.updateCampaignSchedule([[a.id, b.id]]);
+
+      const [first] = await repo.claimJobs(null, 1, 'runner');
+      expect(first!.campaignId).toBe(a.id);
+      await repo.releaseJob(first!.id, first!.leaseToken!, 'runner');
+
+      const [second] = await repo.claimJobs(null, 1, 'runner');
+      expect(second!.campaignId).toBe(b.id);
+      await repo.releaseJob(second!.id, second!.leaseToken!, 'runner');
+
+      const [third] = await repo.claimJobs(null, 1, 'runner');
+      expect(third!.campaignId).toBe(a.id);
+    });
+
+    it('rejects stale or duplicate campaign schedules', async () => {
+      const campaign = await repo.createCampaign({
+        name: 'Only', spec: { format: 'duel' }, games: [{}], createdBy: 'admin',
+      });
+      await expect(repo.updateCampaignSchedule([[campaign.id, campaign.id]])).rejects.toThrow('duplicate');
+      await expect(repo.updateCampaignSchedule([])).rejects.toThrow('every active or paused campaign');
+    });
+
     it('claims jobs with SKIP LOCKED exclusivity', async () => {
       const campaign = await repo.createCampaign({
         name: 'Claim Test',

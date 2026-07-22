@@ -104,8 +104,14 @@ export interface SimCampaign {
   status: string;
   createdAt: string;
   createdBy: string;
+  priorityTier: number;
+  priorityPosition: number;
   cancelledAt: string | null;
   completedAt: string | null;
+}
+
+export interface CampaignScheduleResult {
+  campaigns: SimCampaign[];
 }
 
 export interface CreateCampaignArgs {
@@ -460,11 +466,20 @@ export class ControlPlaneRepository {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      await client.query('LOCK TABLE sim_campaigns IN SHARE ROW EXCLUSIVE MODE');
+      const priorityResult = await client.query<{ next_tier: number }>(
+        `SELECT COALESCE(MAX(priority_tier), -1)::integer + 1 AS next_tier
+         FROM sim_campaigns WHERE status IN ('active', 'paused')`,
+      );
+      const priorityTier = priorityResult.rows[0]?.next_tier ?? 0;
       await client.query(
-        `INSERT INTO sim_campaigns (id, name, description, spec, base_seed, content_version, total_games, created_by)
-         VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8)`,
+        `INSERT INTO sim_campaigns (
+           id, name, description, spec, base_seed, content_version, total_games, created_by,
+           priority_tier, priority_position
+         )
+         VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, 0)`,
         [id, args.name, args.description ?? null, JSON.stringify(args.spec), baseSeed,
-         args.contentVersion ?? null, args.games.length, args.createdBy],
+         args.contentVersion ?? null, args.games.length, args.createdBy, priorityTier],
       );
 
       const jobIds: string[] = [];
@@ -492,6 +507,7 @@ export class ControlPlaneRepository {
         spec: args.spec, baseSeed, contentVersion: args.contentVersion ?? null,
         totalGames: args.games.length, completedGames: 0, failedGames: 0,
         status: 'active', createdAt: new Date().toISOString(), createdBy: args.createdBy,
+        priorityTier, priorityPosition: 0,
         cancelledAt: null, completedAt: null,
       };
     } catch (error) {
@@ -508,15 +524,21 @@ export class ControlPlaneRepository {
       base_seed: string; content_version: string | null;
       total_games: number; completed_games: number; failed_games: number;
       status: string; created_at: Date; created_by: string;
+      priority_tier: number; priority_position: number;
       cancelled_at: Date | null; completed_at: Date | null;
     }>(
-      `SELECT * FROM sim_campaigns ORDER BY created_at DESC`,
+      `SELECT * FROM sim_campaigns
+       ORDER BY CASE WHEN status IN ('active', 'paused') THEN 0 ELSE 1 END,
+                CASE WHEN status IN ('active', 'paused') THEN priority_tier END,
+                CASE WHEN status IN ('active', 'paused') THEN priority_position END,
+                COALESCE(completed_at, cancelled_at, created_at) DESC`,
     );
     return result.rows.map(r => ({
       id: r.id, name: r.name, description: r.description, spec: r.spec,
       baseSeed: r.base_seed, contentVersion: r.content_version,
       totalGames: r.total_games, completedGames: r.completed_games, failedGames: r.failed_games,
       status: r.status, createdAt: r.created_at.toISOString(), createdBy: r.created_by,
+      priorityTier: r.priority_tier, priorityPosition: r.priority_position,
       cancelledAt: r.cancelled_at?.toISOString() ?? null,
       completedAt: r.completed_at?.toISOString() ?? null,
     }));
@@ -532,6 +554,7 @@ export class ControlPlaneRepository {
       base_seed: string; content_version: string | null;
       total_games: number; completed_games: number; failed_games: number;
       status: string; created_at: Date; created_by: string;
+      priority_tier: number; priority_position: number;
       cancelled_at: Date | null; completed_at: Date | null;
     }>(
       `SELECT * FROM sim_campaigns WHERE id = $1`,
@@ -569,6 +592,7 @@ export class ControlPlaneRepository {
       baseSeed: row.base_seed, contentVersion: row.content_version,
       totalGames: row.total_games, completedGames: row.completed_games, failedGames: row.failed_games,
       status: row.status, createdAt: row.created_at.toISOString(), createdBy: row.created_by,
+      priorityTier: row.priority_tier, priorityPosition: row.priority_position,
       cancelledAt: row.cancelled_at?.toISOString() ?? null,
       completedAt: row.completed_at?.toISOString() ?? null,
       remainingJobs: jobCounts.failed + jobCounts.leased + jobCounts.idle,
@@ -732,6 +756,7 @@ export class ControlPlaneRepository {
         base_seed: string; content_version: string | null;
         total_games: number; completed_games: number; failed_games: number;
         status: string; created_at: Date; created_by: string;
+        priority_tier: number; priority_position: number;
         cancelled_at: Date | null; completed_at: Date | null;
       }>(
         `UPDATE sim_campaigns
@@ -754,10 +779,62 @@ export class ControlPlaneRepository {
           baseSeed: row.base_seed, contentVersion: row.content_version,
           totalGames: row.total_games, completedGames: row.completed_games, failedGames: row.failed_games,
           status: row.status, createdAt: row.created_at.toISOString(), createdBy: row.created_by,
+          priorityTier: row.priority_tier, priorityPosition: row.priority_position,
           cancelledAt: row.cancelled_at?.toISOString() ?? null,
           completedAt: row.completed_at?.toISOString() ?? null,
         },
       };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Replace the active/paused scheduling board. Tiers run top-to-bottom; peers round-robin. */
+  async updateCampaignSchedule(tiers: string[][]): Promise<SimCampaign[]> {
+    const flattened = tiers.flat();
+    if (new Set(flattened).size !== flattened.length) {
+      throw new Error('campaign schedule contains duplicate campaign ids');
+    }
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('LOCK TABLE sim_campaigns IN SHARE ROW EXCLUSIVE MODE');
+      const current = await client.query<{ id: string }>(
+        `SELECT id FROM sim_campaigns
+         WHERE status IN ('active', 'paused')
+         ORDER BY priority_tier, priority_position, created_at
+         FOR UPDATE`,
+      );
+      const currentIds = current.rows.map(row => row.id).sort();
+      const requestedIds = [...flattened].sort();
+      if (currentIds.length !== requestedIds.length || currentIds.some((id, index) => id !== requestedIds[index])) {
+        throw new Error('campaign schedule must include every active or paused campaign exactly once');
+      }
+
+      if (flattened.length > 0) {
+        const tierValues: number[] = [];
+        const positionValues: number[] = [];
+        for (const [tier, ids] of tiers.entries()) {
+          for (const [position] of ids.entries()) {
+            tierValues.push(tier);
+            positionValues.push(position);
+          }
+        }
+        await client.query(
+          `UPDATE sim_campaigns AS campaign
+           SET priority_tier = schedule.tier,
+               priority_position = schedule.position
+           FROM unnest($1::text[], $2::integer[], $3::integer[])
+             AS schedule(id, tier, position)
+           WHERE campaign.id = schedule.id`,
+          [flattened, tierValues, positionValues],
+        );
+      }
+      await client.query('COMMIT');
+      return this.listCampaigns();
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
@@ -870,16 +947,40 @@ export class ControlPlaneRepository {
         campaignFilter = `AND sj.campaign_id = $${params.length}`;
       }
 
-      // Also ensure campaign is active
+      // Lower priority tiers run first. Within a tier, rank one pending job per
+      // campaign per round and rotate by the campaign's last claim timestamp.
       const jobRows = await client.query<{
         id: string; campaign_id: string; game_index: number; seed: string;
         spec: unknown; attempts: number; max_attempts: number;
       }>(
-        `SELECT sj.id, sj.campaign_id, sj.game_index, sj.seed, sj.spec, sj.attempts, sj.max_attempts
-         FROM sim_jobs sj
-         JOIN sim_campaigns sc ON sc.id = sj.campaign_id AND sc.status = 'active'
-         WHERE sj.status = 'pending' ${campaignFilter}
-         ORDER BY sj.campaign_id, sj.game_index
+        `WITH active_tier AS (
+           SELECT MIN(sc.priority_tier) AS priority_tier
+           FROM sim_campaigns sc
+           WHERE sc.status = 'active'
+             ${campaignId ? `AND sc.id = $${params.length}` : ''}
+         ), ranked AS (
+           SELECT sj.id,
+                  sc.priority_tier,
+                  sc.priority_position,
+                  sc.last_claimed_at,
+                  row_number() OVER (
+                    PARTITION BY sj.campaign_id
+                    ORDER BY sj.game_index
+                  ) AS job_round,
+                  sj.game_index
+           FROM sim_jobs sj
+           JOIN sim_campaigns sc ON sc.id = sj.campaign_id AND sc.status = 'active'
+           JOIN active_tier ON active_tier.priority_tier = sc.priority_tier
+           WHERE sj.status = 'pending' ${campaignFilter}
+         )
+         SELECT sj.id, sj.campaign_id, sj.game_index, sj.seed, sj.spec, sj.attempts, sj.max_attempts
+         FROM ranked
+         JOIN sim_jobs sj ON sj.id = ranked.id
+         ORDER BY ranked.priority_tier,
+                  ranked.job_round,
+                  ranked.last_claimed_at NULLS FIRST,
+                  ranked.priority_position,
+                  ranked.game_index
          FOR UPDATE OF sj SKIP LOCKED
          LIMIT $1`,
         params,
@@ -902,6 +1003,20 @@ export class ControlPlaneRepository {
          WHERE id = ANY($5)`,
         [leaseToken, leasedBy, now, expiresAt, ids],
       );
+
+      const lastSelection = new Map<string, number>();
+      jobRows.rows.forEach((job, index) => lastSelection.set(job.campaign_id, index));
+      if (lastSelection.size > 0) {
+        const campaignIds = [...lastSelection.keys()];
+        const selectionOrder = campaignIds.map(id => lastSelection.get(id)!);
+        await client.query(
+          `UPDATE sim_campaigns AS campaign
+           SET last_claimed_at = $1::timestamptz + schedule.selection_order * interval '1 microsecond'
+           FROM unnest($2::text[], $3::integer[]) AS schedule(id, selection_order)
+           WHERE campaign.id = schedule.id`,
+          [now, campaignIds, selectionOrder],
+        );
+      }
 
       await client.query('COMMIT');
 

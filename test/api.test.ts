@@ -172,6 +172,33 @@ describeDb('telemetry api with postgres', () => {
     });
   });
 
+  it('lets an admin arrange priority and round-robin campaign tiers', async () => {
+    const session = await cpRepo.createSession({ discordId: 'admin-123', discordUsername: 'test-admin' });
+    const first = await cpRepo.createCampaign({
+      name: 'Priority API first', spec: { format: 'duel' }, games: [{}], createdBy: 'test-admin',
+    });
+    const peerA = await cpRepo.createCampaign({
+      name: 'Priority API peer A', spec: { format: 'duel' }, games: [{}], createdBy: 'test-admin',
+    });
+    const peerB = await cpRepo.createCampaign({
+      name: 'Priority API peer B', spec: { format: 'duel' }, games: [{}], createdBy: 'test-admin',
+    });
+
+    const response = await fetch(`${baseUrl}/v1/admin/campaign/schedule`, {
+      method: 'PUT',
+      headers: { cookie: `session=${session.id}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ tiers: [[peerA.id, peerB.id], [first.id]] }),
+    });
+    expect(response.status).toBe(200);
+    const payload = await response.json() as { ok: boolean; campaigns: { id: string; priorityTier: number; priorityPosition: number }[] };
+    expect(payload.ok).toBe(true);
+    expect(payload.campaigns.filter(c => [peerA.id, peerB.id, first.id].includes(c.id)).map(c => [c.id, c.priorityTier, c.priorityPosition])).toEqual([
+      [peerA.id, 0, 0],
+      [peerB.id, 0, 1],
+      [first.id, 1, 0],
+    ]);
+  });
+
   it('lets an admin toggle a campaign inactive and active', async () => {
     const session = await cpRepo.createSession({ discordId: 'admin-123', discordUsername: 'test-admin' });
     const campaign = await cpRepo.createCampaign({

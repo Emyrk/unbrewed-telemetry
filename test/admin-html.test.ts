@@ -41,6 +41,15 @@ describe('admin campaign editor', () => {
     expect(html).toContain("api('PATCH', '/v1/admin/campaign'");
     expect(html).toContain('Saving regenerates every unfinished job');
 
+    expect(html).toContain('Priority Queue');
+    expect(html).toContain('Completed &amp; Cancelled');
+    expect(html).toContain('runs first');
+    expect(html).toContain('round robin');
+    expect(html).toContain('Join ↑');
+    expect(html).toContain('Own tier');
+    expect(html).toContain("api('PUT', '/v1/admin/campaign/schedule'");
+    expect(html).toContain("campaign.status === 'completed' || campaign.status === 'cancelled'");
+
     expect(html).toContain('Mark inactive');
     expect(html).toContain('Mark active');
     expect(html).toContain("api('POST', '/v1/admin/campaign/active'");
