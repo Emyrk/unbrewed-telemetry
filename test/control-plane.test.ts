@@ -191,6 +191,60 @@ describeDb('control-plane repository with postgres', () => {
     });
   });
 
+  describe('simulation worker sessions', () => {
+    it('reuses a live session and starts a new one after the liveness window', async () => {
+      const source = await repo.createSource('fleet-workers', null, 'admin');
+      const credential = await repo.createCredential(source.id, 'worker-a', ['sim:claim'], 'admin');
+      const started = new Date('2026-07-22T10:00:00.000Z');
+
+      const sessionId = await repo.touchWorkerSession(credential.id, started, {
+        concurrency: 4,
+        workerVersion: 'engine-1.2.3',
+      });
+      const reused = await repo.touchWorkerSession(credential.id, new Date('2026-07-22T10:05:00.000Z'), {
+        sessionId,
+        concurrency: 6,
+      });
+      expect(reused).toBe(sessionId);
+
+      const snapshot = await repo.fleetSnapshot(new Date('2026-07-22T10:06:00.000Z'));
+      expect(snapshot).toMatchObject({ liveWorkers: 1, workingWorkers: 0, idleWorkers: 1, activeJobs: 0 });
+      expect(snapshot.workers[0]).toMatchObject({
+        sessionId,
+        workerLabel: 'worker-a',
+        workerVersion: 'engine-1.2.3',
+        reportedConcurrency: 6,
+        status: 'idle',
+      });
+
+      const restarted = await repo.touchWorkerSession(credential.id, new Date('2026-07-22T10:21:00.000Z'), { sessionId });
+      expect(restarted).not.toBe(sessionId);
+    });
+
+    it('reports live leases, campaign assignments, and fleet utilization', async () => {
+      const source = await repo.createSource('fleet-jobs', null, 'admin');
+      const credential = await repo.createCredential(source.id, 'worker-b', ['sim:claim'], 'admin');
+      const at = new Date();
+      await repo.touchWorkerSession(credential.id, at, { concurrency: 4 });
+      const campaign = await repo.createCampaign({
+        name: 'Fleet Campaign', spec: { format: 'duel' }, games: [{}, {}], createdBy: 'admin',
+      });
+      await repo.claimJobs(campaign.id, 2, credential.id, 60 * 60 * 1000);
+
+      const snapshot = await repo.fleetSnapshot(new Date(at.getTime() + 1000));
+      expect(snapshot).toMatchObject({ liveWorkers: 1, workingWorkers: 1, idleWorkers: 0, activeJobs: 2, totalConcurrency: 4 });
+      expect(snapshot.workers[0]).toMatchObject({
+        workerLabel: 'worker-b',
+        status: 'working',
+        activeJobs: 2,
+        reportedConcurrency: 4,
+        utilization: 0.5,
+        campaigns: [{ campaignId: campaign.id, campaignName: 'Fleet Campaign', jobs: 2 }],
+      });
+      expect(snapshot.workers[0]!.jobIds).toHaveLength(2);
+    });
+  });
+
   describe('simulation campaigns and jobs', () => {
     it('creates a campaign with jobs', async () => {
       const campaign = await repo.createCampaign({

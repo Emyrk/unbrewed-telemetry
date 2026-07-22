@@ -132,6 +132,11 @@ async function handleRequest(
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/v1/admin/fleet') {
+    await handleAdminFleet(req, url, res, cpRepo, config);
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/v1/admin/decks') {
     await handleAdminListDecks(req, res, repo, cpRepo, config);
     return;
@@ -225,7 +230,7 @@ async function handleRequest(
   // ---- Runner sim endpoints (bearer auth) ----
   // Campaign win-rate view for the #248 ISMCTS road-to-expert report.
   if (req.method === 'GET' && url.pathname.startsWith('/v1/sim/campaigns/') && url.pathname.endsWith('/progress')) {
-    await handleSimCampaignProgress(req, res, url, cpRepo);
+    await handleSimCampaignProgress(req, res, url, cpRepo, config);
     return;
   }
   if (req.method === 'POST' && url.pathname === '/v1/sim/claim') {
@@ -315,6 +320,10 @@ async function handleGameIngest(
   } catch {
     sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Request body is not valid JSON' });
     return;
+  }
+
+  if (bearerCtx) {
+    await touchWorkerActivity(cpRepo!, bearerCtx, config.now());
   }
 
   const idempotencyKey = idempotencyKeyFor(req, parsed);
@@ -674,6 +683,24 @@ async function verifyBearerAuth(
     sourceName: cred.source_name,
     scopes: cred.scopes,
   };
+}
+
+async function handleAdminFleet(
+  req: IncomingMessage,
+  url: URL,
+  res: ServerResponse,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<void> {
+  const admin = await verifyAdminAuth(req, cpRepo, config);
+  if (!admin) {
+    sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Admin authentication required' });
+    return;
+  }
+  const requestedHours = Number(url.searchParams.get('historyHours') ?? 24);
+  const historyHours = Number.isFinite(requestedHours) ? Math.min(Math.max(Math.trunc(requestedHours), 1), 168) : 24;
+  const snapshot = await cpRepo.fleetSnapshot(config.now(), historyHours);
+  sendJson(res, 200, { ok: true, ...snapshot });
 }
 
 async function handleAdminListDecks(
@@ -1225,6 +1252,7 @@ async function handleSimCampaignProgress(
   res: ServerResponse,
   url: URL,
   cpRepo: ControlPlaneRepository,
+  config: AppConfig,
 ): Promise<void> {
   // Any valid runner credential may read (all hosts + the dashboard share a run).
   const bearerCtx = await verifyBearerAuth(req, cpRepo, 'sim:claim');
@@ -1239,12 +1267,54 @@ async function handleSimCampaignProgress(
     sendJson(res, 400, { ok: false, code: 'MISSING_CAMPAIGN', message: 'campaign id is required' });
     return;
   }
-  const progress = await cpRepo.campaignProgress(campaignId);
+  const progress = await cpRepo.campaignProgress(campaignId, config.now().getTime());
   if (!progress) {
     sendJson(res, 404, { ok: false, code: 'CAMPAIGN_NOT_FOUND', message: 'No such campaign' });
     return;
   }
   sendJson(res, 200, { ok: true, ...progress });
+}
+
+function parseWorkerDetails(data: {
+  sessionId?: unknown;
+  concurrency?: unknown;
+  workerVersion?: unknown;
+}):
+  | { ok: true; details: { sessionId?: string; concurrency?: number; workerVersion?: string } }
+  | { ok: false; message: string } {
+  const details: { sessionId?: string; concurrency?: number; workerVersion?: string } = {};
+  if (data.sessionId !== undefined) {
+    if (typeof data.sessionId !== 'string' || !data.sessionId.trim() || data.sessionId.length > 200) {
+      return { ok: false, message: 'sessionId must be a non-empty string of at most 200 characters' };
+    }
+    details.sessionId = data.sessionId;
+  }
+  if (data.concurrency !== undefined) {
+    if (!Number.isInteger(data.concurrency) || Number(data.concurrency) < 1 || Number(data.concurrency) > 1000) {
+      return { ok: false, message: 'concurrency must be an integer from 1 to 1000' };
+    }
+    details.concurrency = Number(data.concurrency);
+  }
+  if (data.workerVersion !== undefined) {
+    if (typeof data.workerVersion !== 'string' || !data.workerVersion.trim() || data.workerVersion.length > 200) {
+      return { ok: false, message: 'workerVersion must be a non-empty string of at most 200 characters' };
+    }
+    details.workerVersion = data.workerVersion;
+  }
+  return { ok: true, details };
+}
+
+async function touchWorkerActivity(
+  cpRepo: ControlPlaneRepository,
+  bearerCtx: BearerContext,
+  at: Date,
+): Promise<void> {
+  if (!hasScope(bearerCtx.scopes, 'sim:claim')) return;
+  try {
+    await cpRepo.touchWorkerSession(bearerCtx.credentialId, at);
+  } catch (error) {
+    console.error('[fleet] failed to record worker activity', error);
+  }
 }
 
 async function handleSimClaim(
@@ -1259,15 +1329,21 @@ async function handleSimClaim(
   }
   const body = await readBody(req, config.bodyLimitBytes);
   if (!body.ok) { sendJson(res, body.status, { ok: false, code: body.code, message: body.message }); return; }
-  let data: { campaignId?: string; count?: number; leaseDurationMs?: number };
-  try { data = JSON.parse(body.body.toString('utf8')) as { campaignId?: string; count?: number; leaseDurationMs?: number }; }
+  let data: {
+    campaignId?: string; count?: number; leaseDurationMs?: number;
+    sessionId?: string; concurrency?: number; workerVersion?: string;
+  };
+  try { data = JSON.parse(body.body.toString('utf8')); }
   catch { sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Invalid JSON' }); return; }
+  const workerDetails = parseWorkerDetails(data);
+  if (!workerDetails.ok) { sendJson(res, 400, { ok: false, code: 'INVALID_WORKER', message: workerDetails.message }); return; }
   const requestedCount = Number.isFinite(data.count) ? Math.trunc(data.count!) : 10;
   const count = Math.min(Math.max(requestedCount, 1), 100);
   const requestedDuration = Number.isFinite(data.leaseDurationMs) ? Math.trunc(data.leaseDurationMs!) : 5 * 60 * 1000;
   const leaseDurationMs = Math.min(Math.max(requestedDuration, 10_000), 60 * 60 * 1000);
+  const sessionId = await cpRepo.touchWorkerSession(bearerCtx.credentialId, config.now(), workerDetails.details);
   const jobs = await cpRepo.claimJobs(data.campaignId ?? null, count, bearerCtx.credentialId, leaseDurationMs);
-  sendJson(res, 200, { ok: true, jobs });
+  sendJson(res, 200, { ok: true, sessionId, jobs });
 }
 
 async function handleSimRelease(
@@ -1291,6 +1367,7 @@ async function handleSimRelease(
     return;
   }
   const ok = await cpRepo.releaseJob(data.jobId, data.leaseToken, bearerCtx.credentialId);
+  await touchWorkerActivity(cpRepo, bearerCtx, config.now());
   sendJson(res, ok ? 200 : 409, {
     ok,
     ...(ok ? {} : { code: 'INVALID_LEASE', message: 'Lease is missing or owned by another credential' }),
@@ -1310,26 +1387,40 @@ async function handleSimHeartbeat(
   }
   const body = await readBody(req, config.bodyLimitBytes);
   if (!body.ok) { sendJson(res, body.status, { ok: false, code: body.code, message: body.message }); return; }
-  let data: { jobId?: string; leaseToken?: string; leaseDurationMs?: number };
-  try { data = JSON.parse(body.body.toString('utf8')) as { jobId?: string; leaseToken?: string; leaseDurationMs?: number }; }
+  let data: {
+    jobId?: string; leaseToken?: string; leaseDurationMs?: number;
+    sessionId?: string; concurrency?: number; workerVersion?: string;
+  };
+  try { data = JSON.parse(body.body.toString('utf8')); }
   catch { sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Invalid JSON' }); return; }
-  if (!data.jobId || !data.leaseToken) {
-    sendJson(res, 400, { ok: false, code: 'MISSING_FIELDS', message: 'jobId and leaseToken are required' });
+  if (Boolean(data.jobId) !== Boolean(data.leaseToken)) {
+    sendJson(res, 400, { ok: false, code: 'MISSING_FIELDS', message: 'jobId and leaseToken must be supplied together' });
     return;
   }
-  const requestedDuration = Number.isFinite(data.leaseDurationMs) ? Math.trunc(data.leaseDurationMs!) : 5 * 60 * 1000;
-  const leaseDurationMs = Math.min(Math.max(requestedDuration, 10_000), 60 * 60 * 1000);
-  const expiresAt = await cpRepo.renewLease(
-    data.jobId,
-    data.leaseToken,
-    bearerCtx.credentialId,
-    leaseDurationMs,
-  );
-  if (!expiresAt) {
-    sendJson(res, 409, { ok: false, code: 'INVALID_LEASE', message: 'Lease is missing, expired, or owned by another credential' });
-    return;
+  const workerDetails = parseWorkerDetails(data);
+  if (!workerDetails.ok) { sendJson(res, 400, { ok: false, code: 'INVALID_WORKER', message: workerDetails.message }); return; }
+  const sessionId = await cpRepo.touchWorkerSession(bearerCtx.credentialId, config.now(), workerDetails.details);
+  let expiresAt: Date | null = null;
+  if (data.jobId && data.leaseToken) {
+    const requestedDuration = Number.isFinite(data.leaseDurationMs) ? Math.trunc(data.leaseDurationMs!) : 5 * 60 * 1000;
+    const leaseDurationMs = Math.min(Math.max(requestedDuration, 10_000), 60 * 60 * 1000);
+    expiresAt = await cpRepo.renewLease(
+      data.jobId,
+      data.leaseToken,
+      bearerCtx.credentialId,
+      leaseDurationMs,
+    );
+    if (!expiresAt) {
+      sendJson(res, 409, { ok: false, code: 'INVALID_LEASE', message: 'Lease is missing, expired, or owned by another credential', sessionId });
+      return;
+    }
   }
-  sendJson(res, 200, { ok: true, leaseExpiresAt: expiresAt.toISOString() });
+  sendJson(res, 200, {
+    ok: true,
+    sessionId,
+    heartbeatAt: config.now().toISOString(),
+    leaseExpiresAt: expiresAt?.toISOString() ?? null,
+  });
 }
 
 async function handleSimComplete(
@@ -1376,6 +1467,8 @@ async function handleSimComplete(
     sendJson(res, 409, { ok: false, code: 'INVALID_JOB', message: 'Job not found, not leased, or lease token mismatch' }); return;
   }
 
+  await touchWorkerActivity(cpRepo, bearerCtx, config.now());
+
   sendJson(res, completed.result.kind === 'created' ? 201 : 200, {
     ok: true,
     ...completed.result,
@@ -1403,6 +1496,7 @@ async function handleSimFail(
     sendJson(res, 400, { ok: false, code: 'MISSING_FIELDS', message: 'jobId and leaseToken are required' }); return;
   }
   const ok = await cpRepo.failJob(data.jobId, data.leaseToken, data.error ?? 'unknown error', bearerCtx.credentialId);
+  await touchWorkerActivity(cpRepo, bearerCtx, config.now());
   sendJson(res, ok ? 200 : 409, { ok });
 }
 

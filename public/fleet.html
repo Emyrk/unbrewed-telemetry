@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unbrewed Fleet Dashboard</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
+<style>
+  :root { color-scheme: dark; --bg:#0f1117; --panel:#1a1d27; --panel2:#22252f; --border:#2a2d37; --text:#e4e6eb; --muted:#8b8fa3; --accent:#6c63ff; --green:#4caf50; --yellow:#e6a817; --red:#e05252; --mono:ui-monospace,SFMono-Regular,Menlo,monospace; --sans:system-ui,sans-serif; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:var(--sans); min-height:100vh; }
+  .topbar { background:var(--panel); border-bottom:1px solid var(--border); padding:1rem 1.5rem; display:flex; align-items:center; justify-content:space-between; gap:1rem; }
+  .topbar h1 { margin:0; font-size:1.1rem; }
+  .links { display:flex; gap:1rem; align-items:center; }
+  a { color:var(--muted); text-decoration:none; font-size:.85rem; } a:hover { color:var(--text); }
+  main { max-width:1320px; margin:0 auto; padding:1.5rem; }
+  .lede { color:var(--muted); margin:.2rem 0 1.2rem; line-height:1.5; }
+  .summary { display:grid; grid-template-columns:repeat(5,minmax(140px,1fr)); gap:.8rem; margin-bottom:1rem; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:9px; padding:1rem; }
+  .value { font:600 1.45rem var(--mono); }
+  .label { color:var(--muted); font-size:.72rem; text-transform:uppercase; letter-spacing:.06em; margin-top:.3rem; }
+  .toolbar { display:flex; justify-content:space-between; align-items:center; gap:1rem; margin:1rem 0 .65rem; color:var(--muted); font:12px var(--mono); }
+  .toolbar label { display:flex; align-items:center; gap:.4rem; }
+  .table-wrap { overflow:auto; background:var(--panel); border:1px solid var(--border); border-radius:9px; }
+  table { width:100%; border-collapse:collapse; font-size:.82rem; min-width:1120px; }
+  th { text-align:left; color:var(--muted); font-size:.7rem; text-transform:uppercase; letter-spacing:.05em; padding:.7rem .75rem; border-bottom:2px solid var(--border); white-space:nowrap; }
+  td { padding:.75rem; border-bottom:1px solid var(--border); vertical-align:top; }
+  tr:last-child td { border-bottom:0; } tr:hover td { background:var(--panel2); }
+  .mono { font-family:var(--mono); } .muted { color:var(--muted); } .small { font-size:.72rem; }
+  .status { display:inline-flex; align-items:center; gap:.35rem; font:600 .72rem var(--mono); text-transform:uppercase; }
+  .dot { width:8px; height:8px; border-radius:50%; display:inline-block; }
+  .working .dot { background:var(--green); box-shadow:0 0 6px var(--green); } .working { color:var(--green); }
+  .idle .dot { background:var(--yellow); } .idle { color:var(--yellow); }
+  .offline .dot { background:var(--muted); } .offline { color:var(--muted); }
+  .meter { width:90px; height:5px; background:#101218; border-radius:4px; overflow:hidden; margin-top:.35rem; }
+  .meter span { display:block; height:100%; background:var(--accent); }
+  .campaign { display:block; white-space:nowrap; margin-bottom:.2rem; }
+  .empty,.error,.auth { text-align:center; padding:4rem 1rem; color:var(--muted); background:var(--panel); border:1px solid var(--border); border-radius:9px; }
+  .error { color:var(--red); } .auth a { display:inline-block; margin-top:1rem; background:var(--accent); color:white; padding:.55rem 1rem; border-radius:6px; }
+  @media(max-width:850px){ .summary{grid-template-columns:repeat(2,1fr)} .topbar{align-items:flex-start;flex-direction:column} }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <h1>Fleet Dashboard</h1>
+  <nav class="links"><span id="user" class="muted small"></span><a href="/admin">Admin</a><a href="/dashboard">Balance Dashboard</a></nav>
+</header>
+<main>
+  <p class="lede">Live simulation workers. A worker is online for 15 minutes after its last heartbeat or submission. Workers should heartbeat every 5 minutes, including while idle.</p>
+  <div id="app"><div class="empty">Loading fleet…</div></div>
+</main>
+<script>
+const esc = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const number = (value, digits=0) => Number(value || 0).toLocaleString(undefined, { maximumFractionDigits:digits, minimumFractionDigits:digits });
+function duration(ms) {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60), rem = minutes % 60;
+  if (hours < 24) return `${hours}h ${rem}m`;
+  return `${Math.floor(hours/24)}d ${hours%24}h`;
+}
+function render(data) {
+  const workers = data.workers || [];
+  const summaries = [
+    ['Live workers', data.liveWorkers],
+    ['Working / idle', `${data.workingWorkers} / ${data.idleWorkers}`],
+    ['Jobs / capacity', `${data.activeJobs} / ${data.totalConcurrency || '?'}`],
+    ['Games last hour', data.gamesLastHour],
+    ['Fleet utilization', data.totalConcurrency ? number(data.activeJobs / data.totalConcurrency * 100, 0) + '%' : 'unknown'],
+  ];
+  const cards = summaries.map(([label,value]) => `<div class="card"><div class="value">${esc(value)}</div><div class="label">${esc(label)}</div></div>`).join('');
+  const rows = workers.map(w => {
+    const capacity = w.reportedConcurrency == null ? '?' : w.reportedConcurrency;
+    const utilization = w.utilization == null ? 0 : Math.min(100, w.utilization * 100);
+    const campaigns = w.campaigns.length ? w.campaigns.map(c => `<span class="campaign">${esc(c.campaignName)} <span class="muted">(${c.jobs})</span></span>`).join('') : '<span class="muted">No active campaign</span>';
+    const jobs = w.jobIds.length ? `<span title="${esc(w.jobIds.join('\n'))}">${w.activeJobs} / ${esc(capacity)}</span>` : `0 / ${esc(capacity)}`;
+    return `<tr data-live="${w.live}">
+      <td><div><b>${esc(w.workerLabel)}</b></div><div class="mono muted small">${esc(w.sourceName)} · ${esc(w.credentialId.slice(0,18))}</div>${w.workerVersion?`<div class="mono muted small">${esc(w.workerVersion)}</div>`:''}</td>
+      <td><span class="status ${w.status}"><span class="dot"></span>${esc(w.status)}</span></td>
+      <td class="mono"><b>${w.gamesSubmitted}</b><div class="muted small">${w.gamesLastHour} last hour</div></td>
+      <td class="mono"><b>${number(w.gamesPerHour,1)}</b><div class="muted small">games/hr</div></td>
+      <td class="mono">${duration(w.sessionDurationMs)}<div class="muted small">since ${new Date(w.startedAt).toLocaleString()}</div></td>
+      <td>${campaigns}<div class="mono muted small" title="${esc(w.jobIds.join('\n'))}">${w.jobIds.length ? esc(w.jobIds[0].slice(0,18)) + (w.jobIds.length>1?' + more':'') : ''}</div></td>
+      <td class="mono">${jobs}<div class="meter"><span style="width:${utilization}%"></span></div></td>
+      <td class="mono">${duration(w.heartbeatAgeMs)} ago<div class="muted small">${new Date(w.lastHeartbeatAt).toLocaleTimeString()}</div></td>
+      <td class="mono">${w.averageGameDurationSeconds == null ? '—' : duration(w.averageGameDurationSeconds * 1000)}<div class="muted small">avg game</div></td>
+    </tr>`;
+  }).join('');
+  document.getElementById('app').innerHTML = `<div class="summary">${cards}</div>
+    <div class="toolbar"><span>Updated ${new Date(data.generatedAt).toLocaleTimeString()}</span><label><input id="show-offline" type="checkbox" checked> Show recent offline workers</label></div>
+    ${workers.length ? `<div class="table-wrap"><table><thead><tr><th>Worker</th><th>Status</th><th>Session games</th><th>Throughput</th><th>Session age</th><th>Campaign / job</th><th>Jobs / concurrency</th><th>Heartbeat</th><th>Game time</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="empty">No worker sessions in the last 24 hours.</div>'}`;
+  const toggle = document.getElementById('show-offline');
+  if (toggle) toggle.onchange = () => document.querySelectorAll('tr[data-live="false"]').forEach(row => row.style.display = toggle.checked ? '' : 'none');
+}
+async function tick() {
+  try {
+    const me = await fetch('/v1/admin/me');
+    if (me.status === 401) {
+      document.getElementById('app').innerHTML = '<div class="auth">Admin authentication is required.<br><a href="/auth/discord">Login with Discord</a></div>';
+      return;
+    }
+    if (!me.ok) throw new Error(`auth HTTP ${me.status}`);
+    const identity = await me.json();
+    document.getElementById('user').textContent = identity.discordUsername || '';
+    const response = await fetch('/v1/admin/fleet?historyHours=24');
+    if (!response.ok) throw new Error(`fleet HTTP ${response.status}`);
+    render(await response.json());
+  } catch (error) {
+    document.getElementById('app').innerHTML = `<div class="error">Could not load fleet: ${esc(error.message)}. Retrying…</div>`;
+  }
+}
+tick(); setInterval(tick, 10000);
+</script>
+</body>
+</html>
