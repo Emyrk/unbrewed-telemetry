@@ -118,6 +118,18 @@ export interface CreateCampaignArgs {
   createdBy: string;
 }
 
+export interface UpdateCampaignArgs {
+  name: string;
+  description?: string | null | undefined;
+  spec: unknown;
+  contentVersion?: string | null | undefined;
+}
+
+export type UpdateCampaignResult =
+  | { kind: 'updated'; campaign: SimCampaign; regeneratedJobs: number; requeuedFailedJobs: number }
+  | { kind: 'not_found' }
+  | { kind: 'leased_jobs'; leasedJobs: number };
+
 export interface CampaignGameSpec {
   spec?: unknown;
 }
@@ -524,6 +536,111 @@ export class ControlPlaneRepository {
         attempts: j.attempts, maxAttempts: j.max_attempts, lastError: j.last_error,
       })),
     };
+  }
+
+  /**
+   * Update the editable campaign definition and regenerate every unfinished job.
+   * Completed games are immutable (their job rows are already deleted). Failed
+   * jobs are reset to pending so an admin can repair a malformed campaign.
+   */
+  async updateCampaign(id: string, args: UpdateCampaignArgs): Promise<UpdateCampaignResult> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const campaignResult = await client.query<{
+        id: string; base_seed: string; total_games: number; completed_games: number;
+        failed_games: number; status: string; created_at: Date; created_by: string;
+        cancelled_at: Date | null; completed_at: Date | null;
+      }>(
+        `SELECT id, base_seed, total_games, completed_games, failed_games, status,
+                created_at, created_by, cancelled_at, completed_at
+         FROM sim_campaigns WHERE id = $1 FOR UPDATE`,
+        [id],
+      );
+      const campaign = campaignResult.rows[0];
+      if (!campaign) {
+        await client.query('ROLLBACK');
+        return { kind: 'not_found' };
+      }
+
+      await client.query(
+        `UPDATE sim_jobs
+         SET status = 'pending', lease_token = NULL, leased_by = NULL,
+             leased_at = NULL, lease_expires_at = NULL,
+             last_error = COALESCE(last_error, 'lease expired before campaign edit')
+         WHERE campaign_id = $1 AND status = 'leased' AND lease_expires_at < now()`,
+        [id],
+      );
+
+      const jobsResult = await client.query<{
+        id: string; game_index: number; seed: string; status: string;
+      }>(
+        `SELECT id, game_index, seed, status
+         FROM sim_jobs WHERE campaign_id = $1 ORDER BY game_index FOR UPDATE`,
+        [id],
+      );
+      const leasedJobs = jobsResult.rows.filter(job => job.status === 'leased').length;
+      if (leasedJobs > 0) {
+        await client.query('ROLLBACK');
+        return { kind: 'leased_jobs', leasedJobs };
+      }
+
+      const jobIds = jobsResult.rows.map(job => job.id);
+      const resolvedSpecs = jobsResult.rows.map(job => JSON.stringify(resolveCampaignJobSpec(args.spec, job.seed)));
+      const requeuedFailedJobs = jobsResult.rows.filter(job => job.status === 'failed').length;
+
+      if (jobIds.length > 0) {
+        await client.query(
+          `UPDATE sim_jobs AS job
+           SET spec = updates.spec::jsonb, status = 'pending', attempts = 0,
+               lease_token = NULL, leased_by = NULL, leased_at = NULL,
+               lease_expires_at = NULL, last_error = NULL
+           FROM unnest($2::text[], $3::text[]) AS updates(id, spec)
+           WHERE job.campaign_id = $1 AND job.id = updates.id`,
+          [id, jobIds, resolvedSpecs],
+        );
+      }
+
+      const failedGames = Math.max(0, campaign.failed_games - requeuedFailedJobs);
+      const status = jobIds.length > 0 ? 'active' : campaign.status;
+      const completedAt = jobIds.length > 0 ? null : campaign.completed_at;
+      const updated = await client.query<{
+        id: string; name: string; description: string | null; spec: unknown;
+        base_seed: string; content_version: string | null;
+        total_games: number; completed_games: number; failed_games: number;
+        status: string; created_at: Date; created_by: string;
+        cancelled_at: Date | null; completed_at: Date | null;
+      }>(
+        `UPDATE sim_campaigns
+         SET name = $2, description = $3, spec = $4::jsonb, content_version = $5,
+             failed_games = $6, status = $7, completed_at = $8,
+             cancelled_at = CASE WHEN $7 = 'active' THEN NULL ELSE cancelled_at END
+         WHERE id = $1
+         RETURNING *`,
+        [id, args.name, args.description ?? null, JSON.stringify(args.spec),
+         args.contentVersion ?? null, failedGames, status, completedAt],
+      );
+      await client.query('COMMIT');
+      const row = updated.rows[0]!;
+      return {
+        kind: 'updated',
+        regeneratedJobs: jobIds.length,
+        requeuedFailedJobs,
+        campaign: {
+          id: row.id, name: row.name, description: row.description, spec: row.spec,
+          baseSeed: row.base_seed, contentVersion: row.content_version,
+          totalGames: row.total_games, completedGames: row.completed_games, failedGames: row.failed_games,
+          status: row.status, createdAt: row.created_at.toISOString(), createdBy: row.created_by,
+          cancelledAt: row.cancelled_at?.toISOString() ?? null,
+          completedAt: row.completed_at?.toISOString() ?? null,
+        },
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async cancelCampaign(id: string): Promise<boolean> {

@@ -269,6 +269,78 @@ describeDb('control-plane repository with postgres', () => {
       expect(Number(count.rows[0]?.count ?? 0)).toBe(10_000);
     });
 
+    it('updates campaign JSON, regenerates unfinished jobs, and requeues terminal failures', async () => {
+      const campaign = await repo.createCampaign({
+        name: 'Broken Campaign',
+        spec: { maps: ['mended-drum'] },
+        baseSeed: 700,
+        games: [{}, {}],
+        createdBy: 'admin',
+      });
+
+      const [failedJob] = await repo.claimJobs(campaign.id, 1, 'runner');
+      await pool.query(
+        `UPDATE sim_jobs SET status = 'failed', attempts = max_attempts,
+                lease_token = NULL, leased_by = NULL, leased_at = NULL,
+                lease_expires_at = NULL, last_error = 'missing format'
+         WHERE id = $1`,
+        [failedJob!.id],
+      );
+      await pool.query(
+        `UPDATE sim_campaigns SET failed_games = 1, status = 'completed', completed_at = now()
+         WHERE id = $1`,
+        [campaign.id],
+      );
+
+      const result = await repo.updateCampaign(campaign.id, {
+        name: 'Repaired Campaign',
+        description: 'Added the missing runner format',
+        contentVersion: '0.10.0',
+        spec: { format: 'duel', maps: ['mended-drum'] },
+      });
+
+      expect(result.kind).toBe('updated');
+      if (result.kind !== 'updated') return;
+      expect(result.regeneratedJobs).toBe(2);
+      expect(result.requeuedFailedJobs).toBe(1);
+      expect(result.campaign).toMatchObject({
+        name: 'Repaired Campaign',
+        failedGames: 0,
+        status: 'active',
+        completedAt: null,
+      });
+
+      const detail = await repo.getCampaign(campaign.id);
+      expect(detail!.jobs).toHaveLength(2);
+      for (const job of detail!.jobs) {
+        expect(job.status).toBe('pending');
+        expect(job.attempts).toBe(0);
+        expect(job.lastError).toBeNull();
+        expect(job.spec).toMatchObject({ format: 'duel', map: 'mended-drum' });
+      }
+    });
+
+    it('refuses to edit a campaign while a worker holds a lease', async () => {
+      const campaign = await repo.createCampaign({
+        name: 'Busy Campaign',
+        spec: { format: 'duel' },
+        games: [{}],
+        createdBy: 'admin',
+      });
+      await repo.claimJobs(campaign.id, 1, 'runner');
+
+      const result = await repo.updateCampaign(campaign.id, {
+        name: 'Should Not Change',
+        spec: { format: 'team-2v2' },
+      });
+      expect(result).toEqual({ kind: 'leased_jobs', leasedJobs: 1 });
+
+      const detail = await repo.getCampaign(campaign.id);
+      expect(detail!.name).toBe('Busy Campaign');
+      expect(detail!.spec).toEqual({ format: 'duel' });
+      expect(detail!.jobs[0]!.status).toBe('leased');
+    });
+
     it('claims jobs with SKIP LOCKED exclusivity', async () => {
       const campaign = await repo.createCampaign({
         name: 'Claim Test',

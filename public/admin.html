@@ -109,6 +109,13 @@
     #campaign-form-status { min-height: 1rem; }
     @media (max-width: 700px) { .campaign-grid { grid-template-columns: 1fr; } .campaign-field.wide { grid-column: auto; } }
 
+    .campaign-json-editor { width: 100%; min-height: 260px; margin-top: 0.8rem; font-family: var(--mono); font-size: 0.8rem; line-height: 1.45; padding: 0.75rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: #b9f6ca; resize: vertical; }
+    .campaign-json-editor:focus { outline: none; border-color: var(--accent); }
+    .campaign-detail-actions { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin: 0.7rem 0; }
+    .campaign-detail-status { min-height: 1rem; }
+    details.campaign-jobs-json { margin: 0.8rem 0; }
+    details.campaign-jobs-json summary { cursor: pointer; color: var(--text-muted); font-size: 0.82rem; }
+
     .confirm-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 100; }
     .confirm-box { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1.5rem; max-width: 440px; width: 90%; }
     .confirm-box h3 { font-size: 1rem; margin-bottom: 0.5rem; }
@@ -895,21 +902,80 @@
       loadCampaigns();
     }
 
-    async function viewCampaign(id) {
-      const { data } = await api('GET', `/v1/admin/campaign?id=${id}`);
+    function editableCampaignJson(campaign) {
+      return {
+        name: campaign.name,
+        description: campaign.description,
+        contentVersion: campaign.contentVersion,
+        spec: campaign.spec,
+      };
+    }
+
+    async function viewCampaign(id, message = '') {
+      const { data } = await api('GET', `/v1/admin/campaign?id=${encodeURIComponent(id)}`);
       if (!data.ok) return;
       const c = data.campaign;
-      let html = `<h3>${esc(c.name)}</h3><div class="muted" style="margin:0.5rem 0">Status: ${c.status} | ${c.completedGames}/${c.totalGames} completed, ${c.failedGames} failed, ${c.remainingJobs} remaining | Base seed: ${c.baseSeed}</div>`;
+      let jobsTable = '';
       if (c.jobs && c.jobs.length) {
-        html += `<table class="admin-table"><thead><tr><th>#</th><th>Seed</th><th>Status</th><th>Attempts</th><th>Error</th></tr></thead><tbody>`;
+        jobsTable = `<table class="admin-table"><thead><tr><th>#</th><th>Seed</th><th>Status</th><th>Attempts</th><th>Error</th></tr></thead><tbody>`;
         for (const j of c.jobs) {
-          html += `<tr><td class="mono">${j.gameIndex}</td><td class="mono">${j.seed}</td><td>${j.status}</td><td class="mono">${j.attempts}/${j.maxAttempts}</td><td class="muted">${esc(j.lastError||'')}</td></tr>`;
+          jobsTable += `<tr><td class="mono">${j.gameIndex}</td><td class="mono">${j.seed}</td><td>${j.status}</td><td class="mono">${j.attempts}/${j.maxAttempts}</td><td class="muted">${esc(j.lastError||'')}</td></tr>`;
         }
-        html += '</tbody></table>';
-      } else { html += '<div class="muted" style="margin-top:0.5rem">All jobs completed or deleted.</div>'; }
-      html += `<button class="btn btn-ghost btn-sm" style="margin-top:0.5rem" onclick="document.getElementById('campaign-detail').style.display='none'">Close</button>`;
-      document.getElementById('campaign-detail').innerHTML = html;
-      document.getElementById('campaign-detail').style.display = '';
+        jobsTable += '</tbody></table>';
+      } else {
+        jobsTable = '<div class="muted" style="margin-top:0.5rem">All jobs completed or deleted.</div>';
+      }
+
+      const detail = document.getElementById('campaign-detail');
+      detail.innerHTML = `
+        <h3>${esc(c.name)}</h3>
+        <div class="muted" style="margin:0.5rem 0">ID: <span class="mono">${esc(c.id)}</span> | Status: ${esc(c.status)} | ${c.completedGames}/${c.totalGames} completed, ${c.failedGames} failed, ${c.remainingJobs} remaining | Base seed: ${esc(c.baseSeed)}</div>
+        <div class="campaign-help">Edit the campaign definition below. Saving regenerates every unfinished job from this spec, resets terminal failures to pending, and leaves completed games untouched. Stop workers first; campaigns with active leases cannot be edited.</div>
+        <textarea id="campaign-detail-json" class="campaign-json-editor" spellcheck="false"></textarea>
+        <div class="campaign-detail-actions">
+          <button class="btn btn-primary btn-sm" onclick="saveCampaignJson('${esc(c.id)}')">Save JSON &amp; Requeue</button>
+          <button class="btn btn-ghost btn-sm" onclick="viewCampaign('${esc(c.id)}')">Reload</button>
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('campaign-detail').style.display='none'">Close</button>
+          <span id="campaign-detail-status" class="campaign-detail-status"></span>
+        </div>
+        <details class="campaign-jobs-json">
+          <summary>Resolved job JSON (${c.jobs?.length || 0} shown)</summary>
+          <textarea id="campaign-jobs-json" class="campaign-json-editor" readonly></textarea>
+        </details>
+        ${jobsTable}`;
+      document.getElementById('campaign-detail-json').value = JSON.stringify(editableCampaignJson(c), null, 2);
+      document.getElementById('campaign-jobs-json').value = JSON.stringify(c.jobs || [], null, 2);
+      const status = document.getElementById('campaign-detail-status');
+      status.textContent = message;
+      status.className = message ? 'success-msg campaign-detail-status' : 'campaign-detail-status';
+      detail.style.display = '';
+    }
+
+    async function saveCampaignJson(id) {
+      const statusEl = document.getElementById('campaign-detail-status');
+      let definition;
+      try {
+        definition = JSON.parse(document.getElementById('campaign-detail-json').value);
+      } catch {
+        statusEl.textContent = 'Campaign JSON is invalid';
+        statusEl.className = 'error-msg campaign-detail-status';
+        return;
+      }
+      if (!definition || Array.isArray(definition) || typeof definition !== 'object' || !definition.name || !definition.spec || Array.isArray(definition.spec) || typeof definition.spec !== 'object') {
+        statusEl.textContent = 'JSON requires name and an object spec';
+        statusEl.className = 'error-msg campaign-detail-status';
+        return;
+      }
+      statusEl.textContent = 'Saving…';
+      statusEl.className = 'success-msg campaign-detail-status';
+      const { status, data } = await api('PATCH', '/v1/admin/campaign', { campaignId: id, ...definition });
+      if (status !== 200 || !data.ok) {
+        statusEl.textContent = data.message || 'Campaign update failed';
+        statusEl.className = 'error-msg campaign-detail-status';
+        return;
+      }
+      await loadCampaigns();
+      await viewCampaign(id, `Saved; regenerated ${data.regeneratedJobs} unfinished job(s), including ${data.requeuedFailedJobs} failed job(s)`);
     }
 
     // ----- Helpers -----

@@ -100,6 +100,40 @@ describeDb('telemetry api with postgres', () => {
     expect(await allowed.json()).toMatchObject({ ok: true, sources: [] });
   });
 
+  it('lets an admin edit campaign JSON and regenerates unfinished jobs', async () => {
+    const session = await cpRepo.createSession({ discordId: 'admin-123', discordUsername: 'test-admin' });
+    const campaign = await cpRepo.createCampaign({
+      name: 'Malformed API campaign',
+      spec: { maps: ['mended-drum'] },
+      baseSeed: 800,
+      games: [{}, {}],
+      createdBy: 'test-admin',
+    });
+
+    const response = await fetch(`${baseUrl}/v1/admin/campaign`, {
+      method: 'PATCH',
+      headers: { cookie: `session=${session.id}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        campaignId: campaign.id,
+        name: 'Fixed API campaign',
+        description: 'Restored the runner format',
+        spec: { format: 'duel', maps: ['mended-drum'] },
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      kind: 'updated',
+      regeneratedJobs: 2,
+      requeuedFailedJobs: 0,
+      campaign: { name: 'Fixed API campaign', status: 'active' },
+    });
+
+    const detail = await cpRepo.getCampaign(campaign.id);
+    expect(detail!.jobs).toHaveLength(2);
+    expect(detail!.jobs[0]!.spec).toMatchObject({ format: 'duel', map: 'mended-drum' });
+  });
+
   it('uses a named bearer credential as the trusted game source', async () => {
     const source = await cpRepo.createSource('runner-alpha', null, 'test-admin');
     const credential = await cpRepo.createCredential(source.id, 'games', ['games:submit'], 'test-admin');

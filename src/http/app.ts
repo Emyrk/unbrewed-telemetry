@@ -195,6 +195,10 @@ async function handleRequest(
     await handleAdminGetCampaign(req, url, res, cpRepo, config);
     return;
   }
+  if (req.method === 'PATCH' && url.pathname === '/v1/admin/campaign') {
+    await handleAdminUpdateCampaign(req, res, cpRepo, config);
+    return;
+  }
   if (req.method === 'POST' && url.pathname === '/v1/admin/campaign/cancel') {
     await handleAdminCancelCampaign(req, res, cpRepo, config);
     return;
@@ -1022,6 +1026,64 @@ async function handleAdminGetCampaign(
   const campaign = await cpRepo.getCampaign(id);
   if (!campaign) { sendJson(res, 404, { ok: false, code: 'NOT_FOUND', message: 'Campaign not found' }); return; }
   sendJson(res, 200, { ok: true, campaign });
+}
+
+async function handleAdminUpdateCampaign(
+  req: IncomingMessage,
+  res: ServerResponse,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<void> {
+  const admin = await verifyAdminAuth(req, cpRepo, config);
+  if (!admin) { sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Admin authentication required' }); return; }
+  const body = await readBody(req, config.bodyLimitBytes);
+  if (!body.ok) { sendJson(res, body.status, { ok: false, code: body.code, message: body.message }); return; }
+  let data: {
+    campaignId?: string;
+    name?: string;
+    description?: string | null;
+    spec?: unknown;
+    contentVersion?: string | null;
+  };
+  try { data = JSON.parse(body.body.toString('utf8')); }
+  catch { sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Invalid JSON' }); return; }
+  if (!data.campaignId || !data.name?.trim() || data.spec === undefined || !data.spec || Array.isArray(data.spec) || typeof data.spec !== 'object') {
+    sendJson(res, 400, {
+      ok: false,
+      code: 'INVALID_CAMPAIGN',
+      message: 'campaignId, name, and an object spec are required',
+    });
+    return;
+  }
+
+  try {
+    const result = await cpRepo.updateCampaign(data.campaignId, {
+      name: data.name.trim(),
+      description: data.description,
+      spec: data.spec,
+      contentVersion: data.contentVersion,
+    });
+    if (result.kind === 'not_found') {
+      sendJson(res, 404, { ok: false, code: 'NOT_FOUND', message: 'Campaign not found' });
+      return;
+    }
+    if (result.kind === 'leased_jobs') {
+      sendJson(res, 409, {
+        ok: false,
+        code: 'CAMPAIGN_BUSY',
+        message: `Stop workers and wait for ${result.leasedJobs} active lease(s) to expire before editing`,
+        leasedJobs: result.leasedJobs,
+      });
+      return;
+    }
+    sendJson(res, 200, { ok: true, ...result });
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('campaign spec:')) {
+      sendJson(res, 400, { ok: false, code: 'INVALID_CAMPAIGN_SPEC', message: error.message });
+      return;
+    }
+    throw error;
+  }
 }
 
 async function handleAdminCancelCampaign(
