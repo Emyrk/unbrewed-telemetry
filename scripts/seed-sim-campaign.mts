@@ -64,9 +64,22 @@ interface JobRow {
   spec: unknown;
 }
 
-/** duel spec: seat0 = {heroA, pilotA}, seat1 = {heroB, pilotB}. */
+/**
+ * duel spec: seat0 = {heroA, pilotA}, seat1 = {heroB, pilotB}.
+ *
+ * DIALECT NOTE (for the #250 reconciliation): Emyrk's worker (PR #250,
+ * scripts/sim-game.ts `ExactGameSpec`) REQUIRES a top-level `format` field
+ * ('duel' | 'team-2v2' | '2v2') — without it his runner throws
+ * `Unsupported format "undefined"` and terminally-fails the job (the collision we
+ * hit). So every spec here carries `format: 'duel'`. His runner resolves pilots
+ * with the same `parseSimulationDifficulty`, so our ARM pilots (`expert(iters)` /
+ * `hard(simB)`) run cleanly on his side too; GRID variant pilots (`mc(sims-512)`,
+ * `mc(eps-5)`, …) do NOT resolve for him — grid is publish-only (completed by the
+ * engine boot flush from banked results). Cross-fleet safety therefore relies on
+ * BOTH fleets PINNING to their own campaigns (SIM_CAMPAIGN_ID); see below.
+ */
 function duel(heroA: string, pilotA: string, heroB: string, pilotB: string): Record<string, unknown> {
-  return { map: MAP, teams: [{ seats: [{ deck: heroA, pilot: pilotA }] }, { seats: [{ deck: heroB, pilot: pilotB }] }] };
+  return { format: 'duel', map: MAP, teams: [{ seats: [{ deck: heroA, pilot: pilotA }] }, { seats: [{ deck: heroB, pilot: pilotB }] }] };
 }
 
 /** Arm jobs: seed 20000 + global index; the ISMCTS pilot alternates seats per game.
@@ -126,6 +139,28 @@ async function upsertCampaign(pool: Pool, name: string, spec: unknown, baseSeed:
   return id;
 }
 
+/**
+ * Reset terminally-FAILED jobs back to pending (idempotent recovery). A foreign
+ * fleet that mis-claimed our jobs and failed them (e.g. Emyrk's #250 worker
+ * failing our grid jobs on the format/pilot dialect) leaves `status='failed'`
+ * rows that a plain insert (ON CONFLICT DO NOTHING) will NOT resurrect — so we
+ * explicitly requeue them and un-count them from the campaign's failed tally.
+ */
+async function resetFailedJobs(pool: Pool, campaignId: string): Promise<number> {
+  const res = await pool.query(
+    `UPDATE sim_jobs
+     SET status = 'pending', lease_token = NULL, leased_by = NULL, leased_at = NULL,
+         lease_expires_at = NULL, attempts = 0, last_error = NULL
+     WHERE campaign_id = $1 AND status = 'failed'`,
+    [campaignId],
+  );
+  const n = res.rowCount ?? 0;
+  if (n > 0) {
+    await pool.query('UPDATE sim_campaigns SET failed_games = GREATEST(0, failed_games - $2), status = $3, completed_at = NULL WHERE id = $1', [campaignId, n, 'active']);
+  }
+  return n;
+}
+
 /** Insert jobs that have neither a pending job nor a completed game yet. */
 async function insertJobs(pool: Pool, campaignId: string, jobs: JobRow[]): Promise<number> {
   if (jobs.length === 0) return 0;
@@ -160,16 +195,26 @@ async function main(): Promise<void> {
       { name: 'arm5', baseSeed: 20_000n, jobs: armJobs('arm5', ARM5_ITERS, ARM5_SIMB, ARM_GAMES), spec: { kind: 'arm', a: expert(ARM5_ITERS), b: hard(ARM5_SIMB) } },
       { name: 'mirror', baseSeed: 20_000n, jobs: armJobs('mirror', MIRROR_ITERS, 0, MIRROR_GAMES, true), spec: { kind: 'mirror', a: expert(MIRROR_ITERS) } },
     ];
+    const ids: string[] = [];
     for (const s of steps) {
       const id = await upsertCampaign(pool, s.name, s.spec, s.baseSeed, s.jobs.length);
+      const reset = await resetFailedJobs(pool, id);
       const ins = await insertJobs(pool, id, s.jobs);
-      console.log(`  ${s.name.padEnd(7)} campaign ${id} · ${s.jobs.length} planned · ${ins} job(s) inserted this run`);
+      ids.push(id);
+      console.log(`  ${s.name.padEnd(7)} campaign ${id} · ${s.jobs.length} planned · ${ins} inserted · ${reset} failed→pending`);
     }
+    const pin = ids.join(',');
     console.log('');
-    console.log('Campaigns seeded. Start the fleet in JOB MODE with a per-host key:');
-    console.log('  SIM_HOST_KEY=<ubk_…> TELEMETRY_URL=<origin> JOBS=22 bash scripts/sim-join.sh');
+    console.log('Campaigns seeded. PIN the fleet to OUR campaigns so it never claims another');
+    console.log("team's work on the shared control plane (paste this into the fleet command):");
+    console.log('');
+    console.log(`  export SIM_CAMPAIGN_ID=${pin}`);
+    console.log('');
+    console.log('Then start the fleet in JOB MODE:');
+    console.log('  SIM_HOST_KEY=<ubk_…> TELEMETRY_URL=<origin> SIM_CAMPAIGN_ID=$SIM_CAMPAIGN_ID \\');
+    console.log('    BRANCH=<campaign branch> JOBS=22 bash scripts/sim-join.sh');
     console.log('The fleet flushes its local store (grid backfill + solo games) onto these');
-    console.log('jobs on boot, then runs the remaining arm games.');
+    console.log('jobs on boot, then runs the remaining arm games — only within these campaigns.');
   } finally {
     await pool.end();
   }
