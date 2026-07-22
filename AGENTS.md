@@ -74,6 +74,7 @@ Recommended endpoints:
 - `POST /v1/sim/heartbeat` renews an unexpired lease owned by the same runner credential.
 - `POST /v1/sim/complete` atomically ingests a completed game, updates campaign counters, and deletes the transient job row (`sim:complete` scope).
 - `POST /v1/sim/fail` requeues or terminally fails a leased job.
+- `GET /v1/sim/campaigns/{id}/progress` (any `sim:claim` credential) returns a campaign's per-pilot win rate with a Wilson 95% CI, plus completed/total/failed and a `mixedContentVersion` flag. Added for the unbrewed-engine #248 "ISMCTS road-to-expert" report, which needs a campaign-scoped win-rate view the deck-balance stats do not answer. Reads existing `games`/`game_seats`, no new tables.
 - `/v1/admin/campaigns` and related admin routes create and inspect deterministic campaigns. Campaigns may use `gameCount` for large repeated runs or explicit per-game overrides. Shared specs use checkbox-style `maps` pools and per-seat `decks`/`pilots` pools with stable hero IDs; the service deterministically resolves pools into exact job specs. `swapStartingPlayer` is first-class, and omitted base seeds default to Unix nanoseconds returned as decimal strings.
 - Optional later: `POST /v1/games/batch` for AI lab backfills or simulations.
 
@@ -307,6 +308,8 @@ npm start
 ```
 
 `npm run db:seed` fills the local database with deterministic synthetic games (including fabricated `telemetry.cardsPlayed`) so the dashboard has something to render. Control volume/seed with `SEED_GAMES` and `SEED`. Seeded submissions use `TELEMETRY_SOURCE` as their `source`, defaulting to `<hostname>:<user>:lab` when unset. It writes through the repository, so the server need not be running. Never point it at production.
+
+`npm run sim:seed-credentials -- <host> [<host> ...]` provisions per-host sim-fleet bearer credentials **without** the Discord admin UI or Railway env access (for #248). It creates the `sim-fleet` telemetry source and one credential per host (scopes `sim:claim`, `sim:complete`, `games:submit`) directly in the DB, and writes the plaintext `ubk_…` keys to `sim-credentials.local.json` (gitignored, mode 600) for out-of-band distribution. Only scrypt hashes live in Postgres; **no secret ever touches the repo, a PR, or an issue.**
 
 Other useful commands:
 

@@ -201,6 +201,11 @@ async function handleRequest(
   }
 
   // ---- Runner sim endpoints (bearer auth) ----
+  // Campaign win-rate view for the #248 ISMCTS road-to-expert report.
+  if (req.method === 'GET' && url.pathname.startsWith('/v1/sim/campaigns/') && url.pathname.endsWith('/progress')) {
+    await handleSimCampaignProgress(req, res, url, cpRepo);
+    return;
+  }
   if (req.method === 'POST' && url.pathname === '/v1/sim/claim') {
     await handleSimClaim(req, res, cpRepo, config);
     return;
@@ -1036,6 +1041,33 @@ async function handleAdminCancelCampaign(
 // ============================================================================
 // Runner simulation endpoints (bearer auth)
 // ============================================================================
+
+async function handleSimCampaignProgress(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  cpRepo: ControlPlaneRepository,
+): Promise<void> {
+  // Any valid runner credential may read (all hosts + the dashboard share a run).
+  const bearerCtx = await verifyBearerAuth(req, cpRepo, 'sim:claim');
+  if (!bearerCtx) {
+    sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Valid API key with sim:claim scope required' });
+    return;
+  }
+  // /v1/sim/campaigns/<id>/progress
+  const parts = url.pathname.split('/');
+  const campaignId = decodeURIComponent(parts[4] ?? '');
+  if (!campaignId) {
+    sendJson(res, 400, { ok: false, code: 'MISSING_CAMPAIGN', message: 'campaign id is required' });
+    return;
+  }
+  const progress = await cpRepo.campaignProgress(campaignId);
+  if (!progress) {
+    sendJson(res, 404, { ok: false, code: 'CAMPAIGN_NOT_FOUND', message: 'No such campaign' });
+    return;
+  }
+  sendJson(res, 200, { ok: true, ...progress });
+}
 
 async function handleSimClaim(
   req: IncomingMessage,
