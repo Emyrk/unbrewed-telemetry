@@ -168,6 +168,27 @@
     .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
     .tab:hover { color: var(--text); }
     .tab-panel { display: none; }
+    .fleet-lede { color: var(--text-muted); margin: 0 0 1rem; line-height: 1.5; }
+    .fleet-summary { display: grid; grid-template-columns: repeat(5, minmax(130px, 1fr)); gap: 0.8rem; margin-bottom: 1rem; }
+    .fleet-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; }
+    .fleet-value { font: 600 1.35rem var(--mono); }
+    .fleet-label { color: var(--text-muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 0.3rem; }
+    .fleet-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 1rem; margin: 1rem 0 0.65rem; color: var(--text-muted); font: 0.72rem var(--mono); }
+    .fleet-toolbar label { display: flex; align-items: center; gap: 0.4rem; }
+    .fleet-table-wrap { overflow: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+    .fleet-table { min-width: 1120px; }
+    .fleet-status { display: inline-flex; align-items: center; gap: 0.35rem; font: 600 0.72rem var(--mono); text-transform: uppercase; }
+    .fleet-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .fleet-working { color: var(--success); }
+    .fleet-working .fleet-dot { background: var(--success); box-shadow: 0 0 6px var(--success); }
+    .fleet-idle { color: var(--warn); }
+    .fleet-idle .fleet-dot { background: var(--warn); }
+    .fleet-offline { color: var(--text-muted); }
+    .fleet-offline .fleet-dot { background: var(--text-muted); }
+    .fleet-meter { width: 90px; height: 5px; background: var(--bg); border-radius: 4px; overflow: hidden; margin-top: 0.35rem; }
+    .fleet-meter span { display: block; height: 100%; background: var(--accent); }
+    .fleet-campaign { display: block; white-space: nowrap; margin-bottom: 0.2rem; }
+    @media (max-width: 850px) { .fleet-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
     .tab-panel.active { display: block; }
   </style>
 </head>
@@ -176,7 +197,6 @@
     <h1>Unbrewed Admin</h1>
     <div class="links">
       <span id="user-info" class="muted"></span>
-      <a href="/fleet">Fleet</a>
       <a href="/dashboard">← Dashboard</a>
       <button class="link" id="logout-btn" style="display:none" onclick="doLogout()">Logout</button>
     </div>
@@ -192,6 +212,7 @@
       <div class="tab-bar">
         <button class="tab active" data-tab="decks">Decks</button>
         <button class="tab" data-tab="sources">Sources &amp; Keys</button>
+        <button class="tab" data-tab="fleet">Fleet</button>
         <button class="tab" data-tab="campaigns">Campaigns</button>
       </div>
 
@@ -337,6 +358,12 @@
           <div id="campaign-detail" style="display:none"></div>
         </div>
       </div>
+
+      <!-- Fleet tab -->
+      <div id="tab-fleet" class="tab-panel">
+        <p class="fleet-lede">Live simulation workers. A worker is online for 15 minutes after its last heartbeat or submission. Workers heartbeat every 5 minutes, including while idle.</p>
+        <div id="fleet-dashboard"><div class="empty-state">Open the Fleet tab to load workers.</div></div>
+      </div>
     </div>
   </div>
 
@@ -378,6 +405,7 @@
         document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
         document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
         tab.classList.add('active');
+        if (tab.dataset.tab === 'fleet') void loadFleet();
         document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
       });
     });
@@ -1320,6 +1348,73 @@
       await viewCampaign(id, `Saved; regenerated ${data.regeneratedJobs} unfinished job(s), including ${data.requeuedFailedJobs} failed job(s)`);
     }
 
+    // ----- Fleet -----
+    function fleetNumber(value, digits = 0) {
+      return Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits });
+    }
+
+    function fleetDuration(ms) {
+      const seconds = Math.max(0, Math.floor(ms / 1000));
+      if (seconds < 60) return `${seconds}s`;
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) return `${minutes}m`;
+      const hours = Math.floor(minutes / 60);
+      if (hours < 24) return `${hours}h ${minutes % 60}m`;
+      return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+    }
+
+    async function loadFleet() {
+      const container = document.getElementById('fleet-dashboard');
+      try {
+        const { status, data } = await api('GET', '/v1/admin/fleet?historyHours=24');
+        if (status !== 200 || !data.ok) throw new Error(data.message || `HTTP ${status}`);
+        renderFleet(data);
+      } catch (error) {
+        container.innerHTML = `<div class="empty-state error-msg">Could not load fleet: ${esc(error instanceof Error ? error.message : String(error))}</div>`;
+      }
+    }
+
+    function renderFleet(data) {
+      const container = document.getElementById('fleet-dashboard');
+      const workers = data.workers || [];
+      const summaries = [
+        ['Live workers', data.liveWorkers],
+        ['Working / idle', `${data.workingWorkers} / ${data.idleWorkers}`],
+        ['Jobs / capacity', `${data.activeJobs} / ${data.totalConcurrency || '?'}`],
+        ['Games last hour', data.gamesLastHour],
+        ['Fleet utilization', data.totalConcurrency ? fleetNumber(data.activeJobs / data.totalConcurrency * 100) + '%' : 'unknown'],
+      ];
+      const cards = summaries.map(([label, value]) => `<div class="fleet-card"><div class="fleet-value">${esc(value)}</div><div class="fleet-label">${esc(label)}</div></div>`).join('');
+      const rows = workers.map(worker => {
+        const capacity = worker.reportedConcurrency == null ? '?' : worker.reportedConcurrency;
+        const utilization = worker.utilization == null ? 0 : Math.min(100, worker.utilization * 100);
+        const campaigns = worker.campaigns.length
+          ? worker.campaigns.map(campaign => `<span class="fleet-campaign">${esc(campaign.campaignName)} <span class="muted">(${campaign.jobs})</span></span>`).join('')
+          : '<span class="muted">No active campaign</span>';
+        const jobs = worker.jobIds.length
+          ? `<span title="${esc(worker.jobIds.join('\n'))}">${worker.activeJobs} / ${esc(capacity)}</span>`
+          : `0 / ${esc(capacity)}`;
+        return `<tr data-fleet-live="${worker.live}">
+          <td><div><b>${esc(worker.workerLabel)}</b></div><div class="mono muted">${esc(worker.sourceName)} · ${esc(worker.credentialId.slice(0, 18))}</div>${worker.workerVersion ? `<div class="mono muted">${esc(worker.workerVersion)}</div>` : ''}</td>
+          <td><span class="fleet-status fleet-${esc(worker.status)}"><span class="fleet-dot"></span>${esc(worker.status)}</span></td>
+          <td class="mono"><b>${worker.gamesSubmitted}</b><div class="muted">${worker.gamesLastHour} last hour</div></td>
+          <td class="mono"><b>${fleetNumber(worker.gamesPerHour, 1)}</b><div class="muted">games/hr</div></td>
+          <td class="mono">${fleetDuration(worker.sessionDurationMs)}<div class="muted">since ${new Date(worker.startedAt).toLocaleString()}</div></td>
+          <td>${campaigns}<div class="mono muted" title="${esc(worker.jobIds.join('\n'))}">${worker.jobIds.length ? esc(worker.jobIds[0].slice(0, 18)) + (worker.jobIds.length > 1 ? ' + more' : '') : ''}</div></td>
+          <td class="mono">${jobs}<div class="fleet-meter"><span style="width:${utilization}%"></span></div></td>
+          <td class="mono">${fleetDuration(worker.heartbeatAgeMs)} ago<div class="muted">${new Date(worker.lastHeartbeatAt).toLocaleTimeString()}</div></td>
+          <td class="mono">${worker.averageGameDurationSeconds == null ? '—' : fleetDuration(worker.averageGameDurationSeconds * 1000)}<div class="muted">avg game</div></td>
+        </tr>`;
+      }).join('');
+
+      container.innerHTML = `<div class="fleet-summary">${cards}</div>
+        <div class="fleet-toolbar"><span>Updated ${new Date(data.generatedAt).toLocaleTimeString()}</span><label><input id="fleet-show-offline" type="checkbox" checked> Show recent offline workers</label></div>
+        ${workers.length ? `<div class="fleet-table-wrap"><table class="admin-table fleet-table"><thead><tr><th>Worker</th><th>Status</th><th>Session games</th><th>Throughput</th><th>Session age</th><th>Campaign / job</th><th>Jobs / concurrency</th><th>Heartbeat</th><th>Game time</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="empty-state">No worker sessions in the last 24 hours.</div>'}`;
+
+      const toggle = document.getElementById('fleet-show-offline');
+      if (toggle) toggle.onchange = () => container.querySelectorAll('tr[data-fleet-live="false"]').forEach(row => { row.style.display = toggle.checked ? '' : 'none'; });
+    }
+
     // ----- Helpers -----
     function esc(s) { const el = document.createElement('span'); el.textContent = s; return el.innerHTML; }
 
@@ -1337,6 +1432,9 @@
     document.getElementById('campaign-seed').value = unixNanoString();
     renderCampaignSeats();
     updateCampaignPreview();
+    setInterval(() => {
+      if (document.getElementById('tab-fleet').classList.contains('active')) void loadFleet();
+    }, 10000);
     void checkSession();
   </script>
 </body>

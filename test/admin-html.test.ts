@@ -61,6 +61,15 @@ describe('admin campaign editor', () => {
     expect(html).toContain('Mark active');
     expect(html).toContain("api('POST', '/v1/admin/campaign/active'");
 
+    expect(html).toContain('data-tab="fleet"');
+    expect(html).toContain('id="tab-fleet"');
+    expect(html).toContain('id="fleet-dashboard"');
+    expect(html).toContain("api('GET', '/v1/admin/fleet?historyHours=24')");
+    expect(html).toContain('function renderFleet(data)');
+    expect(html).toContain('Jobs / concurrency');
+    expect(html).toContain('setInterval(() =>');
+    expect(html).not.toContain('<a href="/fleet">Fleet</a>');
+
     expect(html).toContain('id="toggle-revoked-keys"');
     expect(html).toContain('Show revoked');
     expect(html).toContain('Hide revoked');
