@@ -134,6 +134,33 @@ describeDb('telemetry api with postgres', () => {
     expect(detail!.jobs[0]!.spec).toMatchObject({ format: 'duel', map: 'mended-drum' });
   });
 
+  it('lets an admin toggle a campaign inactive and active', async () => {
+    const session = await cpRepo.createSession({ discordId: 'admin-123', discordUsername: 'test-admin' });
+    const campaign = await cpRepo.createCampaign({
+      name: 'Toggle API campaign',
+      spec: { format: 'duel' },
+      games: [{}],
+      createdBy: 'test-admin',
+    });
+
+    const pause = await fetch(`${baseUrl}/v1/admin/campaign/active`, {
+      method: 'POST',
+      headers: { cookie: `session=${session.id}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ campaignId: campaign.id, active: false }),
+    });
+    expect(pause.status).toBe(200);
+    expect(await pause.json()).toMatchObject({ ok: true, active: false, status: 'paused' });
+    expect((await cpRepo.getCampaign(campaign.id))!.jobs).toHaveLength(1);
+
+    const resume = await fetch(`${baseUrl}/v1/admin/campaign/active`, {
+      method: 'POST',
+      headers: { cookie: `session=${session.id}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ campaignId: campaign.id, active: true }),
+    });
+    expect(resume.status).toBe(200);
+    expect(await resume.json()).toMatchObject({ ok: true, active: true, status: 'active' });
+  });
+
   it('uses a named bearer credential as the trusted game source', async () => {
     const source = await cpRepo.createSource('runner-alpha', null, 'test-admin');
     const credential = await cpRepo.createCredential(source.id, 'games', ['games:submit'], 'test-admin');

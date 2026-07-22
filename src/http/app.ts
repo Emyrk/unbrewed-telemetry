@@ -199,6 +199,10 @@ async function handleRequest(
     await handleAdminUpdateCampaign(req, res, cpRepo, config);
     return;
   }
+  if (req.method === 'POST' && url.pathname === '/v1/admin/campaign/active') {
+    await handleAdminSetCampaignActive(req, res, cpRepo, config);
+    return;
+  }
   if (req.method === 'POST' && url.pathname === '/v1/admin/campaign/cancel') {
     await handleAdminCancelCampaign(req, res, cpRepo, config);
     return;
@@ -1084,6 +1088,31 @@ async function handleAdminUpdateCampaign(
     }
     throw error;
   }
+}
+
+async function handleAdminSetCampaignActive(
+  req: IncomingMessage,
+  res: ServerResponse,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<void> {
+  const admin = await verifyAdminAuth(req, cpRepo, config);
+  if (!admin) { sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Admin authentication required' }); return; }
+  const body = await readBody(req, config.bodyLimitBytes);
+  if (!body.ok) { sendJson(res, body.status, { ok: false, code: body.code, message: body.message }); return; }
+  let data: { campaignId?: string; active?: boolean };
+  try { data = JSON.parse(body.body.toString('utf8')) as { campaignId?: string; active?: boolean }; }
+  catch { sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Invalid JSON' }); return; }
+  if (!data.campaignId || typeof data.active !== 'boolean') {
+    sendJson(res, 400, { ok: false, code: 'MISSING_FIELDS', message: 'campaignId and active boolean are required' });
+    return;
+  }
+  const status = await cpRepo.setCampaignActive(data.campaignId, data.active);
+  if (!status) {
+    sendJson(res, 409, { ok: false, code: 'NOT_TOGGLEABLE', message: 'Campaign was not found or is already completed or cancelled' });
+    return;
+  }
+  sendJson(res, 200, { ok: true, campaignId: data.campaignId, active: status === 'active', status });
 }
 
 async function handleAdminCancelCampaign(

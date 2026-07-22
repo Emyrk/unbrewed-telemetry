@@ -643,6 +643,27 @@ export class ControlPlaneRepository {
     }
   }
 
+  /** Pause or resume a campaign without deleting or resetting any jobs. */
+  async setCampaignActive(id: string, active: boolean): Promise<string | null> {
+    const result = await this.pool.query<{ status: string }>(
+      `UPDATE sim_campaigns
+       SET status = CASE
+             WHEN $2 AND completed_games + failed_games >= total_games THEN 'completed'
+             WHEN $2 THEN 'active'
+             ELSE 'paused'
+           END,
+           completed_at = CASE
+             WHEN $2 AND completed_games + failed_games >= total_games THEN COALESCE(completed_at, now())
+             WHEN $2 THEN NULL
+             ELSE completed_at
+           END
+       WHERE id = $1 AND status IN ('active', 'paused')
+       RETURNING status`,
+      [id, active],
+    );
+    return result.rows[0]?.status ?? null;
+  }
+
   async cancelCampaign(id: string): Promise<boolean> {
     const client = await this.pool.connect();
     try {

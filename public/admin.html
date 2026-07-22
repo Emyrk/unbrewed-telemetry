@@ -456,7 +456,15 @@
       let html = `<table class="admin-table"><thead><tr><th>Name</th><th>Status</th><th>Progress</th><th>Created</th><th></th></tr></thead><tbody>`;
       for (const c of campaigns) {
         const badge = c.status === 'completed' ? 'badge-completed' : c.status === 'cancelled' ? 'badge-cancelled' : c.status === 'paused' ? 'badge-paused' : 'badge-active';
-        html += `<tr><td>${esc(c.name)}</td><td><span class="badge ${badge}">${c.status}</span></td><td class="mono">${c.completedGames}/${c.totalGames} (${c.failedGames} failed)</td><td class="muted">${new Date(c.createdAt).toLocaleDateString()}</td><td><button class="btn btn-ghost btn-sm" onclick="viewCampaign('${c.id}')">View</button> ${c.status==='active'?`<button class="btn btn-danger btn-sm" onclick="cancelCampaign('${c.id}')">Cancel</button>`:''}</td></tr>`;
+        const toggle = c.status === 'active'
+          ? `<button class="btn btn-ghost btn-sm" onclick="setCampaignActive('${c.id}', false)">Mark inactive</button>`
+          : c.status === 'paused'
+            ? `<button class="btn btn-primary btn-sm" onclick="setCampaignActive('${c.id}', true)">Mark active</button>`
+            : '';
+        const cancel = c.status === 'active' || c.status === 'paused'
+          ? `<button class="btn btn-danger btn-sm" onclick="cancelCampaign('${c.id}')">Cancel</button>`
+          : '';
+        html += `<tr><td>${esc(c.name)}</td><td><span class="badge ${badge}">${c.status}</span></td><td class="mono">${c.completedGames}/${c.totalGames} (${c.failedGames} failed)</td><td class="muted">${new Date(c.createdAt).toLocaleDateString()}</td><td><button class="btn btn-ghost btn-sm" onclick="viewCampaign('${c.id}')">View</button> ${toggle} ${cancel}</td></tr>`;
       }
       html += '</tbody></table>';
       el.innerHTML = html;
@@ -897,6 +905,22 @@
       loadCampaigns();
     }
 
+    async function setCampaignActive(id, active, refreshDetail = false) {
+      const { status, data } = await api('POST', '/v1/admin/campaign/active', { campaignId: id, active });
+      if (status !== 200 || !data.ok) {
+        if (refreshDetail) {
+          const statusEl = document.getElementById('campaign-detail-status');
+          if (statusEl) {
+            statusEl.textContent = data.message || 'Campaign status update failed';
+            statusEl.className = 'error-msg campaign-detail-status';
+          }
+        }
+        return;
+      }
+      await loadCampaigns();
+      if (refreshDetail) await viewCampaign(id, active ? 'Campaign marked active' : 'Campaign marked inactive');
+    }
+
     async function cancelCampaign(id) {
       await api('POST', '/v1/admin/campaign/cancel', { campaignId: id });
       loadCampaigns();
@@ -934,6 +958,11 @@
         <textarea id="campaign-detail-json" class="campaign-json-editor" spellcheck="false"></textarea>
         <div class="campaign-detail-actions">
           <button class="btn btn-primary btn-sm" onclick="saveCampaignJson('${esc(c.id)}')">Save JSON &amp; Requeue</button>
+          ${c.status === 'active'
+            ? `<button class="btn btn-ghost btn-sm" onclick="setCampaignActive('${esc(c.id)}', false, true)">Mark inactive</button>`
+            : c.status === 'paused'
+              ? `<button class="btn btn-primary btn-sm" onclick="setCampaignActive('${esc(c.id)}', true, true)">Mark active</button>`
+              : ''}
           <button class="btn btn-ghost btn-sm" onclick="viewCampaign('${esc(c.id)}')">Reload</button>
           <button class="btn btn-ghost btn-sm" onclick="document.getElementById('campaign-detail').style.display='none'">Close</button>
           <span id="campaign-detail-status" class="campaign-detail-status"></span>

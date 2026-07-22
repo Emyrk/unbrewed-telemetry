@@ -433,6 +433,25 @@ describeDb('control-plane repository with postgres', () => {
       expect(detail!.status).toBe('completed'); // 0 completed + 1 failed = 1 total
     });
 
+    it('toggles a campaign inactive and active without deleting jobs', async () => {
+      const campaign = await repo.createCampaign({
+        name: 'Toggle Test',
+        spec: { format: 'duel' },
+        games: [{}, {}],
+        createdBy: 'admin',
+      });
+
+      expect(await repo.setCampaignActive(campaign.id, false)).toBe('paused');
+      let detail = await repo.getCampaign(campaign.id);
+      expect(detail).toMatchObject({ status: 'paused', remainingJobs: 2 });
+      expect(await repo.claimJobs(campaign.id, 2, 'runner')).toEqual([]);
+
+      expect(await repo.setCampaignActive(campaign.id, true)).toBe('active');
+      detail = await repo.getCampaign(campaign.id);
+      expect(detail).toMatchObject({ status: 'active', remainingJobs: 2 });
+      expect(await repo.claimJobs(campaign.id, 2, 'runner')).toHaveLength(2);
+    });
+
     it('cancels a campaign and removes pending jobs', async () => {
       const campaign = await repo.createCampaign({
         name: 'Cancel Test',

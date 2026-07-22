@@ -33,6 +33,10 @@ describe('admin campaign editor', () => {
     expect(html).toContain("api('PATCH', '/v1/admin/campaign'");
     expect(html).toContain('Saving regenerates every unfinished job');
 
+    expect(html).toContain('Mark inactive');
+    expect(html).toContain('Mark active');
+    expect(html).toContain("api('POST', '/v1/admin/campaign/active'");
+
     const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
     expect(scripts).toHaveLength(1);
     const script = scripts[0]?.[1];
