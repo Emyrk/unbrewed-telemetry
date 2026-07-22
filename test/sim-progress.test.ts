@@ -98,6 +98,7 @@ describeDb('campaign progress view', () => {
     const body = (await prog.json()) as {
       ok: boolean; completedGames: number; totalGames: number; mixedContentVersion: boolean;
       pilots: Array<{ pilot: string; games: number; wins: number; wilson95: [number, number] }>;
+      throughput: { recentCompletions: number; windowHours: number; gamesPerHour: number; etaSeconds: number | null };
     };
     expect(body.ok).toBe(true);
     expect(body.totalGames).toBe(2);
@@ -109,6 +110,13 @@ describeDb('campaign progress view', () => {
     expect(ismcts.wins).toBe(2);
     expect(mc.wins).toBe(0);
     expect(ismcts.wilson95).toHaveLength(2);
+    // Throughput: both games were just ingested, so they fall within the 6-hour window.
+    // Campaign is fully complete → etaSeconds should be null.
+    expect(body.throughput).toBeDefined();
+    expect(body.throughput.recentCompletions).toBe(2);
+    expect(body.throughput.windowHours).toBe(6);
+    expect(body.throughput.gamesPerHour).toBeCloseTo(2 / 6);
+    expect(body.throughput.etaSeconds).toBeNull();
   });
 
   it('404s an unknown campaign and 401s without a key', async () => {

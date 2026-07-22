@@ -16,6 +16,17 @@ export interface CampaignPilotStat {
   wilson95: [number, number];
 }
 
+export interface CampaignThroughput {
+  /** Number of games completed in the trailing window. */
+  recentCompletions: number;
+  /** Window size in hours used for the rate calculation. */
+  windowHours: number;
+  /** Completions per hour over the window (0 when none). */
+  gamesPerHour: number;
+  /** Estimated seconds until all remaining games complete at the current rate, or null when rate is 0 or campaign is already done. */
+  etaSeconds: number | null;
+}
+
 export interface CampaignProgress {
   campaignId: string;
   name: string;
@@ -28,6 +39,8 @@ export interface CampaignProgress {
   contentVersions: string[];
   /** Per-pilot win rate with a Wilson 95% CI — the road-to-expert view. */
   pilots: CampaignPilotStat[];
+  /** Throughput and ETA based on recent completion rate. */
+  throughput: CampaignThroughput;
 }
 
 // ============================================================================
@@ -1220,7 +1233,7 @@ export class ControlPlaneRepository {
    * needs, which the deck-balance stats do not answer campaign-scoped. Returns null
    * for an unknown campaign.
    */
-  async campaignProgress(campaignId: string): Promise<CampaignProgress | null> {
+  async campaignProgress(campaignId: string, nowMs?: number): Promise<CampaignProgress | null> {
     const campaign = await this.pool.query<{
       name: string; status: string; total_games: number; completed_games: number; failed_games: number;
     }>(
@@ -1230,21 +1243,34 @@ export class ControlPlaneRepository {
     if (campaign.rowCount === 0) return null;
     const c = campaign.rows[0]!;
 
-    const pilotRows = await this.pool.query<{ pilot: string; games: string; wins: string }>(
-      `SELECT gs.pilot,
-              count(*)::bigint AS games,
-              count(*) FILTER (WHERE gs.won)::bigint AS wins
-       FROM games g
-       JOIN game_seats gs ON gs.game_id = g.id
-       WHERE g.campaign_id = $1
-       GROUP BY gs.pilot
-       ORDER BY gs.pilot`,
-      [campaignId],
-    );
-    const versionRows = await this.pool.query<{ content_version: string | null }>(
-      `SELECT DISTINCT content_version FROM games WHERE campaign_id = $1`,
-      [campaignId],
-    );
+    const WINDOW_HOURS = 6;
+    const now = nowMs != null ? new Date(nowMs) : new Date();
+    const windowStart = new Date(now.getTime() - WINDOW_HOURS * 3600_000);
+
+    const [pilotRows, versionRows, recentRows] = await Promise.all([
+      this.pool.query<{ pilot: string; games: string; wins: string }>(
+        `SELECT gs.pilot,
+                count(*)::bigint AS games,
+                count(*) FILTER (WHERE gs.won)::bigint AS wins
+         FROM games g
+         JOIN game_seats gs ON gs.game_id = g.id
+         WHERE g.campaign_id = $1
+         GROUP BY gs.pilot
+         ORDER BY gs.pilot`,
+        [campaignId],
+      ),
+      this.pool.query<{ content_version: string | null }>(
+        `SELECT DISTINCT content_version FROM games WHERE campaign_id = $1`,
+        [campaignId],
+      ),
+      this.pool.query<{ cnt: string }>(
+        `SELECT count(*)::bigint AS cnt
+         FROM games
+         WHERE campaign_id = $1 AND received_at >= $2 AND received_at <= $3`,
+        [campaignId, windowStart.toISOString(), now.toISOString()],
+      ),
+    ]);
+
     const contentVersions = versionRows.rows.map((r) => r.content_version).filter((v): v is string => v !== null);
 
     const pilots: CampaignPilotStat[] = pilotRows.rows.map((r) => {
@@ -1253,6 +1279,13 @@ export class ControlPlaneRepository {
       const w = wilson(wins, games);
       return { pilot: r.pilot, games, wins, rate: games > 0 ? wins / games : 0, wilson95: [w.lo, w.hi] };
     });
+
+    const recentCompletions = Number(recentRows.rows[0]?.cnt ?? 0);
+    const gamesPerHour = recentCompletions / WINDOW_HOURS;
+    const remaining = c.total_games - c.completed_games - c.failed_games;
+    const etaSeconds = gamesPerHour > 0 && remaining > 0
+      ? Math.round((remaining / gamesPerHour) * 3600)
+      : null;
 
     return {
       campaignId,
@@ -1264,6 +1297,7 @@ export class ControlPlaneRepository {
       mixedContentVersion: contentVersions.length > 1,
       contentVersions,
       pilots,
+      throughput: { recentCompletions, windowHours: WINDOW_HOURS, gamesPerHour, etaSeconds },
     };
   }
   /** Public "Road to Expert+" journey view (#248) — aggregates only, no auth. */
