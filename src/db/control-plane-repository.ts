@@ -121,6 +121,7 @@ export interface SimCampaign {
   priorityPosition: number;
   cancelledAt: string | null;
   completedAt: string | null;
+  throughput: CampaignThroughput;
 }
 
 export interface CampaignScheduleResult {
@@ -363,6 +364,16 @@ export function resolveCampaignJobSpec(spec: unknown, seed: string | number | bi
 // ============================================================================
 // Repository
 // ============================================================================
+
+const THROUGHPUT_WINDOW_HOURS = 6;
+
+function computeThroughput(recentCompletions: number, remaining: number): CampaignThroughput {
+  const gamesPerHour = recentCompletions / THROUGHPUT_WINDOW_HOURS;
+  const etaSeconds = gamesPerHour > 0 && remaining > 0
+    ? Math.round((remaining / gamesPerHour) * 3600)
+    : null;
+  return { recentCompletions, windowHours: THROUGHPUT_WINDOW_HOURS, gamesPerHour, etaSeconds };
+}
 
 export class ControlPlaneRepository {
   constructor(private readonly pool: Pool) {}
@@ -760,6 +771,7 @@ export class ControlPlaneRepository {
         status: 'active', createdAt: new Date().toISOString(), createdBy: args.createdBy,
         priorityTier, priorityPosition: 0,
         cancelledAt: null, completedAt: null,
+        throughput: computeThroughput(0, args.games.length),
       };
     } catch (error) {
       await client.query('ROLLBACK');
@@ -770,29 +782,44 @@ export class ControlPlaneRepository {
   }
 
   async listCampaigns(): Promise<SimCampaign[]> {
-    const result = await this.pool.query<{
-      id: string; name: string; description: string | null; spec: unknown;
-      base_seed: string; content_version: string | null;
-      total_games: number; completed_games: number; failed_games: number;
-      status: string; created_at: Date; created_by: string;
-      priority_tier: number; priority_position: number;
-      cancelled_at: Date | null; completed_at: Date | null;
-    }>(
-      `SELECT * FROM sim_campaigns
-       ORDER BY CASE WHEN status IN ('active', 'paused') THEN 0 ELSE 1 END,
-                CASE WHEN status IN ('active', 'paused') THEN priority_tier END,
-                CASE WHEN status IN ('active', 'paused') THEN priority_position END,
-                COALESCE(completed_at, cancelled_at, created_at) DESC`,
-    );
-    return result.rows.map(r => ({
-      id: r.id, name: r.name, description: r.description, spec: r.spec,
-      baseSeed: r.base_seed, contentVersion: r.content_version,
-      totalGames: r.total_games, completedGames: r.completed_games, failedGames: r.failed_games,
-      status: r.status, createdAt: r.created_at.toISOString(), createdBy: r.created_by,
-      priorityTier: r.priority_tier, priorityPosition: r.priority_position,
-      cancelledAt: r.cancelled_at?.toISOString() ?? null,
-      completedAt: r.completed_at?.toISOString() ?? null,
-    }));
+    const windowStart = new Date(Date.now() - THROUGHPUT_WINDOW_HOURS * 3600_000);
+    const [result, throughputResult] = await Promise.all([
+      this.pool.query<{
+        id: string; name: string; description: string | null; spec: unknown;
+        base_seed: string; content_version: string | null;
+        total_games: number; completed_games: number; failed_games: number;
+        status: string; created_at: Date; created_by: string;
+        priority_tier: number; priority_position: number;
+        cancelled_at: Date | null; completed_at: Date | null;
+      }>(
+        `SELECT * FROM sim_campaigns
+         ORDER BY CASE WHEN status IN ('active', 'paused') THEN 0 ELSE 1 END,
+                  CASE WHEN status IN ('active', 'paused') THEN priority_tier END,
+                  CASE WHEN status IN ('active', 'paused') THEN priority_position END,
+                  COALESCE(completed_at, cancelled_at, created_at) DESC`,
+      ),
+      this.pool.query<{ campaign_id: string; cnt: string }>(
+        `SELECT campaign_id, count(*)::bigint AS cnt
+         FROM games
+         WHERE campaign_id IS NOT NULL AND received_at >= $1
+         GROUP BY campaign_id`,
+        [windowStart.toISOString()],
+      ),
+    ]);
+    const recentMap = new Map(throughputResult.rows.map(r => [r.campaign_id, Number(r.cnt)]));
+    return result.rows.map(r => {
+      const remaining = r.total_games - r.completed_games - r.failed_games;
+      return {
+        id: r.id, name: r.name, description: r.description, spec: r.spec,
+        baseSeed: r.base_seed, contentVersion: r.content_version,
+        totalGames: r.total_games, completedGames: r.completed_games, failedGames: r.failed_games,
+        status: r.status, createdAt: r.created_at.toISOString(), createdBy: r.created_by,
+        priorityTier: r.priority_tier, priorityPosition: r.priority_position,
+        cancelledAt: r.cancelled_at?.toISOString() ?? null,
+        completedAt: r.completed_at?.toISOString() ?? null,
+        throughput: computeThroughput(recentMap.get(r.id) ?? 0, remaining),
+      };
+    });
   }
 
   async getCampaign(id: string, includeJobs: boolean = true): Promise<(SimCampaign & {
@@ -825,11 +852,19 @@ export class ControlPlaneRepository {
           [id],
         )
       : { rows: [] };
-    const countsResult = await this.pool.query<{ status: string; count: string }>(
-      `SELECT status, COUNT(*)::bigint AS count
-       FROM sim_jobs WHERE campaign_id = $1 GROUP BY status`,
-      [id],
-    );
+    const windowStart = new Date(Date.now() - THROUGHPUT_WINDOW_HOURS * 3600_000);
+    const [countsResult, recentResult] = await Promise.all([
+      this.pool.query<{ status: string; count: string }>(
+        `SELECT status, COUNT(*)::bigint AS count
+         FROM sim_jobs WHERE campaign_id = $1 GROUP BY status`,
+        [id],
+      ),
+      this.pool.query<{ cnt: string }>(
+        `SELECT count(*)::bigint AS cnt FROM games
+         WHERE campaign_id = $1 AND received_at >= $2`,
+        [id, windowStart.toISOString()],
+      ),
+    ]);
     const statusCounts = new Map(countsResult.rows.map(count => [count.status, Number(count.count)]));
     const jobCounts: CampaignJobCounts = {
       succeeded: row.completed_games,
@@ -837,6 +872,8 @@ export class ControlPlaneRepository {
       leased: statusCounts.get('leased') ?? 0,
       idle: statusCounts.get('pending') ?? 0,
     };
+    const remaining = row.total_games - row.completed_games - row.failed_games;
+    const recentCompletions = Number(recentResult.rows[0]?.cnt ?? 0);
 
     return {
       id: row.id, name: row.name, description: row.description, spec: row.spec,
@@ -846,6 +883,7 @@ export class ControlPlaneRepository {
       priorityTier: row.priority_tier, priorityPosition: row.priority_position,
       cancelledAt: row.cancelled_at?.toISOString() ?? null,
       completedAt: row.completed_at?.toISOString() ?? null,
+      throughput: computeThroughput(recentCompletions, remaining),
       remainingJobs: jobCounts.failed + jobCounts.leased + jobCounts.idle,
       jobCounts,
       jobs: jobsResult.rows.map(j => ({
@@ -1033,6 +1071,7 @@ export class ControlPlaneRepository {
           priorityTier: row.priority_tier, priorityPosition: row.priority_position,
           cancelledAt: row.cancelled_at?.toISOString() ?? null,
           completedAt: row.completed_at?.toISOString() ?? null,
+          throughput: computeThroughput(0, row.total_games - row.completed_games - row.failed_games),
         },
       };
     } catch (error) {
@@ -1481,9 +1520,8 @@ export class ControlPlaneRepository {
     if (campaign.rowCount === 0) return null;
     const c = campaign.rows[0]!;
 
-    const WINDOW_HOURS = 6;
     const now = nowMs != null ? new Date(nowMs) : new Date();
-    const windowStart = new Date(now.getTime() - WINDOW_HOURS * 3600_000);
+    const windowStart = new Date(now.getTime() - THROUGHPUT_WINDOW_HOURS * 3600_000);
 
     const [pilotRows, versionRows, recentRows] = await Promise.all([
       this.pool.query<{ pilot: string; games: string; wins: string }>(
@@ -1518,12 +1556,8 @@ export class ControlPlaneRepository {
       return { pilot: r.pilot, games, wins, rate: games > 0 ? wins / games : 0, wilson95: [w.lo, w.hi] };
     });
 
-    const recentCompletions = Number(recentRows.rows[0]?.cnt ?? 0);
-    const gamesPerHour = recentCompletions / WINDOW_HOURS;
     const remaining = c.total_games - c.completed_games - c.failed_games;
-    const etaSeconds = gamesPerHour > 0 && remaining > 0
-      ? Math.round((remaining / gamesPerHour) * 3600)
-      : null;
+    const recentCompletions = Number(recentRows.rows[0]?.cnt ?? 0);
 
     return {
       campaignId,
@@ -1535,7 +1569,7 @@ export class ControlPlaneRepository {
       mixedContentVersion: contentVersions.length > 1,
       contentVersions,
       pilots,
-      throughput: { recentCompletions, windowHours: WINDOW_HOURS, gamesPerHour, etaSeconds },
+      throughput: computeThroughput(recentCompletions, remaining),
     };
   }
   /** Public "Road to Expert+" journey view (#248) — aggregates only, no auth. */

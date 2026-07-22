@@ -129,7 +129,8 @@
     .priority-card.dragging { opacity: 0.45; border-color: var(--accent); }
     .priority-card-title { display: flex; justify-content: space-between; align-items: start; gap: 0.5rem; margin-bottom: 0.45rem; }
     .priority-card-name { font-weight: 600; overflow-wrap: anywhere; }
-    .priority-card-progress { font-family: var(--mono); font-size: 0.78rem; color: var(--text-muted); margin-bottom: 0.6rem; }
+    .priority-card-progress { font-family: var(--mono); font-size: 0.78rem; color: var(--text-muted); margin-bottom: 0.2rem; }
+    .priority-card-throughput { font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.6rem; }
     .priority-card-actions { display: flex; flex-wrap: wrap; gap: 0.35rem; }
     .priority-card-actions .btn { padding: 0.3rem 0.55rem; }
     .priority-drag-hint { color: var(--text-muted); font-size: 0.74rem; }
@@ -529,6 +530,20 @@
       renderCampaigns(data.campaigns || []);
     }
 
+    function formatThroughput(t) {
+      if (!t) return '';
+      const rate = t.gamesPerHour;
+      const rateStr = rate >= 10 ? Math.round(rate).toLocaleString() : rate.toFixed(1);
+      if (t.etaSeconds == null) {
+        if (rate === 0) return `<span class="muted">0 games/hr (${t.windowHours}h window)</span>`;
+        return `<span class="muted">${rateStr} games/hr · done</span>`;
+      }
+      const h = Math.floor(t.etaSeconds / 3600);
+      const m = Math.floor((t.etaSeconds % 3600) / 60);
+      const eta = h > 0 ? `${h}h ${m}m` : `${m}m`;
+      return `<span class="mono">${rateStr} games/hr</span> · <span class="muted">ETA ~${eta}</span>`;
+    }
+
     function campaignBadge(campaign) {
       const badge = campaign.status === 'completed' ? 'badge-completed' : campaign.status === 'cancelled' ? 'badge-cancelled' : campaign.status === 'paused' ? 'badge-paused' : 'badge-active';
       return `<span class="badge ${badge}">${esc(campaign.status)}</span>`;
@@ -562,11 +577,12 @@
       if (archived.length === 0) {
         history.innerHTML = '<div class="empty-state">No completed or cancelled campaigns.</div>';
       } else {
-        history.innerHTML = `<table class="admin-table"><thead><tr><th>Name</th><th>Status</th><th>Progress</th><th>Finished</th><th></th></tr></thead><tbody>${archived.map(campaign => `
+        history.innerHTML = `<table class="admin-table"><thead><tr><th>Name</th><th>Status</th><th>Progress</th><th>Throughput</th><th>Finished</th><th></th></tr></thead><tbody>${archived.map(campaign => `
           <tr>
             <td>${esc(campaign.name)}</td>
             <td>${campaignBadge(campaign)}</td>
             <td class="mono">${campaign.completedGames}/${campaign.totalGames} (${campaign.failedGames} failed)</td>
+            <td>${formatThroughput(campaign.throughput)}</td>
             <td class="muted">${new Date(campaign.completedAt || campaign.cancelledAt || campaign.createdAt).toLocaleDateString()}</td>
             <td><button class="btn btn-ghost btn-sm" onclick="viewCampaign('${campaign.id}')">View</button></td>
           </tr>`).join('')}</tbody></table>`;
@@ -610,6 +626,7 @@
           return `<div class="priority-card" data-campaign-id="${campaign.id}" ${dragAttributes}>
             <div class="priority-card-title"><span class="priority-card-name">${esc(campaign.name)}</span>${campaignBadge(campaign)}</div>
             <div class="priority-card-progress">${campaign.completedGames}/${campaign.totalGames} · ${campaign.failedGames} failed</div>
+            <div class="priority-card-throughput">${formatThroughput(campaign.throughput)}</div>
             <div class="priority-card-actions">${actions}</div>
           </div>`;
         }).join('');
@@ -1211,6 +1228,7 @@
       detail.innerHTML = `
         <h3>${esc(c.name)}</h3>
         <div class="muted" style="margin:0.5rem 0">ID: <span class="mono">${esc(c.id)}</span> | Status: ${esc(c.status)} | ${c.completedGames}/${c.totalGames} completed, ${c.failedGames} failed, ${c.remainingJobs} remaining | Base seed: ${esc(c.baseSeed)}</div>
+        <div style="margin:0.3rem 0">${formatThroughput(c.throughput)}</div>
         <div class="campaign-help">Edit the campaign definition below. Saving regenerates every unfinished job from this spec, resets terminal failures to pending, and leaves completed games untouched. Stop workers first; campaigns with active leases cannot be edited.</div>
         <textarea id="campaign-detail-json" class="campaign-json-editor" spellcheck="false"></textarea>
         <div class="campaign-detail-actions">
