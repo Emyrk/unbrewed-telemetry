@@ -208,6 +208,54 @@ export interface ClaimResult {
   jobs: SimJob[];
 }
 
+export interface WorkerSessionTouch {
+  sessionId?: string | undefined;
+  concurrency?: number | undefined;
+  workerVersion?: string | undefined;
+}
+
+export interface FleetCampaignAssignment {
+  campaignId: string;
+  campaignName: string;
+  jobs: number;
+}
+
+export interface FleetWorker {
+  sessionId: string;
+  credentialId: string;
+  workerLabel: string;
+  sourceName: string;
+  workerVersion: string | null;
+  startedAt: string;
+  lastHeartbeatAt: string;
+  heartbeatAgeMs: number;
+  sessionDurationMs: number;
+  live: boolean;
+  status: 'working' | 'idle' | 'offline';
+  gamesSubmitted: number;
+  gamesLastHour: number;
+  gamesPerHour: number;
+  averageGameDurationSeconds: number | null;
+  lastGameAt: string | null;
+  activeJobs: number;
+  reportedConcurrency: number | null;
+  utilization: number | null;
+  campaigns: FleetCampaignAssignment[];
+  jobIds: string[];
+  earliestLeaseExpiry: string | null;
+}
+
+export interface FleetSnapshot {
+  generatedAt: string;
+  liveWorkers: number;
+  workingWorkers: number;
+  idleWorkers: number;
+  activeJobs: number;
+  totalConcurrency: number;
+  gamesLastHour: number;
+  workers: FleetWorker[];
+}
+
 const PG_BIGINT_MIN = -(1n << 63n);
 const PG_BIGINT_MAX = (1n << 63n) - 1n;
 
@@ -469,6 +517,196 @@ export class ControlPlaneRepository {
       `UPDATE source_credentials SET last_used_at = now() WHERE id = $1`,
       [credentialId],
     );
+  }
+
+  // ---------- Simulation worker sessions ----------
+
+  /**
+   * Record runner activity. A supplied live session id is reused. Otherwise the
+   * latest session is reused for 15 minutes, then a new session begins.
+   */
+  async touchWorkerSession(
+    credentialId: string,
+    at: Date,
+    details: WorkerSessionTouch = {},
+  ): Promise<string> {
+    const client = await this.pool.connect();
+    const staleBefore = new Date(at.getTime() - 15 * 60 * 1000);
+    const concurrency = details.concurrency ?? null;
+    const workerVersion = details.workerVersion?.trim().slice(0, 200) || null;
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [credentialId]);
+
+      const updated = await client.query<{ id: string }>(
+        `UPDATE sim_worker_sessions
+         SET last_heartbeat_at = $3,
+             reported_concurrency = COALESCE($4, reported_concurrency),
+             worker_version = COALESCE($5, worker_version)
+         WHERE id = COALESCE(
+           (SELECT id FROM sim_worker_sessions
+            WHERE id = $2 AND credential_id = $1 AND last_heartbeat_at >= $6),
+           (SELECT id FROM sim_worker_sessions
+            WHERE $2::text IS NULL AND credential_id = $1 AND last_heartbeat_at >= $6
+            ORDER BY started_at DESC LIMIT 1)
+         )
+         RETURNING id`,
+        [credentialId, details.sessionId ?? null, at, concurrency, workerVersion, staleBefore],
+      );
+
+      let sessionId = updated.rows[0]?.id;
+      if (!sessionId) {
+        sessionId = randomUUID();
+        await client.query(
+          `INSERT INTO sim_worker_sessions (
+             id, credential_id, started_at, last_heartbeat_at, reported_concurrency, worker_version
+           ) VALUES ($1, $2, $3, $3, $4, $5)`,
+          [sessionId, credentialId, at, concurrency, workerVersion],
+        );
+      }
+
+      await client.query('COMMIT');
+      return sessionId;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async fleetSnapshot(at: Date, historyHours = 24): Promise<FleetSnapshot> {
+    const staleBefore = new Date(at.getTime() - 15 * 60 * 1000);
+    const historySince = new Date(at.getTime() - Math.max(1, historyHours) * 60 * 60 * 1000);
+    const lastHour = new Date(at.getTime() - 60 * 60 * 1000);
+    const result = await this.pool.query<{
+      session_id: string;
+      credential_id: string;
+      worker_label: string;
+      source_name: string;
+      worker_version: string | null;
+      started_at: Date;
+      last_heartbeat_at: Date;
+      reported_concurrency: number | null;
+      games_submitted: number;
+      games_last_hour: number;
+      average_game_duration_seconds: number | null;
+      last_game_at: Date | null;
+      active_jobs: number;
+      job_ids: string[];
+      campaigns: FleetCampaignAssignment[];
+      earliest_lease_expiry: Date | null;
+    }>(
+      `WITH latest_sessions AS (
+         SELECT DISTINCT ON (session.credential_id)
+           session.id, session.credential_id, session.started_at, session.last_heartbeat_at,
+           session.reported_concurrency, session.worker_version
+         FROM sim_worker_sessions session
+         WHERE session.last_heartbeat_at >= $2
+         ORDER BY session.credential_id, session.started_at DESC
+       )
+       SELECT session.id AS session_id,
+              credential.id AS credential_id,
+              credential.label AS worker_label,
+              source.name AS source_name,
+              session.worker_version,
+              session.started_at,
+              session.last_heartbeat_at,
+              session.reported_concurrency,
+              COALESCE(game_stats.games_submitted, 0)::int AS games_submitted,
+              COALESCE(game_stats.games_last_hour, 0)::int AS games_last_hour,
+              game_stats.average_game_duration_seconds,
+              game_stats.last_game_at,
+              COALESCE(lease_stats.active_jobs, 0)::int AS active_jobs,
+              COALESCE(lease_stats.job_ids, ARRAY[]::text[]) AS job_ids,
+              COALESCE(campaign_stats.campaigns, '[]'::jsonb) AS campaigns,
+              lease_stats.earliest_lease_expiry
+       FROM latest_sessions session
+       JOIN source_credentials credential ON credential.id = session.credential_id
+       JOIN telemetry_sources source ON source.id = credential.source_id
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*)::int AS games_submitted,
+                COUNT(*) FILTER (WHERE submission.received_at >= $3)::int AS games_last_hour,
+                AVG(game.duration_seconds)::float8 AS average_game_duration_seconds,
+                MAX(submission.received_at) AS last_game_at
+         FROM game_submissions submission
+         JOIN games game ON game.submission_id = submission.id
+         WHERE submission.auth_key_id = session.credential_id
+           AND submission.received_at >= session.started_at
+           AND submission.received_at <= $1
+       ) game_stats ON true
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*)::int AS active_jobs,
+                ARRAY_AGG(job.id ORDER BY job.leased_at) AS job_ids,
+                MIN(job.lease_expires_at) AS earliest_lease_expiry
+         FROM sim_jobs job
+         WHERE job.leased_by = session.credential_id
+           AND job.status = 'leased'
+           AND job.lease_expires_at > $1
+       ) lease_stats ON true
+       LEFT JOIN LATERAL (
+         SELECT JSONB_AGG(JSONB_BUILD_OBJECT(
+                  'campaignId', grouped.campaign_id,
+                  'campaignName', grouped.campaign_name,
+                  'jobs', grouped.jobs
+                ) ORDER BY grouped.campaign_name) AS campaigns
+         FROM (
+           SELECT campaign.id AS campaign_id, campaign.name AS campaign_name, COUNT(*)::int AS jobs
+           FROM sim_jobs job
+           JOIN sim_campaigns campaign ON campaign.id = job.campaign_id
+           WHERE job.leased_by = session.credential_id
+             AND job.status = 'leased'
+             AND job.lease_expires_at > $1
+           GROUP BY campaign.id, campaign.name
+         ) grouped
+       ) campaign_stats ON true
+       ORDER BY session.last_heartbeat_at DESC, credential.label`,
+      [at, historySince, lastHour],
+    );
+
+    const workers: FleetWorker[] = result.rows.map((row) => {
+      const live = row.last_heartbeat_at >= staleBefore;
+      const sessionDurationMs = Math.max(0, at.getTime() - row.started_at.getTime());
+      const hours = sessionDurationMs / (60 * 60 * 1000);
+      const gamesPerHour = hours > 0 ? row.games_submitted / hours : 0;
+      const reportedConcurrency = row.reported_concurrency;
+      return {
+        sessionId: row.session_id,
+        credentialId: row.credential_id,
+        workerLabel: row.worker_label,
+        sourceName: row.source_name,
+        workerVersion: row.worker_version,
+        startedAt: row.started_at.toISOString(),
+        lastHeartbeatAt: row.last_heartbeat_at.toISOString(),
+        heartbeatAgeMs: Math.max(0, at.getTime() - row.last_heartbeat_at.getTime()),
+        sessionDurationMs,
+        live,
+        status: live ? (row.active_jobs > 0 ? 'working' : 'idle') : 'offline',
+        gamesSubmitted: row.games_submitted,
+        gamesLastHour: row.games_last_hour,
+        gamesPerHour,
+        averageGameDurationSeconds: row.average_game_duration_seconds,
+        lastGameAt: row.last_game_at?.toISOString() ?? null,
+        activeJobs: row.active_jobs,
+        reportedConcurrency,
+        utilization: reportedConcurrency ? row.active_jobs / reportedConcurrency : null,
+        campaigns: row.campaigns,
+        jobIds: row.job_ids,
+        earliestLeaseExpiry: row.earliest_lease_expiry?.toISOString() ?? null,
+      };
+    });
+
+    const liveWorkers = workers.filter(worker => worker.live);
+    return {
+      generatedAt: at.toISOString(),
+      liveWorkers: liveWorkers.length,
+      workingWorkers: liveWorkers.filter(worker => worker.status === 'working').length,
+      idleWorkers: liveWorkers.filter(worker => worker.status === 'idle').length,
+      activeJobs: liveWorkers.reduce((sum, worker) => sum + worker.activeJobs, 0),
+      totalConcurrency: liveWorkers.reduce((sum, worker) => sum + (worker.reportedConcurrency ?? 0), 0),
+      gamesLastHour: liveWorkers.reduce((sum, worker) => sum + worker.gamesLastHour, 0),
+      workers,
+    };
   }
 
   // ---------- Simulation campaigns ----------

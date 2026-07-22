@@ -9,6 +9,8 @@ const assetRoutes: Record<string, { file: string; contentType: string }> = {
   '/': { file: 'dashboard.html', contentType: 'text/html; charset=utf-8' },
   '/dashboard': { file: 'dashboard.html', contentType: 'text/html; charset=utf-8' },
   '/dashboard/': { file: 'dashboard.html', contentType: 'text/html; charset=utf-8' },
+  '/fleet': { file: 'fleet.html', contentType: 'text/html; charset=utf-8' },
+  '/fleet/': { file: 'fleet.html', contentType: 'text/html; charset=utf-8' },
   '/admin': { file: 'admin.html', contentType: 'text/html; charset=utf-8' },
   '/admin/': { file: 'admin.html', contentType: 'text/html; charset=utf-8' },
   // Public "Road to Expert+" journey page (#248) — no auth, experiment data only.

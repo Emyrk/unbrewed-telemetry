@@ -100,6 +100,85 @@ describeDb('telemetry api with postgres', () => {
     expect(await allowed.json()).toMatchObject({ ok: true, sources: [] });
   });
 
+  it('tracks idle heartbeats and exposes the admin fleet dashboard', async () => {
+    const source = await cpRepo.createSource('fleet-api', null, 'test-admin');
+    const credential = await cpRepo.createCredential(
+      source.id,
+      'worker-api',
+      ['games:submit', 'sim:claim', 'sim:complete'],
+      'test-admin',
+    );
+
+    const heartbeat = await fetch(`${baseUrl}/v1/sim/heartbeat`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${credential.fullKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ concurrency: 2, workerVersion: 'worker-test-1' }),
+    });
+    expect(heartbeat.status).toBe(200);
+    const heartbeatBody = await heartbeat.json() as { sessionId: string; leaseExpiresAt: string | null };
+    expect(heartbeatBody.sessionId).toBeTruthy();
+    expect(heartbeatBody.leaseExpiresAt).toBeNull();
+
+    await pool.query(
+      `UPDATE sim_worker_sessions SET started_at = $2 WHERE id = $1`,
+      [heartbeatBody.sessionId, new Date(now.getTime() - 30 * 60 * 1000)],
+    );
+    const campaign = await cpRepo.createCampaign({
+      name: 'Fleet API Campaign', spec: { format: 'duel' }, games: [{}, {}], createdBy: 'test-admin',
+    });
+    const claim = await fetch(`${baseUrl}/v1/sim/claim`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${credential.fullKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ campaignId: campaign.id, count: 2, sessionId: heartbeatBody.sessionId, concurrency: 2 }),
+    });
+    const claimBody = await claim.json() as { sessionId: string; jobs: Array<{ id: string; leaseToken: string }> };
+    expect(claimBody.sessionId).toBe(heartbeatBody.sessionId);
+    expect(claimBody.jobs).toHaveLength(2);
+
+    const complete = await fetch(`${baseUrl}/v1/sim/complete`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${credential.fullKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jobId: claimBody.jobs[0]!.id,
+        leaseToken: claimBody.jobs[0]!.leaseToken,
+        game: sampleGame({ gameId: 'fleet-game', stateHash: 'fleet-state' }),
+      }),
+    });
+    expect(complete.status).toBe(201);
+
+    const denied = await fetch(`${baseUrl}/v1/admin/fleet`);
+    expect(denied.status).toBe(401);
+    const session = await cpRepo.createSession({ discordId: 'admin-123', discordUsername: 'test-admin' });
+    const allowed = await fetch(`${baseUrl}/v1/admin/fleet`, {
+      headers: { cookie: `session=${session.id}` },
+    });
+    expect(allowed.status).toBe(200);
+    const fleet = await allowed.json() as any;
+    expect(fleet).toMatchObject({
+      ok: true,
+      liveWorkers: 1,
+      workingWorkers: 1,
+      idleWorkers: 0,
+      activeJobs: 1,
+      totalConcurrency: 2,
+      gamesLastHour: 1,
+    });
+    expect(fleet.workers[0]).toMatchObject({
+      workerLabel: 'worker-api',
+      workerVersion: 'worker-test-1',
+      gamesSubmitted: 1,
+      gamesLastHour: 1,
+      activeJobs: 1,
+      reportedConcurrency: 2,
+      campaigns: [{ campaignId: campaign.id, campaignName: 'Fleet API Campaign', jobs: 1 }],
+    });
+    expect(fleet.workers[0].gamesPerHour).toBeCloseTo(2, 3);
+
+    const page = await fetch(`${baseUrl}/fleet`);
+    expect(page.status).toBe(200);
+    expect(await page.text()).toContain('Fleet Dashboard');
+  });
+
   it('lets an admin edit campaign JSON and regenerates unfinished jobs', async () => {
     const session = await cpRepo.createSession({ discordId: 'admin-123', discordUsername: 'test-admin' });
     const campaign = await cpRepo.createCampaign({
