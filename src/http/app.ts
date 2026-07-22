@@ -200,6 +200,12 @@ async function handleRequest(
     return;
   }
 
+  // ---- Public "Road to Expert+" journey (NO AUTH — experiment aggregates only) ----
+  if (req.method === 'GET' && url.pathname === '/v1/sim/public/journey') {
+    await handleSimJourney(url, res, cpRepo, config);
+    return;
+  }
+
   // ---- Runner sim endpoints (bearer auth) ----
   // Campaign win-rate view for the #248 ISMCTS road-to-expert report.
   if (req.method === 'GET' && url.pathname.startsWith('/v1/sim/campaigns/') && url.pathname.endsWith('/progress')) {
@@ -1041,6 +1047,21 @@ async function handleAdminCancelCampaign(
 // ============================================================================
 // Runner simulation endpoints (bearer auth)
 // ============================================================================
+
+/** The mission's campaign ladder, in order. Override with ?campaigns=a,b,c. */
+const DEFAULT_JOURNEY_STEPS = ['grid', 'arm1', 'arm2', 'arm3', 'arm5', 'mirror', 'cost'];
+
+async function handleSimJourney(
+  url: URL,
+  res: ServerResponse,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<void> {
+  const raw = url.searchParams.get('campaigns');
+  const names = raw ? raw.split(',').map((s) => s.trim()).filter(Boolean) : DEFAULT_JOURNEY_STEPS;
+  const journey = await cpRepo.journey(names.slice(0, 32), config.now().getTime());
+  sendJson(res, 200, journey);
+}
 
 async function handleSimCampaignProgress(
   req: IncomingMessage,

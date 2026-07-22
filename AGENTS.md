@@ -75,6 +75,7 @@ Recommended endpoints:
 - `POST /v1/sim/complete` atomically ingests a completed game, updates campaign counters, and deletes the transient job row (`sim:complete` scope).
 - `POST /v1/sim/fail` requeues or terminally fails a leased job.
 - `GET /v1/sim/campaigns/{id}/progress` (any `sim:claim` credential) returns a campaign's per-pilot win rate with a Wilson 95% CI, plus completed/total/failed and a `mixedContentVersion` flag. Added for the unbrewed-engine #248 "ISMCTS road-to-expert" report, which needs a campaign-scoped win-rate view the deck-balance stats do not answer. Reads existing `games`/`game_seats`, no new tables.
+- `GET /v1/sim/public/journey?campaigns=grid,arm1,…` (**no auth**, experiment aggregates only) powers the public **Road to Expert+** page at `/road-to-expert` — the ISMCTS mission's campaign ladder (per-step win rate + Wilson CI vs the 60% gate line, chunk progress, runner liveness), auto-refreshing. Reads `sim_campaigns`/`sim_jobs` + campaign-scoped `games`/`game_seats`; never a production game.
 - `/v1/admin/campaigns` and related admin routes create and inspect deterministic campaigns. Campaigns may use `gameCount` for large repeated runs or explicit per-game overrides. Shared specs use checkbox-style `maps` pools and per-seat `decks`/`pilots` pools with stable hero IDs; the service deterministically resolves pools into exact job specs. `swapStartingPlayer` is first-class, and omitted base seeds default to Unix nanoseconds returned as decimal strings.
 - Optional later: `POST /v1/games/batch` for AI lab backfills or simulations.
 

@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Road to Expert+ — ISMCTS mission</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #452a4c; --header: #33203f; --panel: #3a2347; --panel-alt: #33203f;
+    --border: rgba(255,255,255,0.09); --border-strong: rgba(255,255,255,0.14);
+    --track: rgba(255,255,255,0.08); --text: #f2ead9; --muted: #b9a5c0; --muted-2: #9d87a6;
+    --accent: #e9b954; --green: #7ecb8f; --red: #e0796a; --blue: #7aa3d4; --violet: #a78bc9;
+    --font-body: 'Archivo', system-ui, sans-serif; --font-head: 'Oswald', var(--font-body);
+    --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--font-body); -webkit-font-smoothing: antialiased; }
+  .topbar { background: var(--header); border-bottom: 1px solid var(--border-strong); box-shadow: 0 2px 10px rgba(0,0,0,0.2); }
+  .inner { max-width: 940px; margin: 0 auto; padding: 22px 24px; }
+  .brand { font: 600 22px var(--font-head); text-transform: uppercase; letter-spacing: 0.12em; color: #f6ecd8; }
+  .tag { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+  .lede { color: var(--muted); max-width: 70ch; margin: 8px 0 0; line-height: 1.5; }
+  .meta { font-family: var(--font-mono); font-size: 11px; color: var(--muted-2); margin-top: 10px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  .dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot.down { background: var(--muted-2); }
+
+  .runners { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .runner { font-family: var(--font-mono); font-size: 11px; background: var(--panel-alt); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; }
+
+  .ladder { max-width: 940px; margin: 0 auto; padding: 8px 24px 60px; }
+  .step { position: relative; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin: 14px 0; }
+  .step.gate { border-color: rgba(233,185,84,0.5); box-shadow: 0 0 0 1px rgba(233,185,84,0.15); }
+  .step-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .step-title { font: 500 17px var(--font-head); letter-spacing: 0.02em; }
+  .role { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; padding: 3px 8px; border-radius: 5px; background: var(--panel-alt); color: var(--muted); border: 1px solid var(--border); }
+  .role.gate { background: rgba(233,185,84,0.16); color: var(--accent); border-color: rgba(233,185,84,0.4); }
+  .status { margin-left: auto; font-family: var(--font-mono); font-size: 12px; }
+  .status.done { color: var(--green); } .status.running { color: var(--accent); }
+  .status.pending, .status.partial { color: var(--muted-2); }
+  .what { margin: 10px 0 2px; font-weight: 600; color: var(--text); }
+  .why { margin: 0; color: var(--muted); line-height: 1.5; font-size: 14px; }
+
+  .progress { margin-top: 14px; }
+  .plabel { display: flex; justify-content: space-between; font-family: var(--font-mono); font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  .track { height: 8px; background: var(--track); border-radius: 5px; overflow: hidden; }
+  .fill { height: 100%; background: var(--blue); border-radius: 5px; transition: width 0.6s ease; }
+
+  .winrate { margin-top: 16px; }
+  .wr-scale { position: relative; height: 46px; margin-top: 6px; }
+  .wr-track { position: absolute; top: 18px; left: 0; right: 0; height: 12px; background: var(--track); border-radius: 6px; }
+  .wr-ci { position: absolute; top: 18px; height: 12px; background: rgba(122,163,212,0.35); border-radius: 6px; transition: left 0.6s ease, width 0.6s ease; }
+  .wr-point { position: absolute; top: 13px; width: 3px; height: 22px; background: var(--text); border-radius: 2px; transition: left 0.6s ease; }
+  .wr-line { position: absolute; top: 6px; bottom: 6px; width: 2px; background: var(--accent); }
+  .wr-line .lab { position: absolute; top: -14px; left: 50%; transform: translateX(-50%); font-family: var(--font-mono); font-size: 10px; color: var(--accent); white-space: nowrap; }
+  .wr-nums { display: flex; justify-content: space-between; font-family: var(--font-mono); font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .wr-big { font: 500 15px var(--font-mono); color: var(--text); }
+  .verdict { margin-top: 8px; font-family: var(--font-mono); font-size: 12px; }
+  .verdict.pass { color: var(--green); } .verdict.fail { color: var(--red); } .verdict.wait { color: var(--muted-2); }
+  .mixed { color: var(--red); font-family: var(--font-mono); font-size: 11px; margin-top: 6px; }
+  .footer { color: var(--muted-2); font-family: var(--font-mono); font-size: 11px; text-align: center; padding: 20px; }
+  .err { color: var(--red); font-family: var(--font-mono); text-align: center; padding: 20px; }
+</style>
+</head>
+<body>
+  <div class="topbar"><div class="inner">
+    <div class="brand">Road to Expert+</div>
+    <p class="lede">The mission: prove the sim-only <b>ISMCTS</b> tier is stronger than the flat Monte-Carlo bot we ship today — and say <i>why</i> we believe it, not just <i>that</i> we do. Each rung below is one experiment; watch the ladder fill as games land.</p>
+    <div class="meta" id="meta">loading…</div>
+    <div class="runners" id="runners"></div>
+  </div></div>
+  <div class="ladder" id="ladder"></div>
+  <div class="footer">Public read-only view · experiment data only · auto-refreshes every 8s · <span id="src"></span></div>
+
+<script>
+// Plain-language mission narrative — WHAT each step proves and WHY it exists.
+const STEPS = {
+  grid:   { title: 'Knob grid', role: 'Tune the opponent', gate: null, target: null, bar: false,
+            what: 'Find the strongest flat Monte-Carlo settings.',
+            why: 'So ISMCTS is measured against the BEST non-tree bot we can build, not a weak default. The winning variant becomes arm 3’s opponent.' },
+  arm1:   { title: 'Arm 1 — ISMCTS@3000 vs hard-64', role: 'The gate', gate: 0.60, target: null, bar: true, isGate: true,
+            what: 'Does the tier we’d ship beat the tier we ship today?',
+            why: 'The literal acceptance gate: ≥60% over ≥1,000 games with the 95% interval excluding 50%.' },
+  arm2:   { title: 'Arm 2 — compute parity', role: 'Fair fight', gate: null, target: 0.50, bar: true,
+            what: 'Does the tree add strength at EQUAL compute, or is ISMCTS just searching more?',
+            why: '~1,000 playouts vs hard-64’s ~640 — a win here is attributable to the tree, not raw simulation count.' },
+  arm5:   { title: 'Arm 5 — wall-clock matched', role: 'Equal time', gate: null, target: 0.50, bar: true,
+            what: 'At the same seconds per move, does the tree still win?',
+            why: 'ismcts@3000 costs about the same wall-clock as mc@256. Answers “at equal time, is the tree better?” directly.' },
+  arm3:   { title: 'Arm 3 — vs tuned flat MC', role: 'Best opponent', gate: null, target: 0.50, bar: true,
+            what: 'Beats the grid’s BEST tuned flat MC, not just the shipping config.',
+            why: 'The strongest claim the mission can make: better than the best non-tree bot, auto-derived from the knob grid.' },
+  mirror: { title: 'Arm 4 — ISMCTS mirror', role: 'Sanity control', gate: null, target: 0.50, bar: true, isMirror: true,
+            what: 'ISMCTS vs itself must land near 50%.',
+            why: 'Proves the harness has no seat or seeding bias that could manufacture an edge in the arms above.' },
+  cost:   { title: 'Per-decision search cost', role: 'Measurement', gate: null, target: null, bar: false,
+            what: 'How many milliseconds each bot spends per decision.',
+            why: 'The wall-clock-matched arm rests on these numbers — they define what “equal time” means.' },
+};
+const ORDER = ['grid','arm1','arm2','arm3','arm5','mirror','cost'];
+const pct = (x) => (x*100).toFixed(1) + '%';
+const clamp = (x) => Math.max(0, Math.min(1, x));
+
+function statusClass(step, s) {
+  if (!s.found) return ['pending', 'pending'];
+  if (s.status === 'completed') return ['done', '✅ done'];
+  if (s.leasedJobs > 0 || s.status === 'active') return ['running', '⏳ running'];
+  if (s.completedGames > 0) return ['partial', 'partial'];
+  return ['pending', 'pending'];
+}
+
+function winBar(meta, hero) {
+  if (!meta.bar) return '';
+  if (!hero || hero.games === 0) return '<div class="winrate"><div class="wr-nums"><span>awaiting games…</span></div></div>';
+  const [lo, hi] = hero.wilson95;
+  const line = meta.gate ?? meta.target;
+  const lineHtml = line != null
+    ? `<div class="wr-line" style="left:${line*100}%"><span class="lab">${line===0.6?'60% gate':'50%'}</span></div>` : '';
+  return `<div class="winrate">
+    <div class="wr-big">${hero.pilot} &middot; ${pct(hero.rate)} <span style="color:var(--muted)">(${hero.wins}/${hero.games}, 95% CI ${pct(lo)}–${pct(hi)})</span></div>
+    <div class="wr-scale">
+      <div class="wr-track"></div>
+      <div class="wr-ci" style="left:${clamp(lo)*100}%;width:${clamp(hi-lo)*100}%"></div>
+      <div class="wr-point" style="left:${clamp(hero.rate)*100}%"></div>
+      ${lineHtml}
+    </div>
+    <div class="wr-nums"><span>0%</span><span>50%</span><span>100%</span></div>
+  </div>`;
+}
+
+function verdict(meta, hero) {
+  if (!meta.bar || !hero || hero.games === 0) return '';
+  const [lo, hi] = hero.wilson95;
+  if (meta.isGate) {
+    if (lo > 0.5) return `<div class="verdict pass">Gate: 95% CI excludes 50% — mechanically passing at ${hero.games} games (verdict is human-confirmed).</div>`;
+    return `<div class="verdict wait">Gate: interval still spans 50% — needs more games or a wider margin.</div>`;
+  }
+  if (meta.isMirror) {
+    const balanced = lo <= 0.5 && hi >= 0.5;
+    return balanced ? `<div class="verdict pass">Control OK — interval straddles 50%, no harness bias.</div>`
+                    : `<div class="verdict fail">Control WARN — mirror interval excludes 50%; investigate seat/seeding bias.</div>`;
+  }
+  if (lo > 0.5) return `<div class="verdict pass">Tree ahead — CI above 50% at ${hero.games} games.</div>`;
+  return `<div class="verdict wait">Inconclusive so far — CI spans 50%.</div>`;
+}
+
+function render(j) {
+  const meta = document.getElementById('meta');
+  const done = j.steps.filter(s => s.status === 'completed').length;
+  meta.textContent = `${done}/${j.steps.length} steps complete · generated ${new Date(j.generatedAt).toLocaleTimeString()}`;
+  document.getElementById('src').textContent = 'GET /v1/sim/public/journey';
+
+  const rc = document.getElementById('runners');
+  rc.innerHTML = j.runners.length
+    ? j.runners.map(r => `<span class="runner"><span class="dot ${r.live?'live':'down'}"></span>${r.runner.slice(0,14)} · ${r.leasedJobs} job${r.leasedJobs===1?'':'s'}</span>`).join('')
+    : '<span class="runner"><span class="dot down"></span>no active runners</span>';
+
+  const byName = Object.fromEntries(j.steps.map(s => [s.name, s]));
+  const ladder = document.getElementById('ladder');
+  ladder.innerHTML = ORDER.map(name => {
+    const meta = STEPS[name]; if (!meta) return '';
+    const s = byName[name] ?? { found:false, status:'pending', totalGames:0, completedGames:0, failedGames:0, leasedJobs:0, pilots:[], hero:null, mixedContentVersion:false };
+    const [cls, label] = statusClass(name, s);
+    const frac = s.totalGames > 0 ? s.completedGames / s.totalGames : 0;
+    const bar = s.found ? `<div class="progress">
+        <div class="plabel"><span>games</span><span>${s.completedGames}/${s.totalGames}${s.failedGames?` · ${s.failedGames} failed`:''}${s.leasedJobs?` · ${s.leasedJobs} in flight`:''}</span></div>
+        <div class="track"><div class="fill" style="width:${(frac*100).toFixed(1)}%"></div></div>
+      </div>` : '';
+    return `<div class="step ${meta.isGate?'gate':''}">
+      <div class="step-head">
+        <span class="step-title">${meta.title}</span>
+        <span class="role ${meta.isGate?'gate':''}">${meta.role}</span>
+        <span class="status ${cls}">${label}</span>
+      </div>
+      <p class="what">${meta.what}</p>
+      <p class="why">${meta.why}</p>
+      ${bar}
+      ${winBar(meta, s.hero)}
+      ${s.mixedContentVersion ? '<div class="mixed">⚠ mixed engine versions in this arm — do not blend; re-check provenance.</div>' : ''}
+      ${verdict(meta, s.hero)}
+    </div>`;
+  }).join('');
+}
+
+async function tick() {
+  try {
+    const res = await fetch('/v1/sim/public/journey');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    render(await res.json());
+  } catch (e) {
+    document.getElementById('ladder').innerHTML = `<div class="err">Could not load the journey (${e.message}). Retrying…</div>`;
+  }
+}
+tick();
+setInterval(tick, 8000);
+</script>
+</body>
+</html>
