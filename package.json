@@ -14,7 +14,8 @@
     "db:compose:up": "docker compose up -d postgres",
     "db:compose:down": "docker compose down -v",
     "submit:sample": "tsx scripts/submit-sample.mts",
-    "sim:seed-credentials": "tsx scripts/seed-sim-credentials.mts"
+    "sim:seed-credentials": "tsx scripts/seed-sim-credentials.mts",
+    "sim:seed-campaign": "tsx scripts/seed-sim-campaign.mts"
   },
   "dependencies": {
     "ajv": "^8.17.1",
