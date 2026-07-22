@@ -1475,7 +1475,7 @@ async function renderSources() {
     <div class="section-head">
       <div>
         <div class="section-title">Sources</div>
-        <div class="kicker">${number(total)} submissions ${state.format ? 'matching this view' : 'uploaded'} · grouped by source name</div>
+        <div class="kicker">${number(total)} submissions ${state.format ? 'matching this view' : 'uploaded'} · grouped by source and key label</div>
       </div>
     </div>
     ${sources.length ? sourcesSummary(sources, total) : empty('No source data under the current filters.')}
@@ -1517,13 +1517,29 @@ function sourceRow(source, total) {
   const share = total ? source.submissions / total : 0;
   const color = sourceColor(source.source);
   const last = source.lastReceivedAt ? timeAgo(source.lastReceivedAt) : '—';
-  return `<div class="source-row">
-    <span class="source-dot" style="background:${color}"></span>
-    <span class="source-name" title="${esc(source.source)}">${esc(source.source)}</span>
-    <span class="source-bar"><i style="width:${(share * 100).toFixed(2)}%;background:${color}"></i></span>
-    <span class="source-count">${number(source.submissions)}</span>
-    <span class="source-share">${sourcePct(source.submissions, total)}</span>
-    <span class="source-last" title="${esc(source.lastReceivedAt || '')}">${esc(last)}</span>
+  const credentials = source.credentials || [];
+  const credentialRows = credentials.map((credential) => {
+    const credentialShare = source.submissions ? credential.submissions / source.submissions : 0;
+    const credentialLast = credential.lastReceivedAt ? timeAgo(credential.lastReceivedAt) : '—';
+    return `<div class="source-row source-credential-row">
+      <span class="source-credential-branch">↳</span>
+      <span class="source-name" title="${esc(credential.label)}">${esc(credential.label)}</span>
+      <span class="source-bar"><i style="width:${(credentialShare * 100).toFixed(2)}%;background:${color}"></i></span>
+      <span class="source-count">${number(credential.submissions)}</span>
+      <span class="source-share">${sourcePct(credential.submissions, source.submissions)}</span>
+      <span class="source-last" title="${esc(credential.lastReceivedAt || '')}">${esc(credentialLast)}</span>
+    </div>`;
+  }).join('');
+  return `<div class="source-group">
+    <div class="source-row source-total-row">
+      <span class="source-dot" style="background:${color}"></span>
+      <span class="source-name" title="${esc(source.source)}">${esc(source.source)}</span>
+      <span class="source-bar"><i style="width:${(share * 100).toFixed(2)}%;background:${color}"></i></span>
+      <span class="source-count">${number(source.submissions)}</span>
+      <span class="source-share">${sourcePct(source.submissions, total)}</span>
+      <span class="source-last" title="${esc(source.lastReceivedAt || '')}">${esc(last)}</span>
+    </div>
+    ${credentialRows}
   </div>`;
 }
 

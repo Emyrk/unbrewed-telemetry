@@ -453,10 +453,18 @@ export interface ScenarioExplorerResponse {
   matchups: ScenarioExplorerMatchup[];
 }
 
+export interface SourceCredentialStat {
+  credentialId: string | null;
+  label: string;
+  submissions: number;
+  lastReceivedAt: string | null;
+}
+
 export interface SourceStat {
   source: string;
   submissions: number;
   lastReceivedAt: string | null;
+  credentials: SourceCredentialStat[];
 }
 
 export interface SourceStatsResponse {

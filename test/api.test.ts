@@ -901,12 +901,52 @@ describeDb('telemetry api with postgres', () => {
     expect(response.status).toBe(200);
     const json = await response.json() as {
       totalSubmissions: number;
-      sources: { source: string; submissions: number; lastReceivedAt: string | null }[];
+      sources: {
+        source: string;
+        submissions: number;
+        lastReceivedAt: string | null;
+        credentials: { credentialId: string | null; label: string; submissions: number; lastReceivedAt: string | null }[];
+      }[];
     };
     expect(json.totalSubmissions).toBe(3);
     expect(json.sources[0]).toMatchObject({ source: 'steven:laptop:lab', submissions: 2 });
     expect(json.sources).toContainEqual(expect.objectContaining({ source: 'engine', submissions: 1 }));
     expect(json.sources[0]!.lastReceivedAt).toBeTruthy();
+  });
+
+  it('splits a named source by bearer credential label', async () => {
+    const source = await cpRepo.createSource('Steven', null, 'test-admin');
+    const desktop = await cpRepo.createCredential(source.id, 'desktop', ['games:submit'], 'test-admin');
+    const laptop = await cpRepo.createCredential(source.id, 'laptop', ['games:submit'], 'test-admin');
+
+    const submit = async (credential: string, gameId: string) => fetch(`${baseUrl}/v1/games`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${credential}`,
+        'content-type': 'application/json',
+        'idempotency-key': gameId,
+      },
+      body: JSON.stringify(sampleGame({ gameId, stateHash: `${gameId}-state`, source: 'spoofed' })),
+    });
+    expect((await submit(desktop.fullKey, 'source-desktop-1')).status).toBe(201);
+    expect((await submit(desktop.fullKey, 'source-desktop-2')).status).toBe(201);
+    expect((await submit(laptop.fullKey, 'source-laptop-1')).status).toBe(201);
+
+    const response = await fetch(`${baseUrl}/v1/stats/sources`);
+    expect(response.status).toBe(200);
+    const json = await response.json() as {
+      sources: {
+        source: string;
+        submissions: number;
+        credentials: { credentialId: string | null; label: string; submissions: number }[];
+      }[];
+    };
+    const steven = json.sources.find(row => row.source === 'Steven');
+    expect(steven).toMatchObject({ submissions: 3 });
+    expect(steven!.credentials).toEqual([
+      expect.objectContaining({ credentialId: desktop.id, label: 'desktop', submissions: 2 }),
+      expect.objectContaining({ credentialId: laptop.id, label: 'laptop', submissions: 1 }),
+    ]);
   });
 
   it('serves cached hourly recent game buckets', async () => {

@@ -924,6 +924,7 @@ body {
 .sources-pie-center span { font: 600 10px var(--font-body); color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
 .sources-top-source { text-align: center; }
 .sources-table { display: grid; gap: 8px; }
+.source-group { display: grid; gap: 3px; }
 .source-row {
   display: grid;
   grid-template-columns: 12px minmax(120px, 1.2fr) minmax(90px, 2fr) 64px 54px 70px;
@@ -934,6 +935,10 @@ body {
   border-radius: 8px;
   background: rgba(255,255,255,0.025);
 }
+.source-total-row { background: rgba(255,255,255,0.035); }
+.source-credential-row { margin-left: 20px; border-style: dashed; background: rgba(255,255,255,0.012); }
+.source-credential-row .source-name { color: var(--muted); }
+.source-credential-branch { color: var(--muted); font: 600 12px var(--font-mono); text-align: center; }
 .source-dot { width: 10px; height: 10px; border-radius: 50%; }
 .source-name { font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .source-bar { height: 8px; border-radius: 999px; background: rgba(255,255,255,0.07); overflow: hidden; }
