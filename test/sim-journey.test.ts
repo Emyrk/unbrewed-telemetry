@@ -83,6 +83,32 @@ describeDb('public journey', () => {
     expect(a1.hero?.wilson95).toHaveLength(2);
   });
 
+  it('shows an active runner from a LEASED job with ZERO completions (liveness keys on leases, not completions)', async () => {
+    // The bug: an hour-long ISMCTS game holds a leased job for the whole hour
+    // before completing, so a completion-based chip reads "no active runners" the
+    // entire time. Here: claim a job, complete NOTHING, and the runner must show.
+    const src = await cp.createSource('sim-fleet-live', null, 't');
+    const cred = await cp.createCredential(src.id, 'h', ['sim:claim'], 't');
+    const arm1 = await cp.createCampaign({ name: 'arm1', spec: {}, baseSeed: 20000, games: [{ spec: {} }, { spec: {} }], createdBy: 't' });
+
+    const claim = await fetch(`${baseUrl}/v1/sim/claim`, { method: 'POST', headers: { authorization: `Bearer ${cred.fullKey}` }, body: JSON.stringify({ campaignId: arm1.id, count: 1 }) });
+    const { jobs } = (await claim.json()) as { jobs: Array<{ id: string }> };
+    expect(jobs).toHaveLength(1); // leased, never completed
+
+    const res = await fetch(`${baseUrl}/v1/sim/public/journey`);
+    const body = (await res.json()) as {
+      runners: Array<{ runner: string; leasedJobs: number; live: boolean }>;
+      steps: Array<{ name: string; completedGames: number; leasedJobs: number }>;
+    };
+
+    // The chip is populated purely from the lease — no game has completed.
+    expect(body.runners.length).toBeGreaterThan(0);
+    expect(body.runners.some((r) => r.live && r.leasedJobs >= 1)).toBe(true);
+    const a1 = body.steps.find((s) => s.name === 'arm1')!;
+    expect(a1.completedGames).toBe(0);
+    expect(a1.leasedJobs).toBe(1);
+  });
+
   it('accepts a custom ?campaigns list and serves the static page', async () => {
     const res = await fetch(`${baseUrl}/v1/sim/public/journey?campaigns=arm1,mirror`);
     const body = (await res.json()) as { steps: Array<{ name: string }> };

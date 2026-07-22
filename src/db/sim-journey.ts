@@ -113,19 +113,31 @@ async function stepFor(pool: Pool, name: string): Promise<JourneyStep> {
   };
 }
 
-/** Runners currently holding leases across the mission's campaigns. */
+/**
+ * Runners currently holding leases across the mission's campaigns.
+ *
+ * Liveness keys ONLY on leases + heartbeats, never on completions — an hour-long
+ * ISMCTS game holds a leased job (its lease renewed by heartbeats) for the whole
+ * hour before it completes, so a completion-based signal would read "no active
+ * runners" for that entire first hour even though a worker is plainly busy.
+ *
+ * ANY leased job surfaces a runner, so the chip can never read dead while work is
+ * genuinely in flight: `leased_by` is coalesced (a lease with no attributed owner
+ * still shows as one runner rather than vanishing), and `live` is true when a
+ * lease is unexpired — i.e. heartbeats are keeping it fresh.
+ */
 async function activeRunners(pool: Pool, names: string[], nowMs: number): Promise<JourneyRunner[]> {
   if (names.length === 0) return [];
   const rows = await pool.query<{ runner: string; leased_jobs: string; last_leased_at: Date | null; live: boolean }>(
-    `SELECT j.leased_by AS runner,
+    `SELECT COALESCE(j.leased_by, 'unknown') AS runner,
             count(*)::bigint AS leased_jobs,
             max(j.leased_at) AS last_leased_at,
             bool_or(j.lease_expires_at > now()) AS live
      FROM sim_jobs j
      JOIN sim_campaigns c ON c.id = j.campaign_id
-     WHERE c.name = ANY($1) AND j.status = 'leased' AND j.leased_by IS NOT NULL
-     GROUP BY j.leased_by
-     ORDER BY last_leased_at DESC NULLS LAST`,
+     WHERE c.name = ANY($1) AND j.status = 'leased'
+     GROUP BY COALESCE(j.leased_by, 'unknown')
+     ORDER BY max(j.leased_at) DESC NULLS LAST`,
     [names],
   );
   void nowMs;
