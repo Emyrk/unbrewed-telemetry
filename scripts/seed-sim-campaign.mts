@@ -55,8 +55,17 @@ const PAIRINGS: Array<[string, string]> = [
   ['the-mandalorian', 'king-kong'],
 ];
 
-const expert = (iters: number): string => `expert(${iters},${MS}ms)`;
-const hard = (simCap: number): string => `hard(${simCap},${MS}ms)`;
+// CANONICAL PILOT FORM (Emyrk's convention — verified against ai/registry.ts
+// parseSimulationDifficulty + PR #250 sim-game.ts): `bot:<difficulty>(<sims>,<secs>s)`.
+// The `bot:` prefix is what his dashboards classify human-vs-bot by, and the
+// duration is in SECONDS. His runner strips `bot:` and accepts either unit, so
+// this parses on both sides; using it keeps our flushed games correctly labelled.
+const SECS = Math.round(MS / 1000);
+const expert = (iters: number): string => `bot:expert(${iters},${SECS}s)`;
+const hard = (simCap: number): string => `bot:hard(${simCap},${SECS}s)`;
+// Grid variant pilot (publish-only; not a resolvable difficulty). bot:-prefixed so
+// it still classifies as a bot and distinguishes variants in per-variant stats.
+const variantPilot = (variantId: string): string => `bot:mc(${variantId})`;
 
 interface JobRow {
   gameIndex: number;
@@ -118,7 +127,7 @@ function gridJobs(): JobRow[] {
       const [hA, hB] = PAIRINGS[p]!;
       for (let i = 0; i < perPairing; i++) {
         const seed = BigInt(GRID_SEED + vIdx * 1_000_000 + p * 100_000 + i);
-        const spec = { ...duel(hA, `mc(${variantId})`, hB, hard(HARD_SIMB)), variantId, step: 'grid' };
+        const spec = { ...duel(hA, variantPilot(variantId), hB, hard(HARD_SIMB)), variantId, step: 'grid' };
         jobs.push({ gameIndex: gi, seed, spec });
         gi++;
       }
@@ -162,6 +171,47 @@ async function resetFailedJobs(pool: Pool, campaignId: string): Promise<number> 
 }
 
 /** Insert jobs that have neither a pending job nor a completed game yet. */
+/**
+ * A campaign-level spec in Emyrk's pool shape (his admin UI renders
+ * `campaign.spec` as format/maps/teams with `decks`/`pilots` pools). Our internal
+ * {kind,a,b} shorthand is preserved under the `x-ismcts` extension key so nothing
+ * we rely on is lost. Uses pairing 0 as the representative matchup.
+ */
+function campaignSpec(pilotA: string, pilotB: string, x: Record<string, unknown>): Record<string, unknown> {
+  const [hA, hB] = PAIRINGS[0]!;
+  return {
+    format: 'duel',
+    maps: [MAP],
+    teams: [{ seats: [{ decks: [hA], pilots: [pilotA] }] }, { seats: [{ decks: [hB], pilots: [pilotB] }] }],
+    'x-ismcts': x,
+  };
+}
+
+/**
+ * ROLLING-SAFE in-place migration: bring EXISTING job specs to the current shape
+ * (adds `format`, canonical pilots). Only touches `pending`/`failed` rows — never
+ * `leased` (a game in flight keeps the spec it was claimed with) or completed
+ * (its game row is immutable). New claims pick up the updated spec, so the fleet
+ * needs no restart. Returns how many rows changed.
+ */
+async function updateJobSpecs(pool: Pool, campaignId: string, jobs: JobRow[]): Promise<number> {
+  if (jobs.length === 0) return 0;
+  let updated = 0;
+  for (let i = 0; i < jobs.length; i += 1000) {
+    const batch = jobs.slice(i, i + 1000);
+    const res = await pool.query(
+      `UPDATE sim_jobs sj SET spec = j.spec::jsonb
+       FROM unnest($2::integer[], $3::text[]) AS j(game_index, spec)
+       WHERE sj.campaign_id = $1 AND sj.game_index = j.game_index
+         AND sj.status IN ('pending', 'failed')
+         AND sj.spec IS DISTINCT FROM j.spec::jsonb`,
+      [campaignId, batch.map((b) => b.gameIndex), batch.map((b) => JSON.stringify(b.spec))],
+    );
+    updated += res.rowCount ?? 0;
+  }
+  return updated;
+}
+
 async function insertJobs(pool: Pool, campaignId: string, jobs: JobRow[]): Promise<number> {
   if (jobs.length === 0) return 0;
   let inserted = 0;
@@ -187,34 +237,38 @@ async function insertJobs(pool: Pool, campaignId: string, jobs: JobRow[]): Promi
 async function main(): Promise<void> {
   const pool = new Pool({ connectionString: process.env.DATABASE_URL ?? LOCAL_COMPOSE_DATABASE_URL });
   try {
-    const steps: Array<{ name: string; baseSeed: bigint; jobs: JobRow[]; spec: unknown }> = [
-      { name: 'grid', baseSeed: BigInt(GRID_SEED), jobs: gridJobs(), spec: { kind: 'grid', variants: gridVariants } },
-      { name: 'arm1', baseSeed: 20_000n, jobs: armJobs('arm1', ARM1_ITERS, HARD_SIMB, ARM_GAMES), spec: { kind: 'arm', a: expert(ARM1_ITERS), b: hard(HARD_SIMB) } },
-      { name: 'arm2', baseSeed: 20_000n, jobs: armJobs('arm2', ARM2_ITERS, HARD_SIMB, ARM_GAMES), spec: { kind: 'arm', a: expert(ARM2_ITERS), b: hard(HARD_SIMB) } },
-      { name: 'arm3', baseSeed: 20_000n, jobs: armJobs('arm3', ARM1_ITERS, ARM3_WINNER_SIMB, ARM_GAMES), spec: { kind: 'arm', a: expert(ARM1_ITERS), b: hard(ARM3_WINNER_SIMB) } },
-      { name: 'arm5', baseSeed: 20_000n, jobs: armJobs('arm5', ARM5_ITERS, ARM5_SIMB, ARM_GAMES), spec: { kind: 'arm', a: expert(ARM5_ITERS), b: hard(ARM5_SIMB) } },
-      { name: 'mirror', baseSeed: 20_000n, jobs: armJobs('mirror', MIRROR_ITERS, 0, MIRROR_GAMES, true), spec: { kind: 'mirror', a: expert(MIRROR_ITERS) } },
+    const steps: Array<{ name: string; baseSeed: bigint; jobs: JobRow[]; spec: Record<string, unknown> }> = [
+      { name: 'grid', baseSeed: BigInt(GRID_SEED), jobs: gridJobs(), spec: campaignSpec(variantPilot(gridVariants[0] ?? 'sims-64'), hard(HARD_SIMB), { kind: 'grid', variants: gridVariants }) },
+      { name: 'arm1', baseSeed: 20_000n, jobs: armJobs('arm1', ARM1_ITERS, HARD_SIMB, ARM_GAMES), spec: campaignSpec(expert(ARM1_ITERS), hard(HARD_SIMB), { kind: 'arm', a: expert(ARM1_ITERS), b: hard(HARD_SIMB) }) },
+      { name: 'arm2', baseSeed: 20_000n, jobs: armJobs('arm2', ARM2_ITERS, HARD_SIMB, ARM_GAMES), spec: campaignSpec(expert(ARM2_ITERS), hard(HARD_SIMB), { kind: 'arm', a: expert(ARM2_ITERS), b: hard(HARD_SIMB) }) },
+      { name: 'arm3', baseSeed: 20_000n, jobs: armJobs('arm3', ARM1_ITERS, ARM3_WINNER_SIMB, ARM_GAMES), spec: campaignSpec(expert(ARM1_ITERS), hard(ARM3_WINNER_SIMB), { kind: 'arm', a: expert(ARM1_ITERS), b: hard(ARM3_WINNER_SIMB) }) },
+      { name: 'arm5', baseSeed: 20_000n, jobs: armJobs('arm5', ARM5_ITERS, ARM5_SIMB, ARM_GAMES), spec: campaignSpec(expert(ARM5_ITERS), hard(ARM5_SIMB), { kind: 'arm', a: expert(ARM5_ITERS), b: hard(ARM5_SIMB) }) },
+      { name: 'mirror', baseSeed: 20_000n, jobs: armJobs('mirror', MIRROR_ITERS, 0, MIRROR_GAMES, true), spec: campaignSpec(expert(MIRROR_ITERS), expert(MIRROR_ITERS), { kind: 'mirror', a: expert(MIRROR_ITERS) }) },
     ];
     const ids: string[] = [];
     for (const s of steps) {
       const id = await upsertCampaign(pool, s.name, s.spec, s.baseSeed, s.jobs.length);
+      // Bring the campaign-level spec to the conformant shape too (idempotent).
+      await pool.query('UPDATE sim_campaigns SET spec = $2::jsonb WHERE id = $1 AND spec IS DISTINCT FROM $2::jsonb', [id, JSON.stringify(s.spec)]);
       const reset = await resetFailedJobs(pool, id);
       const ins = await insertJobs(pool, id, s.jobs);
+      const upd = await updateJobSpecs(pool, id, s.jobs);
       ids.push(id);
-      console.log(`  ${s.name.padEnd(7)} campaign ${id} · ${s.jobs.length} planned · ${ins} inserted · ${reset} failed→pending`);
+      console.log(`  ${s.name.padEnd(7)} campaign ${id} · ${s.jobs.length} planned · ${ins} inserted · ${upd} spec-migrated · ${reset} failed→pending`);
     }
     const pin = ids.join(',');
     console.log('');
-    console.log('Campaigns seeded. PIN the fleet to OUR campaigns so it never claims another');
-    console.log("team's work on the shared control plane (paste this into the fleet command):");
+    console.log('Campaigns seeded. Run them with Emyrk\'s control-plane worker (the one');
+    console.log('canonical executor), PINNED to OUR campaigns so it never claims another');
+    console.log("team's jobs on the shared control plane. In the unbrewed-pro-server checkout:");
     console.log('');
     console.log(`  export SIM_CAMPAIGN_ID=${pin}`);
+    console.log('  TELEMETRY_URL=<origin> TELEMETRY_API_KEY=<ubk_…> \\');
+    console.log('    npm run sim:worker -- --campaign "$SIM_CAMPAIGN_ID"   # or SIM_CAMPAIGN_ID env');
     console.log('');
-    console.log('Then start the fleet in JOB MODE:');
-    console.log('  SIM_HOST_KEY=<ubk_…> TELEMETRY_URL=<origin> SIM_CAMPAIGN_ID=$SIM_CAMPAIGN_ID \\');
-    console.log('    BRANCH=<campaign branch> JOBS=22 bash scripts/sim-join.sh');
-    console.log('The fleet flushes its local store (grid backfill + solo games) onto these');
-    console.log('jobs on boot, then runs the remaining arm games — only within these campaigns.');
+    console.log('Runs only within these campaigns. A killed worker\'s in-flight games are');
+    console.log('reclaimed and re-run. Grid jobs are already completed (backfill done); the');
+    console.log('worker picks up the remaining arm/mirror games. See docs/eval/README.md.');
   } finally {
     await pool.end();
   }
