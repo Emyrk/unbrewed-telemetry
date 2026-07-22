@@ -9,3 +9,6 @@ coverage/
 
 # direnv (local env, may hold DB creds / secrets)
 .envrc
+
+# Sim-fleet plaintext bearer keys (#248) — provisioned locally, NEVER commit.
+sim-credentials.local.json

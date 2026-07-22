@@ -5,6 +5,29 @@
 import { randomUUID, randomBytes, randomInt } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { hashSecret, verifySecret, generateCredential, type Scope } from '../http/bearer-auth.js';
+import { wilson } from '../stats/wilson.js';
+
+export interface CampaignPilotStat {
+  pilot: string;
+  games: number;
+  wins: number;
+  rate: number;
+  wilson95: [number, number];
+}
+
+export interface CampaignProgress {
+  campaignId: string;
+  name: string;
+  status: string;
+  totalGames: number;
+  completedGames: number;
+  failedGames: number;
+  /** True when the campaign's games span more than one engine content_version. */
+  mixedContentVersion: boolean;
+  contentVersions: string[];
+  /** Per-pilot win rate with a Wilson 95% CI — the road-to-expert view. */
+  pilots: CampaignPilotStat[];
+}
 
 // ============================================================================
 // Admin sessions
@@ -794,5 +817,60 @@ export class ControlPlaneRepository {
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * Campaign-scoped win-rate view (#248, the ISMCTS "road-to-expert" report). The
+   * control plane already banks each completed sim game into `games` with campaign
+   * provenance and dedups by `(campaign_id, campaign_game_index)`; this folds those
+   * games into a per-pilot win rate with a Wilson 95% CI — the read the #239 report
+   * needs, which the deck-balance stats do not answer campaign-scoped. Returns null
+   * for an unknown campaign.
+   */
+  async campaignProgress(campaignId: string): Promise<CampaignProgress | null> {
+    const campaign = await this.pool.query<{
+      name: string; status: string; total_games: number; completed_games: number; failed_games: number;
+    }>(
+      `SELECT name, status, total_games, completed_games, failed_games FROM sim_campaigns WHERE id = $1`,
+      [campaignId],
+    );
+    if (campaign.rowCount === 0) return null;
+    const c = campaign.rows[0]!;
+
+    const pilotRows = await this.pool.query<{ pilot: string; games: string; wins: string }>(
+      `SELECT gs.pilot,
+              count(*)::bigint AS games,
+              count(*) FILTER (WHERE gs.won)::bigint AS wins
+       FROM games g
+       JOIN game_seats gs ON gs.game_id = g.id
+       WHERE g.campaign_id = $1
+       GROUP BY gs.pilot
+       ORDER BY gs.pilot`,
+      [campaignId],
+    );
+    const versionRows = await this.pool.query<{ content_version: string | null }>(
+      `SELECT DISTINCT content_version FROM games WHERE campaign_id = $1`,
+      [campaignId],
+    );
+    const contentVersions = versionRows.rows.map((r) => r.content_version).filter((v): v is string => v !== null);
+
+    const pilots: CampaignPilotStat[] = pilotRows.rows.map((r) => {
+      const games = Number(r.games);
+      const wins = Number(r.wins);
+      const w = wilson(wins, games);
+      return { pilot: r.pilot, games, wins, rate: games > 0 ? wins / games : 0, wilson95: [w.lo, w.hi] };
+    });
+
+    return {
+      campaignId,
+      name: c.name,
+      status: c.status,
+      totalGames: c.total_games,
+      completedGames: c.completed_games,
+      failedGames: c.failed_games,
+      mixedContentVersion: contentVersions.length > 1,
+      contentVersions,
+      pilots,
+    };
   }
 }
