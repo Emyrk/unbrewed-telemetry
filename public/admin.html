@@ -112,18 +112,28 @@
     .campaign-subtabs { display: flex; gap: 0.4rem; margin: 0.8rem 0 1rem; }
     .campaign-subtab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
     .priority-help { background: #171b28; border: 1px solid #343a55; border-radius: 8px; padding: 0.8rem 1rem; color: var(--text-muted); font-size: 0.8rem; line-height: 1.45; margin-bottom: 0.9rem; }
+    .priority-toolbar { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.9rem; }
+    .priority-toolbar-spacer { flex: 1; }
     .priority-board { display: flex; flex-direction: column; gap: 0.75rem; }
-    .priority-tier { border: 1px solid var(--border); border-radius: 9px; background: var(--surface); overflow: hidden; }
+    .priority-tier { border: 1px solid var(--border); border-radius: 9px; background: var(--surface); overflow: hidden; transition: border-color 0.15s, background 0.15s; }
+    .priority-tier.drop-target { border-color: var(--accent); background: #1d2030; }
     .priority-tier-header { display: flex; justify-content: space-between; align-items: center; gap: 0.8rem; padding: 0.55rem 0.75rem; border-bottom: 1px solid var(--border); background: #151822; }
     .priority-tier-title { font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
     .priority-tier-note { color: var(--text-muted); font-size: 0.72rem; }
-    .priority-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 0.65rem; padding: 0.7rem; }
-    .priority-card { min-width: 0; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); padding: 0.75rem; }
+    .priority-tier-actions { display: flex; align-items: center; gap: 0.45rem; }
+    .priority-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 0.65rem; padding: 0.7rem; min-height: 88px; }
+    .priority-empty { grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; min-height: 64px; border: 1px dashed var(--border); border-radius: 7px; color: var(--text-muted); font-size: 0.78rem; }
+    .priority-card { min-width: 0; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); padding: 0.75rem; transition: opacity 0.15s, border-color 0.15s; }
+    .priority-card[draggable="true"] { cursor: grab; }
+    .priority-card[draggable="true"]:active { cursor: grabbing; }
+    .priority-card.dragging { opacity: 0.45; border-color: var(--accent); }
     .priority-card-title { display: flex; justify-content: space-between; align-items: start; gap: 0.5rem; margin-bottom: 0.45rem; }
     .priority-card-name { font-weight: 600; overflow-wrap: anywhere; }
     .priority-card-progress { font-family: var(--mono); font-size: 0.78rem; color: var(--text-muted); margin-bottom: 0.6rem; }
     .priority-card-actions { display: flex; flex-wrap: wrap; gap: 0.35rem; }
     .priority-card-actions .btn { padding: 0.3rem 0.55rem; }
+    .priority-drag-hint { color: var(--text-muted); font-size: 0.74rem; }
+    .priority-add-lane { display: flex; justify-content: center; margin-top: -0.35rem; }
     .campaign-history { display: none; }
     .campaign-history.active { display: block; }
     .campaign-queue { display: none; }
@@ -305,8 +315,17 @@
             <button id="campaign-subtab-history" class="btn btn-sm btn-ghost campaign-subtab" onclick="setCampaignView('history')">Completed &amp; Cancelled</button>
           </div>
           <div id="campaign-queue" class="campaign-queue active">
-            <div class="priority-help"><strong>Scheduling:</strong> higher tiers finish first. Campaigns shown side by side in one tier are claimed round-robin. Paused campaigns keep their place but receive no jobs.</div>
-            <div id="campaign-schedule-status" class="campaign-detail-status"></div>
+            <div class="priority-help"><strong>Scheduling:</strong> higher lanes finish first. Campaigns shown side by side in one lane are claimed round-robin. Paused campaigns keep their place but receive no jobs.</div>
+            <div class="priority-toolbar">
+              <button id="campaign-schedule-edit" class="btn btn-primary btn-sm" onclick="beginCampaignScheduleEdit()">Change Priorities</button>
+              <div id="campaign-schedule-controls" style="display:none">
+                <button class="btn btn-ghost btn-sm" onclick="addCampaignLane()">Add Sim Lane</button>
+                <button class="btn btn-primary btn-sm" onclick="saveCampaignScheduleEdit()">Save Priorities</button>
+                <button class="btn btn-ghost btn-sm" onclick="cancelCampaignScheduleEdit()">Cancel</button>
+              </div>
+              <span class="priority-toolbar-spacer"></span>
+              <span id="campaign-schedule-status" class="campaign-detail-status"></span>
+            </div>
             <div id="campaigns-list"></div>
           </div>
           <div id="campaign-history" class="campaign-history"></div>
@@ -331,6 +350,9 @@
     let adminDecks = [];
     let adminCampaigns = [];
     let campaignView = 'queue';
+    let campaignScheduleEditing = false;
+    let draftCampaignTiers = null;
+    let draggedCampaignId = null;
     let campaignMode = 'builder';
     const campaignKnownSpecKeys = new Set(['format', 'maps', 'map', 'teams', 'swapStartingPlayer']);
     const campaignPilotValues = ['bot:easy', 'bot:medium', 'bot:hard', 'bot:expert'];
@@ -515,44 +537,8 @@
 
     function renderCampaigns(campaigns) {
       adminCampaigns = campaigns;
-      const queue = document.getElementById('campaigns-list');
+      renderCampaignQueue();
       const history = document.getElementById('campaign-history');
-      const tiers = activeCampaignTiers();
-      if (tiers.length === 0) {
-        queue.innerHTML = '<div class="empty-state">No active or paused campaigns.</div>';
-      } else {
-        queue.innerHTML = `<div class="priority-board">${tiers.map((tier, tierIndex) => {
-          const cards = tier.map((campaign, position) => {
-            const toggle = campaign.status === 'active'
-              ? `<button class="btn btn-ghost btn-sm" onclick="setCampaignActive('${campaign.id}', false)">Pause</button>`
-              : `<button class="btn btn-primary btn-sm" onclick="setCampaignActive('${campaign.id}', true)">Activate</button>`;
-            return `<div class="priority-card">
-              <div class="priority-card-title"><span class="priority-card-name">${esc(campaign.name)}</span>${campaignBadge(campaign)}</div>
-              <div class="priority-card-progress">${campaign.completedGames}/${campaign.totalGames} · ${campaign.failedGames} failed</div>
-              <div class="priority-card-actions">
-                <button class="btn btn-ghost btn-sm" onclick="viewCampaign('${campaign.id}')">View</button>
-                ${toggle}
-                ${tierIndex > 0 ? `<button class="btn btn-ghost btn-sm" title="Move to a higher-priority tier" onclick="moveCampaignPriority('${campaign.id}', -1)">↑ Priority</button>` : ''}
-                ${tierIndex < tiers.length - 1 ? `<button class="btn btn-ghost btn-sm" title="Move to a lower-priority tier" onclick="moveCampaignPriority('${campaign.id}', 1)">↓ Priority</button>` : ''}
-                ${tierIndex > 0 ? `<button class="btn btn-ghost btn-sm" title="Run round-robin with the tier above" onclick="joinCampaignTier('${campaign.id}', -1)">Join ↑</button>` : ''}
-                ${tierIndex < tiers.length - 1 ? `<button class="btn btn-ghost btn-sm" title="Run round-robin with the tier below" onclick="joinCampaignTier('${campaign.id}', 1)">Join ↓</button>` : ''}
-                ${tier.length > 1 ? `<button class="btn btn-ghost btn-sm" onclick="makeCampaignSolo('${campaign.id}')">Own tier</button>` : ''}
-                ${position > 0 ? `<button class="btn btn-ghost btn-sm" title="Move left within this round-robin tier" onclick="shiftCampaignPeer('${campaign.id}', -1)">←</button>` : ''}
-                ${position < tier.length - 1 ? `<button class="btn btn-ghost btn-sm" title="Move right within this round-robin tier" onclick="shiftCampaignPeer('${campaign.id}', 1)">→</button>` : ''}
-                <button class="btn btn-danger btn-sm" onclick="cancelCampaign('${campaign.id}')">Cancel</button>
-              </div>
-            </div>`;
-          }).join('');
-          return `<div class="priority-tier">
-            <div class="priority-tier-header">
-              <span class="priority-tier-title">Priority ${tierIndex + 1}${tierIndex === 0 ? ' · runs first' : ''}</span>
-              <span class="priority-tier-note">${tier.length > 1 ? `${tier.length} campaigns · round robin` : 'finishes before the next tier'}</span>
-            </div>
-            <div class="priority-cards">${cards}</div>
-          </div>`;
-        }).join('')}</div>`;
-      }
-
       const archived = campaigns.filter(campaign => campaign.status === 'completed' || campaign.status === 'cancelled');
       if (archived.length === 0) {
         history.innerHTML = '<div class="empty-state">No completed or cancelled campaigns.</div>';
@@ -573,20 +559,110 @@
       return activeCampaignTiers().map(tier => tier.map(campaign => campaign.id));
     }
 
-    async function saveCampaignSchedule(tiers) {
-      const statusEl = document.getElementById('campaign-schedule-status');
-      statusEl.textContent = 'Saving schedule…';
-      statusEl.className = 'success-msg campaign-detail-status';
-      const { status, data } = await api('PUT', '/v1/admin/campaign/schedule', { tiers: tiers.filter(tier => tier.length) });
-      if (status !== 200 || !data.ok) {
-        statusEl.textContent = data.message || 'Could not save campaign schedule';
-        statusEl.className = 'error-msg campaign-detail-status';
-        await loadCampaigns();
+    function renderCampaignQueue() {
+      const queue = document.getElementById('campaigns-list');
+      const editButton = document.getElementById('campaign-schedule-edit');
+      const editControls = document.getElementById('campaign-schedule-controls');
+      editButton.style.display = campaignScheduleEditing ? 'none' : '';
+      editControls.style.display = campaignScheduleEditing ? 'flex' : 'none';
+      editControls.style.gap = '0.5rem';
+
+      const campaignById = new Map(adminCampaigns.map(campaign => [campaign.id, campaign]));
+      const tiers = campaignScheduleEditing && draftCampaignTiers
+        ? draftCampaignTiers
+        : campaignScheduleIds();
+      if (tiers.length === 0) {
+        queue.innerHTML = '<div class="empty-state">No active or paused campaigns.</div>';
         return;
       }
-      statusEl.textContent = 'Schedule saved';
-      statusEl.className = 'success-msg campaign-detail-status';
-      renderCampaigns(data.campaigns || []);
+
+      queue.innerHTML = `<div class="priority-board">${tiers.map((tier, tierIndex) => {
+        const campaigns = tier.map(id => campaignById.get(id)).filter(Boolean);
+        const cards = campaigns.map((campaign, position) => {
+          const toggle = campaign.status === 'active'
+            ? `<button class="btn btn-ghost btn-sm" onclick="setCampaignActive('${campaign.id}', false)">Pause</button>`
+            : `<button class="btn btn-primary btn-sm" onclick="setCampaignActive('${campaign.id}', true)">Activate</button>`;
+          const actions = campaignScheduleEditing
+            ? '<span class="priority-drag-hint">Drag to reorder or move to another lane</span>'
+            : `<button class="btn btn-ghost btn-sm" onclick="viewCampaign('${campaign.id}')">View</button>${toggle}<button class="btn btn-danger btn-sm" onclick="cancelCampaign('${campaign.id}')">Cancel</button>`;
+          const dragAttributes = campaignScheduleEditing
+            ? `draggable="true" ondragstart="startCampaignDrag(event, '${campaign.id}')" ondragend="endCampaignDrag()" ondragover="allowCampaignDrop(event)" ondrop="dropCampaign(event, ${tierIndex}, ${position})"`
+            : '';
+          return `<div class="priority-card" data-campaign-id="${campaign.id}" ${dragAttributes}>
+            <div class="priority-card-title"><span class="priority-card-name">${esc(campaign.name)}</span>${campaignBadge(campaign)}</div>
+            <div class="priority-card-progress">${campaign.completedGames}/${campaign.totalGames} · ${campaign.failedGames} failed</div>
+            <div class="priority-card-actions">${actions}</div>
+          </div>`;
+        }).join('');
+        const note = campaigns.length > 1 ? `${campaigns.length} campaigns · round robin` : campaigns.length === 1 ? 'finishes before the next lane' : 'drop a campaign here';
+        const remove = campaignScheduleEditing && campaigns.length === 0
+          ? `<button class="btn btn-ghost btn-sm" onclick="removeCampaignLane(${tierIndex})">Remove lane</button>`
+          : '';
+        return `<div class="priority-tier" data-tier-index="${tierIndex}" ondragover="allowCampaignDrop(event)" ondragenter="highlightCampaignLane(event)" ondragleave="unhighlightCampaignLane(event)" ondrop="dropCampaign(event, ${tierIndex})">
+          <div class="priority-tier-header">
+            <span class="priority-tier-title">Priority ${tierIndex + 1}${tierIndex === 0 ? ' · runs first' : ''}</span>
+            <span class="priority-tier-actions"><span class="priority-tier-note">${note}</span>${remove}</span>
+          </div>
+          <div class="priority-cards">${cards || (campaignScheduleEditing ? '<div class="priority-empty">Drop a campaign into this sim lane</div>' : '')}</div>
+        </div>${campaignScheduleEditing ? `<div class="priority-add-lane"><button class="btn btn-ghost btn-sm" onclick="addCampaignLane(${tierIndex + 1})">+ Add lane below</button></div>` : ''}`;
+      }).join('')}</div>`;
+    }
+
+    function beginCampaignScheduleEdit() {
+      campaignScheduleEditing = true;
+      draftCampaignTiers = campaignScheduleIds().map(tier => [...tier]);
+      document.getElementById('campaign-schedule-status').textContent = '';
+      renderCampaignQueue();
+    }
+
+    function cancelCampaignScheduleEdit() {
+      campaignScheduleEditing = false;
+      draftCampaignTiers = null;
+      draggedCampaignId = null;
+      document.getElementById('campaign-schedule-status').textContent = '';
+      renderCampaignQueue();
+    }
+
+    function addCampaignLane(index = draftCampaignTiers?.length ?? 0) {
+      if (!campaignScheduleEditing || !draftCampaignTiers) return;
+      draftCampaignTiers.splice(index, 0, []);
+      renderCampaignQueue();
+    }
+
+    function removeCampaignLane(index) {
+      if (!campaignScheduleEditing || !draftCampaignTiers || draftCampaignTiers[index]?.length) return;
+      draftCampaignTiers.splice(index, 1);
+      renderCampaignQueue();
+    }
+
+    function startCampaignDrag(event, id) {
+      if (!campaignScheduleEditing) return;
+      draggedCampaignId = id;
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', id);
+      event.currentTarget.classList.add('dragging');
+    }
+
+    function endCampaignDrag() {
+      draggedCampaignId = null;
+      document.querySelectorAll('.priority-card.dragging, .priority-tier.drop-target').forEach(element => {
+        element.classList.remove('dragging', 'drop-target');
+      });
+    }
+
+    function allowCampaignDrop(event) {
+      if (!campaignScheduleEditing) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+    }
+
+    function highlightCampaignLane(event) {
+      if (!campaignScheduleEditing) return;
+      event.currentTarget.classList.add('drop-target');
+    }
+
+    function unhighlightCampaignLane(event) {
+      if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.classList.remove('drop-target');
     }
 
     function locateCampaign(tiers, id) {
@@ -597,53 +673,42 @@
       return null;
     }
 
-    function moveCampaignPriority(id, direction) {
-      const tiers = campaignScheduleIds();
-      const location = locateCampaign(tiers, id);
-      if (!location) return;
-      if (tiers[location.tier].length === 1) {
-        const target = location.tier + direction;
-        if (target < 0 || target >= tiers.length) return;
-        [tiers[location.tier], tiers[target]] = [tiers[target], tiers[location.tier]];
-      } else {
-        tiers[location.tier].splice(location.position, 1);
-        const target = direction < 0 ? location.tier : location.tier + 1;
-        tiers.splice(target, 0, [id]);
+    function dropCampaign(event, targetTier, targetPosition) {
+      if (!campaignScheduleEditing || !draftCampaignTiers) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const id = draggedCampaignId || event.dataTransfer.getData('text/plain');
+      const source = locateCampaign(draftCampaignTiers, id);
+      if (!source || !draftCampaignTiers[targetTier]) return;
+      draftCampaignTiers[source.tier].splice(source.position, 1);
+      let insertAt = Number.isInteger(targetPosition) ? targetPosition : draftCampaignTiers[targetTier].length;
+      if (source.tier === targetTier && source.position < insertAt) insertAt -= 1;
+      insertAt = Math.max(0, Math.min(insertAt, draftCampaignTiers[targetTier].length));
+      draftCampaignTiers[targetTier].splice(insertAt, 0, id);
+      draggedCampaignId = null;
+      renderCampaignQueue();
+    }
+
+    async function saveCampaignScheduleEdit() {
+      if (!campaignScheduleEditing || !draftCampaignTiers) return;
+      const tiers = draftCampaignTiers.filter(tier => tier.length);
+      const statusEl = document.getElementById('campaign-schedule-status');
+      statusEl.textContent = 'Saving priorities…';
+      statusEl.className = 'success-msg campaign-detail-status';
+      const { status, data } = await api('PUT', '/v1/admin/campaign/schedule', { tiers });
+      if (status !== 200 || !data.ok) {
+        statusEl.textContent = data.message || 'Could not save campaign priorities';
+        statusEl.className = 'error-msg campaign-detail-status';
+        campaignScheduleEditing = false;
+        draftCampaignTiers = null;
+        await loadCampaigns();
+        return;
       }
-      void saveCampaignSchedule(tiers);
-    }
-
-    function joinCampaignTier(id, direction) {
-      const tiers = campaignScheduleIds();
-      const location = locateCampaign(tiers, id);
-      const targetTier = location ? tiers[location.tier + direction] : null;
-      if (!location || !targetTier) return;
-      const targetId = targetTier[0];
-      tiers[location.tier].splice(location.position, 1);
-      const compact = tiers.filter(tier => tier.length);
-      const target = compact.find(tier => tier.includes(targetId));
-      if (!target) return;
-      target.push(id);
-      void saveCampaignSchedule(compact);
-    }
-
-    function makeCampaignSolo(id) {
-      const tiers = campaignScheduleIds();
-      const location = locateCampaign(tiers, id);
-      if (!location || tiers[location.tier].length < 2) return;
-      tiers[location.tier].splice(location.position, 1);
-      tiers.splice(location.tier + 1, 0, [id]);
-      void saveCampaignSchedule(tiers);
-    }
-
-    function shiftCampaignPeer(id, direction) {
-      const tiers = campaignScheduleIds();
-      const location = locateCampaign(tiers, id);
-      if (!location) return;
-      const target = location.position + direction;
-      if (target < 0 || target >= tiers[location.tier].length) return;
-      [tiers[location.tier][location.position], tiers[location.tier][target]] = [tiers[location.tier][target], tiers[location.tier][location.position]];
-      void saveCampaignSchedule(tiers);
+      campaignScheduleEditing = false;
+      draftCampaignTiers = null;
+      statusEl.textContent = 'Priorities saved';
+      statusEl.className = 'success-msg campaign-detail-status';
+      renderCampaigns(data.campaigns || []);
     }
 
     async function loadCampaignBuilderOptions() {

@@ -45,8 +45,15 @@ describe('admin campaign editor', () => {
     expect(html).toContain('Completed &amp; Cancelled');
     expect(html).toContain('runs first');
     expect(html).toContain('round robin');
-    expect(html).toContain('Join ↑');
-    expect(html).toContain('Own tier');
+    expect(html).toContain('Change Priorities');
+    expect(html).toContain('id="campaign-schedule-controls" style="display:none"');
+    expect(html).toContain('Add Sim Lane');
+    expect(html).toContain('draggable="true"');
+    expect(html).toContain('ondrop="dropCampaign(event,');
+    expect(html).toContain('function addCampaignLane(');
+    expect(html).toContain('function saveCampaignScheduleEdit(');
+    expect(html).not.toContain('Join ↑');
+    expect(html).not.toContain('Own tier');
     expect(html).toContain("api('PUT', '/v1/admin/campaign/schedule'");
     expect(html).toContain("campaign.status === 'completed' || campaign.status === 'cancelled'");
 
