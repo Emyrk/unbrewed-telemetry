@@ -17,22 +17,22 @@
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--font-body); -webkit-font-smoothing: antialiased; }
   .topbar { background: var(--header); border-bottom: 1px solid var(--border-strong); box-shadow: 0 2px 10px rgba(0,0,0,0.2); }
-  .inner { max-width: 940px; margin: 0 auto; padding: 22px 24px; }
+  .inner { max-width: 960px; margin: 0 auto; padding: 22px 24px; }
   .brand { font: 600 22px var(--font-head); text-transform: uppercase; letter-spacing: 0.12em; color: #f6ecd8; }
-  .tag { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
-  .lede { color: var(--muted); max-width: 70ch; margin: 8px 0 0; line-height: 1.5; }
+  .lede { color: var(--muted); max-width: 72ch; margin: 8px 0 0; line-height: 1.5; }
   .meta { font-family: var(--font-mono); font-size: 11px; color: var(--muted-2); margin-top: 10px; }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
   .dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); }
   .dot.down { background: var(--muted-2); }
-
   .runners { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
   .runner { font-family: var(--font-mono); font-size: 11px; background: var(--panel-alt); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; }
 
-  .ladder { max-width: 940px; margin: 0 auto; padding: 8px 24px 60px; }
+  .ladder { max-width: 960px; margin: 0 auto; padding: 8px 24px 20px; }
   .step { position: relative; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin: 14px 0; }
   .step.gate { border-color: rgba(233,185,84,0.5); box-shadow: 0 0 0 1px rgba(233,185,84,0.15); }
-  .step-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .step-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; cursor: pointer; }
+  .step-head .chev { transition: transform 0.2s; color: var(--muted-2); font-family: var(--font-mono); }
+  .step.open .step-head .chev { transform: rotate(90deg); }
   .step-title { font: 500 17px var(--font-head); letter-spacing: 0.02em; }
   .role { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; padding: 3px 8px; border-radius: 5px; background: var(--panel-alt); color: var(--muted); border: 1px solid var(--border); }
   .role.gate { background: rgba(233,185,84,0.16); color: var(--accent); border-color: rgba(233,185,84,0.4); }
@@ -58,7 +58,50 @@
   .wr-big { font: 500 15px var(--font-mono); color: var(--text); }
   .verdict { margin-top: 8px; font-family: var(--font-mono); font-size: 12px; }
   .verdict.pass { color: var(--green); } .verdict.fail { color: var(--red); } .verdict.wait { color: var(--muted-2); }
-  .mixed { color: var(--red); font-family: var(--font-mono); font-size: 11px; margin-top: 6px; }
+
+  /* Expanded body */
+  .body { display: none; margin-top: 16px; border-top: 1px solid var(--border); padding-top: 14px; }
+  .step.open .body { display: block; animation: fade 0.25s ease; }
+  @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+  .zone { margin-top: 14px; }
+  .zone-h { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted-2); margin-bottom: 8px; }
+  .eta { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+
+  .strip { display: flex; flex-wrap: wrap; gap: 3px; }
+  .sq { width: 12px; height: 12px; border-radius: 2px; background: var(--track); position: relative; overflow: hidden; }
+  .sq .sq-done { position: absolute; left: 0; bottom: 0; width: 100%; background: var(--green); }
+  .sq.leased { box-shadow: 0 0 0 1px var(--accent) inset; }
+  .sq.failed { box-shadow: 0 0 0 1px var(--red) inset; }
+  .sq.empty { background: transparent; border: 1px dashed var(--border); }
+  .strip-key { font-family: var(--font-mono); font-size: 10px; color: var(--muted-2); margin-top: 6px; display: flex; gap: 14px; flex-wrap: wrap; }
+  .k { display: inline-flex; align-items: center; gap: 5px; }
+  .kbox { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+
+  table.vt { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.vt th, table.vt td { text-align: right; padding: 5px 8px; border-bottom: 1px solid var(--border); font-family: var(--font-mono); }
+  table.vt th { color: var(--muted-2); font-weight: 500; font-size: 11px; }
+  table.vt td:first-child, table.vt th:first-child { text-align: left; }
+
+  .hosts { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .hosts th, .hosts td { padding: 5px 8px; border-bottom: 1px solid var(--border); font-family: var(--font-mono); text-align: right; }
+  .hosts th { color: var(--muted-2); font-weight: 500; font-size: 11px; }
+  .hosts td:first-child, .hosts th:first-child { text-align: left; }
+  .sharebar { display: inline-block; height: 7px; border-radius: 4px; background: var(--violet); vertical-align: middle; }
+
+  .integrity { font-family: var(--font-mono); font-size: 12px; color: var(--muted); line-height: 1.7; }
+  .badge { display: inline-block; padding: 2px 7px; border-radius: 5px; border: 1px solid var(--border); margin-right: 6px; }
+  .warn { color: var(--red); border-color: rgba(224,121,106,0.5); }
+  .gatebox { margin-top: 8px; padding: 10px 12px; border-radius: 8px; background: rgba(233,185,84,0.08); border: 1px solid rgba(233,185,84,0.3); color: var(--text); }
+
+  .roadmap { max-width: 960px; margin: 8px auto 60px; padding: 0 24px; }
+  .roadmap h2 { font: 500 15px var(--font-head); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); border-top: 1px dashed var(--border-strong); padding-top: 20px; }
+  .phase { background: rgba(255,255,255,0.02); border: 1px dashed var(--border); border-radius: 10px; padding: 14px 18px; margin: 12px 0; opacity: 0.72; }
+  .phase.active { opacity: 1; border-style: solid; border-color: rgba(126,203,143,0.4); }
+  .phase h3 { margin: 0 0 4px; font: 500 15px var(--font-head); color: var(--muted); }
+  .phase.active h3 { color: var(--text); }
+  .phase ul { margin: 8px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+  .phase .tagline { color: var(--muted-2); font-family: var(--font-mono); font-size: 11px; }
+
   .footer { color: var(--muted-2); font-family: var(--font-mono); font-size: 11px; text-align: center; padding: 20px; }
   .err { color: var(--red); font-family: var(--font-mono); text-align: center; padding: 20px; }
 </style>
@@ -66,43 +109,53 @@
 <body>
   <div class="topbar"><div class="inner">
     <div class="brand">Road to Expert+</div>
-    <p class="lede">The mission: prove the sim-only <b>ISMCTS</b> tier is stronger than the flat Monte-Carlo bot we ship today — and say <i>why</i> we believe it, not just <i>that</i> we do. Each rung below is one experiment; watch the ladder fill as games land.</p>
+    <p class="lede">The mission: prove the sim-only <b>ISMCTS</b> tier is stronger than the flat Monte-Carlo bot we ship today — and say <i>why</i> we believe it, not just <i>that</i> we do. Each rung is one experiment; <b>click a rung</b> to expand its live data, contributors, and integrity.</p>
     <div class="meta" id="meta">loading…</div>
     <div class="runners" id="runners"></div>
   </div></div>
   <div class="ladder" id="ladder"></div>
-  <div class="footer">Public read-only view · experiment data only · auto-refreshes every 8s · <span id="src"></span></div>
+  <div class="roadmap" id="roadmap"></div>
+  <div class="footer">Public read-only view · experiment data only · aggregated server-side · auto-refreshes every 8s · <span id="src"></span></div>
 
 <script>
-// Plain-language mission narrative — WHAT each step proves and WHY it exists.
 const STEPS = {
-  grid:   { title: 'Knob grid', role: 'Tune the opponent', gate: null, target: null, bar: false,
+  grid:   { title: 'Knob grid', role: 'Tune the opponent', gate: null, target: null, bar: false, kind: 'grid',
             what: 'Find the strongest flat Monte-Carlo settings.',
             why: 'So ISMCTS is measured against the BEST non-tree bot we can build, not a weak default. The winning variant becomes arm 3’s opponent.' },
-  arm1:   { title: 'Arm 1 — ISMCTS@3000 vs hard-64', role: 'The gate', gate: 0.60, target: null, bar: true, isGate: true,
+  arm1:   { title: 'Arm 1 — ISMCTS@3000 vs hard-64', role: 'The gate', gate: 0.60, target: null, bar: true, isGate: true, kind: 'arm',
             what: 'Does the tier we’d ship beat the tier we ship today?',
             why: 'The literal acceptance gate: ≥60% over ≥1,000 games with the 95% interval excluding 50%.' },
-  arm2:   { title: 'Arm 2 — compute parity', role: 'Fair fight', gate: null, target: 0.50, bar: true,
+  arm2:   { title: 'Arm 2 — compute parity', role: 'Fair fight', gate: null, target: 0.50, bar: true, kind: 'arm',
             what: 'Does the tree add strength at EQUAL compute, or is ISMCTS just searching more?',
             why: '~1,000 playouts vs hard-64’s ~640 — a win here is attributable to the tree, not raw simulation count.' },
-  arm5:   { title: 'Arm 5 — wall-clock matched', role: 'Equal time', gate: null, target: 0.50, bar: true,
+  arm5:   { title: 'Arm 5 — wall-clock matched', role: 'Equal time', gate: null, target: 0.50, bar: true, kind: 'arm',
             what: 'At the same seconds per move, does the tree still win?',
             why: 'ismcts@3000 costs about the same wall-clock as mc@256. Answers “at equal time, is the tree better?” directly.' },
-  arm3:   { title: 'Arm 3 — vs tuned flat MC', role: 'Best opponent', gate: null, target: 0.50, bar: true,
+  arm3:   { title: 'Arm 3 — vs tuned flat MC', role: 'Best opponent', gate: null, target: 0.50, bar: true, kind: 'arm',
             what: 'Beats the grid’s BEST tuned flat MC, not just the shipping config.',
             why: 'The strongest claim the mission can make: better than the best non-tree bot, auto-derived from the knob grid.' },
-  mirror: { title: 'Arm 4 — ISMCTS mirror', role: 'Sanity control', gate: null, target: 0.50, bar: true, isMirror: true,
+  mirror: { title: 'Arm 4 — ISMCTS mirror', role: 'Sanity control', gate: null, target: 0.50, bar: true, isMirror: true, kind: 'arm',
             what: 'ISMCTS vs itself must land near 50%.',
             why: 'Proves the harness has no seat or seeding bias that could manufacture an edge in the arms above.' },
-  cost:   { title: 'Per-decision search cost', role: 'Measurement', gate: null, target: null, bar: false,
+  cost:   { title: 'Per-decision search cost', role: 'Measurement', gate: null, target: null, bar: false, kind: 'cost',
             what: 'How many milliseconds each bot spends per decision.',
             why: 'The wall-clock-matched arm rests on these numbers — they define what “equal time” means.' },
 };
 const ORDER = ['grid','arm1','arm2','arm3','arm5','mirror','cost'];
+const ROADMAP = [
+  { key: 'ship', title: 'Ship Expert+ to players', tagline: 'once the gate passes',
+    items: ['Engine: expose the Expert+ tier over the protocol + lobby so players can pick it.',
+            'Client (unbrewed-p2p #458): a per-hero tier badge so players see which heroes have a strong bot.'] },
+  { key: 'perdeck', title: 'Per-deck Expert+', tagline: 'deeper strength, hero by hero',
+    items: ['#243: per-deck evaluation weights — tune what the bot values for each hero.',
+            '#242 decision logger → #244: per-deck priors + a distilled value net, learned from logged games.'] },
+];
 const pct = (x) => (x*100).toFixed(1) + '%';
 const clamp = (x) => Math.max(0, Math.min(1, x));
+const expanded = new Set();
+const details = {};
 
-function statusClass(step, s) {
+function statusClass(s) {
   if (!s.found) return ['pending', 'pending'];
   if (s.status === 'completed') return ['done', '✅ done'];
   if (s.leasedJobs > 0 || s.status === 'active') return ['running', '⏳ running'];
@@ -112,82 +165,124 @@ function statusClass(step, s) {
 
 function winBar(meta, hero) {
   if (!meta.bar) return '';
-  if (!hero || hero.games === 0) return '<div class="winrate"><div class="wr-nums"><span>awaiting games…</span></div></div>';
+  if (!hero || hero.games === 0) return '<div class="wr-nums"><span>awaiting games…</span></div>';
   const [lo, hi] = hero.wilson95;
   const line = meta.gate ?? meta.target;
-  const lineHtml = line != null
-    ? `<div class="wr-line" style="left:${line*100}%"><span class="lab">${line===0.6?'60% gate':'50%'}</span></div>` : '';
-  return `<div class="winrate">
-    <div class="wr-big">${hero.pilot} &middot; ${pct(hero.rate)} <span style="color:var(--muted)">(${hero.wins}/${hero.games}, 95% CI ${pct(lo)}–${pct(hi)})</span></div>
-    <div class="wr-scale">
-      <div class="wr-track"></div>
+  const lineHtml = line != null ? `<div class="wr-line" style="left:${line*100}%"><span class="lab">${line===0.6?'60% gate':'50%'}</span></div>` : '';
+  return `<div class="wr-big">${hero.pilot} &middot; ${pct(hero.rate)} <span style="color:var(--muted)">(${hero.wins}/${hero.games}, 95% CI ${pct(lo)}–${pct(hi)})</span></div>
+    <div class="wr-scale"><div class="wr-track"></div>
       <div class="wr-ci" style="left:${clamp(lo)*100}%;width:${clamp(hi-lo)*100}%"></div>
-      <div class="wr-point" style="left:${clamp(hero.rate)*100}%"></div>
-      ${lineHtml}
-    </div>
-    <div class="wr-nums"><span>0%</span><span>50%</span><span>100%</span></div>
-  </div>`;
+      <div class="wr-point" style="left:${clamp(hero.rate)*100}%"></div>${lineHtml}</div>
+    <div class="wr-nums"><span>0%</span><span>50%</span><span>100%</span></div>`;
 }
-
 function verdict(meta, hero) {
   if (!meta.bar || !hero || hero.games === 0) return '';
   const [lo, hi] = hero.wilson95;
-  if (meta.isGate) {
-    if (lo > 0.5) return `<div class="verdict pass">Gate: 95% CI excludes 50% — mechanically passing at ${hero.games} games (verdict is human-confirmed).</div>`;
-    return `<div class="verdict wait">Gate: interval still spans 50% — needs more games or a wider margin.</div>`;
-  }
-  if (meta.isMirror) {
-    const balanced = lo <= 0.5 && hi >= 0.5;
-    return balanced ? `<div class="verdict pass">Control OK — interval straddles 50%, no harness bias.</div>`
-                    : `<div class="verdict fail">Control WARN — mirror interval excludes 50%; investigate seat/seeding bias.</div>`;
-  }
-  if (lo > 0.5) return `<div class="verdict pass">Tree ahead — CI above 50% at ${hero.games} games.</div>`;
-  return `<div class="verdict wait">Inconclusive so far — CI spans 50%.</div>`;
+  if (meta.isGate) return lo > 0.5 ? `<div class="verdict pass">Gate: 95% CI excludes 50% — mechanically passing at ${hero.games} games (verdict is human-confirmed).</div>` : `<div class="verdict wait">Gate: interval still spans 50% — needs more games or a wider margin.</div>`;
+  if (meta.isMirror) return (lo <= 0.5 && hi >= 0.5) ? `<div class="verdict pass">Control OK — interval straddles 50%, no harness bias.</div>` : `<div class="verdict fail">Control WARN — mirror interval excludes 50%; investigate seat/seeding bias.</div>`;
+  return lo > 0.5 ? `<div class="verdict pass">Tree ahead — CI above 50% at ${hero.games} games.</div>` : `<div class="verdict wait">Inconclusive so far — CI spans 50%.</div>`;
+}
+
+function chunkStrip(d) {
+  if (!d.chunkStrip.length) return '<div class="eta">no chunk data</div>';
+  const sq = d.chunkStrip.map(b => {
+    if (b.total === 0) return '<div class="sq empty" title="no plan"></div>';
+    const frac = b.done / b.total;
+    const cls = b.failed > 0 ? 'failed' : (b.leased > 0 ? 'leased' : '');
+    return `<div class="sq ${cls}" title="${b.done}/${b.total} done${b.leased?`, ${b.leased} leased`:''}${b.failed?`, ${b.failed} failed`:''}"><div class="sq-done" style="height:${(frac*100).toFixed(0)}%"></div></div>`;
+  }).join('');
+  const eta = d.etaHours != null ? `~${d.etaHours < 1 ? Math.round(d.etaHours*60)+'m' : d.etaHours.toFixed(1)+'h'} at ${d.ratePerHour}/h` : (d.completedGames >= d.totalGames && d.totalGames>0 ? 'complete' : (d.ratePerHour ? '' : 'idle'));
+  return `<div class="plabel"><span>${d.completedGames}/${d.totalGames} games${d.leasedJobs?` · ${d.leasedJobs} in flight`:''}</span><span>${eta}</span></div>
+    <div class="strip">${sq}</div>
+    <div class="strip-key"><span class="k"><span class="kbox" style="background:var(--green)"></span>done</span><span class="k"><span class="kbox" style="box-shadow:0 0 0 1px var(--accent) inset"></span>leased</span><span class="k"><span class="kbox" style="background:var(--track)"></span>pending</span><span class="k"><span class="kbox" style="box-shadow:0 0 0 1px var(--red) inset"></span>failed</span></div>`;
+}
+function variantTable(d) {
+  if (!d.variants.length) return '<div class="eta">no variant data yet</div>';
+  const rows = d.variants.map(v => `<tr><td>${v.pilot}</td><td>${v.games}</td><td>${pct(v.rate)}</td><td>${pct(v.wilson95[0])}–${pct(v.wilson95[1])}</td><td>${v.avgCostSec!=null?v.avgCostSec.toFixed(1)+'s':'—'}</td></tr>`).join('');
+  return `<table class="vt"><thead><tr><th>pilot / variant</th><th>games</th><th>win rate</th><th>95% CI</th><th>cost/game</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+function hostTable(d) {
+  if (!d.hosts.length) return '<div class="eta">no contributors yet</div>';
+  const rows = d.hosts.map(h => `<tr>
+    <td><span class="dot ${h.live?'live':'down'}"></span>${h.host}</td>
+    <td>${h.gamesDone}</td><td>${h.gamesPerHour}/h</td>
+    <td>${h.sharePct.toFixed(0)}% <span class="sharebar" style="width:${Math.max(2,h.sharePct*0.6).toFixed(0)}px"></span></td></tr>`).join('');
+  return `<table class="hosts"><thead><tr><th>host</th><th>games</th><th>rate</th><th>share</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+function integrity(meta, d) {
+  const vers = d.contentVersions.length ? d.contentVersions.map(v => `<span class="badge">${v}</span>`).join('') : '<span class="badge">—</span>';
+  const mixed = d.mixedContentVersion ? '<span class="badge warn">⚠ mixed engine versions — do not blend</span>' : '';
+  const fails = `${d.failedGames} failed · ${d.retriedJobs} retried`;
+  const gate = d.gate ? `<div class="gatebox">${d.gate.sentence}</div>` : '';
+  return `<div class="integrity">engine version(s): ${vers}${mixed}<br>${fails}</div>${gate}`;
+}
+
+function detailBody(name, meta, d) {
+  if (!d) return '<div class="eta">loading detail…</div>';
+  if (!d.found) return '<div class="eta">this step has not started reporting yet.</div>';
+  const zoneA = meta.kind === 'grid'
+    ? `<div class="zone"><div class="zone-h">A · per-variant results</div>${variantTable(d)}</div>`
+    : (meta.kind === 'arm'
+        ? `<div class="zone"><div class="zone-h">A · filling the arm</div>${chunkStrip(d)}<div class="winrate">${winBar(meta, d.hero)}${verdict(meta, d.hero)}</div></div>`
+        : `<div class="zone"><div class="zone-h">A · measurement</div>${variantTable(d)}</div>`);
+  return `${zoneA}
+    <div class="zone"><div class="zone-h">B · who’s contributing</div>${hostTable(d)}</div>
+    <div class="zone"><div class="zone-h">C · integrity</div>${integrity(meta, d)}</div>`;
 }
 
 function render(j) {
-  const meta = document.getElementById('meta');
   const done = j.steps.filter(s => s.status === 'completed').length;
-  meta.textContent = `${done}/${j.steps.length} steps complete · generated ${new Date(j.generatedAt).toLocaleTimeString()}`;
+  document.getElementById('meta').textContent = `${done}/${j.steps.length} steps complete · generated ${new Date(j.generatedAt).toLocaleTimeString()}`;
   document.getElementById('src').textContent = 'GET /v1/sim/public/journey';
-
   const rc = document.getElementById('runners');
-  rc.innerHTML = j.runners.length
-    ? j.runners.map(r => `<span class="runner"><span class="dot ${r.live?'live':'down'}"></span>${r.runner.slice(0,14)} · ${r.leasedJobs} job${r.leasedJobs===1?'':'s'}</span>`).join('')
-    : '<span class="runner"><span class="dot down"></span>no active runners</span>';
+  rc.innerHTML = j.runners.length ? j.runners.map(r => `<span class="runner"><span class="dot ${r.live?'live':'down'}"></span>${r.runner.slice(0,14)} · ${r.leasedJobs} job${r.leasedJobs===1?'':'s'}</span>`).join('') : '<span class="runner"><span class="dot down"></span>no active runners</span>';
 
   const byName = Object.fromEntries(j.steps.map(s => [s.name, s]));
-  const ladder = document.getElementById('ladder');
-  ladder.innerHTML = ORDER.map(name => {
+  const activeNames = new Set(j.steps.filter(s => s.found).map(s => s.name));
+  document.getElementById('ladder').innerHTML = ORDER.map(name => {
     const meta = STEPS[name]; if (!meta) return '';
-    const s = byName[name] ?? { found:false, status:'pending', totalGames:0, completedGames:0, failedGames:0, leasedJobs:0, pilots:[], hero:null, mixedContentVersion:false };
-    const [cls, label] = statusClass(name, s);
+    const s = byName[name] ?? { found:false, status:'pending', totalGames:0, completedGames:0, failedGames:0, leasedJobs:0, hero:null, mixedContentVersion:false };
+    const [cls, label] = statusClass(s);
     const frac = s.totalGames > 0 ? s.completedGames / s.totalGames : 0;
-    const bar = s.found ? `<div class="progress">
-        <div class="plabel"><span>games</span><span>${s.completedGames}/${s.totalGames}${s.failedGames?` · ${s.failedGames} failed`:''}${s.leasedJobs?` · ${s.leasedJobs} in flight`:''}</span></div>
-        <div class="track"><div class="fill" style="width:${(frac*100).toFixed(1)}%"></div></div>
-      </div>` : '';
-    return `<div class="step ${meta.isGate?'gate':''}">
-      <div class="step-head">
+    const bar = s.found ? `<div class="progress"><div class="plabel"><span>games</span><span>${s.completedGames}/${s.totalGames}${s.failedGames?` · ${s.failedGames} failed`:''}${s.leasedJobs?` · ${s.leasedJobs} in flight`:''}</span></div><div class="track"><div class="fill" style="width:${(frac*100).toFixed(1)}%"></div></div></div>` : '';
+    const isOpen = expanded.has(name);
+    return `<div class="step ${meta.isGate?'gate':''} ${isOpen?'open':''}" data-step="${name}">
+      <div class="step-head" onclick="toggle('${name}')">
+        <span class="chev">▸</span>
         <span class="step-title">${meta.title}</span>
         <span class="role ${meta.isGate?'gate':''}">${meta.role}</span>
         <span class="status ${cls}">${label}</span>
       </div>
-      <p class="what">${meta.what}</p>
-      <p class="why">${meta.why}</p>
-      ${bar}
-      ${winBar(meta, s.hero)}
-      ${s.mixedContentVersion ? '<div class="mixed">⚠ mixed engine versions in this arm — do not blend; re-check provenance.</div>' : ''}
-      ${verdict(meta, s.hero)}
+      <p class="what">${meta.what}</p><p class="why">${meta.why}</p>
+      ${bar}${winBar(meta, s.hero)}${verdict(meta, s.hero)}
+      <div class="body" id="body-${name}">${isOpen ? detailBody(name, meta, details[name]) : ''}</div>
     </div>`;
   }).join('');
+
+  document.getElementById('roadmap').innerHTML = '<h2>What comes next</h2>' + ROADMAP.map(p => {
+    const active = activeNames.has(p.key);
+    return `<div class="phase ${active?'active':''}"><h3>${p.title} <span class="tagline">· ${active?'reporting':p.tagline}</span></h3><ul>${p.items.map(i => `<li>${i}</li>`).join('')}</ul></div>`;
+  }).join('');
 }
+
+async function fetchDetail(name) {
+  try {
+    const r = await fetch('/v1/sim/public/journey/step?campaign=' + encodeURIComponent(name));
+    if (r.ok) { details[name] = await r.json(); const el = document.getElementById('body-' + name); if (el && expanded.has(name)) el.innerHTML = detailBody(name, STEPS[name], details[name]); }
+  } catch (e) { /* keep last render */ }
+}
+window.toggle = (name) => {
+  const step = document.querySelector(`.step[data-step="${name}"]`);
+  if (expanded.has(name)) { expanded.delete(name); step.classList.remove('open'); }
+  else { expanded.add(name); step.classList.add('open'); const el = document.getElementById('body-'+name); el.innerHTML = detailBody(name, STEPS[name], details[name]); fetchDetail(name); }
+};
 
 async function tick() {
   try {
     const res = await fetch('/v1/sim/public/journey');
     if (!res.ok) throw new Error('HTTP ' + res.status);
     render(await res.json());
+    for (const name of expanded) fetchDetail(name);
   } catch (e) {
     document.getElementById('ladder').innerHTML = `<div class="err">Could not load the journey (${e.message}). Retrying…</div>`;
   }

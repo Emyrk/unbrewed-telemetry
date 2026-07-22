@@ -136,3 +136,199 @@ async function activeRunners(pool: Pool, names: string[], nowMs: number): Promis
     live: r.live,
   }));
 }
+
+// ---------------------------------------------------------------------------
+// Expanded per-step detail (#248 follow-up) — the three-zone card body. Lazily
+// loaded when a step card is expanded, so the ladder payload stays small. Still
+// aggregates-only, experiment-namespace-only, no auth.
+// ---------------------------------------------------------------------------
+
+export interface ChunkBucket {
+  done: number;
+  leased: number;
+  pending: number;
+  failed: number;
+  total: number;
+}
+
+export interface HostContribution {
+  host: string;
+  gamesDone: number;
+  gamesPerHour: number;
+  sharePct: number;
+  lastSeen: string | null;
+  live: boolean;
+}
+
+export interface VariantRow {
+  pilot: string;
+  games: number;
+  wins: number;
+  rate: number;
+  wilson95: [number, number];
+  avgCostSec: number | null;
+}
+
+export interface GateMath {
+  needGames: number;
+  needRate: number;
+  currentGames: number;
+  currentRate: number;
+  lo: number;
+  hi: number;
+  passes: boolean;
+  sentence: string;
+}
+
+export interface StepDetail {
+  ok: true;
+  name: string;
+  found: boolean;
+  status: string;
+  totalGames: number;
+  completedGames: number;
+  failedGames: number;
+  leasedJobs: number;
+  retriedJobs: number;
+  ratePerHour: number;
+  etaHours: number | null;
+  hero: JourneyPilotStat | null;
+  variants: VariantRow[];
+  chunkStrip: ChunkBucket[];
+  hosts: HostContribution[];
+  contentVersions: string[];
+  mixedContentVersion: boolean;
+  gate: GateMath | null;
+}
+
+const LIVE_WINDOW_MS = 10 * 60 * 1000;
+const MAX_BUCKETS = 80;
+
+export async function stepDetail(pool: Pool, name: string, nowMs: number): Promise<StepDetail> {
+  const camp = await pool.query<{ id: string; status: string; total_games: number; completed_games: number; failed_games: number }>(
+    `SELECT id, status, total_games, completed_games, failed_games FROM sim_campaigns WHERE name = $1 ORDER BY created_at DESC LIMIT 1`,
+    [name],
+  );
+  if (camp.rowCount === 0) {
+    return { ok: true, name, found: false, status: 'pending', totalGames: 0, completedGames: 0, failedGames: 0, leasedJobs: 0, retriedJobs: 0, ratePerHour: 0, etaHours: null, hero: null, variants: [], chunkStrip: [], hosts: [], contentVersions: [], mixedContentVersion: false, gate: null };
+  }
+  const c = camp.rows[0]!;
+  const total = c.total_games;
+  const nBuckets = Math.max(1, Math.min(MAX_BUCKETS, total));
+
+  // Zone A — per-variant/pilot rows (win rate + CI + per-game cost).
+  const variantRows = await pool.query<{ pilot: string; games: string; wins: string; cost: string | null }>(
+    `SELECT gs.pilot,
+            count(*)::bigint AS games,
+            count(*) FILTER (WHERE gs.won)::bigint AS wins,
+            avg(g.duration_seconds) AS cost
+     FROM games g JOIN game_seats gs ON gs.game_id = g.id
+     WHERE g.campaign_id = $1 GROUP BY gs.pilot ORDER BY gs.pilot`,
+    [c.id],
+  );
+  const variants: VariantRow[] = variantRows.rows.map((r) => {
+    const games = Number(r.games);
+    const wins = Number(r.wins);
+    const w = wilson(wins, games);
+    return { pilot: r.pilot, games, wins, rate: games > 0 ? wins / games : 0, wilson95: [w.lo, w.hi], avgCostSec: r.cost === null ? null : Number(r.cost) };
+  });
+  const hero = variants.find((v) => /ismcts|expert/i.test(v.pilot)) ?? null;
+  const heroStat: JourneyPilotStat | null = hero ? { pilot: hero.pilot, games: hero.games, wins: hero.wins, rate: hero.rate, wilson95: hero.wilson95 } : null;
+
+  // Zone A — chunk strip: done from games (by campaign_game_index), leased/
+  // pending/failed from sim_jobs (by game_index), bucketed server-side.
+  const doneB = await pool.query<{ b: number; c: string }>(
+    `SELECT width_bucket(campaign_game_index, 0, $2, $3) AS b, count(*)::bigint AS c
+     FROM games WHERE campaign_id = $1 AND campaign_game_index IS NOT NULL GROUP BY b`,
+    [c.id, total, nBuckets],
+  );
+  const jobB = await pool.query<{ b: number; status: string; c: string }>(
+    `SELECT width_bucket(game_index, 0, $2, $3) AS b, status, count(*)::bigint AS c
+     FROM sim_jobs WHERE campaign_id = $1 GROUP BY b, status`,
+    [c.id, total, nBuckets],
+  );
+  const strip: ChunkBucket[] = Array.from({ length: nBuckets }, () => ({ done: 0, leased: 0, pending: 0, failed: 0, total: 0 }));
+  const idxOf = (b: number): number => Math.max(0, Math.min(nBuckets - 1, b - 1));
+  for (const r of doneB.rows) strip[idxOf(r.b)]!.done += Number(r.c);
+  for (const r of jobB.rows) {
+    const cell = strip[idxOf(r.b)]!;
+    if (r.status === 'leased') cell.leased += Number(r.c);
+    else if (r.status === 'pending') cell.pending += Number(r.c);
+    else if (r.status === 'failed') cell.failed += Number(r.c);
+  }
+  for (const cell of strip) cell.total = cell.done + cell.leased + cell.pending + cell.failed;
+
+  // Zone A — fleet rate + ETA (games completed in the last hour).
+  const rate = await pool.query<{ last_hour: string }>(
+    `SELECT count(*)::bigint AS last_hour FROM games WHERE campaign_id = $1 AND received_at > now() - interval '1 hour'`,
+    [c.id],
+  );
+  const ratePerHour = Number(rate.rows[0]!.last_hour);
+  const remaining = Math.max(0, total - c.completed_games);
+  const etaHours = ratePerHour > 0 && remaining > 0 ? remaining / ratePerHour : null;
+
+  // Zone B — per-host contributors (credential = per-host identity).
+  const hostRows = await pool.query<{ label: string | null; key: string | null; done: string; last_hour: string; last_at: Date | null }>(
+    `SELECT sc.label AS label, sub.auth_key_id AS key,
+            count(*)::bigint AS done,
+            count(*) FILTER (WHERE g.received_at > now() - interval '1 hour')::bigint AS last_hour,
+            max(g.received_at) AS last_at
+     FROM games g
+     JOIN game_submissions sub ON sub.id = g.submission_id
+     LEFT JOIN source_credentials sc ON sc.id = sub.auth_key_id
+     WHERE g.campaign_id = $1
+     GROUP BY sc.label, sub.auth_key_id
+     ORDER BY done DESC`,
+    [c.id],
+  );
+  const totalDone = hostRows.rows.reduce((s, r) => s + Number(r.done), 0) || 1;
+  const hosts: HostContribution[] = hostRows.rows.map((r) => {
+    const lastAt = r.last_at ? r.last_at.getTime() : 0;
+    return {
+      host: r.label ?? (r.key ? r.key.slice(0, 14) : 'unknown'),
+      gamesDone: Number(r.done),
+      gamesPerHour: Number(r.last_hour),
+      sharePct: (Number(r.done) / totalDone) * 100,
+      lastSeen: r.last_at ? r.last_at.toISOString() : null,
+      live: lastAt > 0 && nowMs - lastAt < LIVE_WINDOW_MS,
+    };
+  });
+
+  // Zone C — integrity.
+  const versions = await pool.query<{ v: string | null }>(`SELECT DISTINCT content_version AS v FROM games WHERE campaign_id = $1`, [c.id]);
+  const contentVersions = versions.rows.map((r) => r.v).filter((v): v is string => v !== null);
+  const leased = await pool.query<{ n: string }>(`SELECT count(*)::bigint AS n FROM sim_jobs WHERE campaign_id = $1 AND status = 'leased'`, [c.id]);
+  const retried = await pool.query<{ n: string }>(`SELECT count(*)::bigint AS n FROM sim_jobs WHERE campaign_id = $1 AND attempts > 1`, [c.id]);
+
+  const pct = (x: number): string => `${(x * 100).toFixed(1)}%`;
+  let gate: GateMath | null = null;
+  if (name === 'arm1' && heroStat) {
+    const [lo, hi] = heroStat.wilson95;
+    const passes = heroStat.games >= 1000 && heroStat.rate >= 0.6 && lo > 0.5;
+    gate = {
+      needGames: 1000, needRate: 0.6, currentGames: heroStat.games, currentRate: heroStat.rate, lo, hi, passes,
+      sentence: `Needs ≥1000 games, ≥60%, Wilson CI excluding 50% — currently ${heroStat.games} games, ${pct(heroStat.rate)} [${pct(lo)}–${pct(hi)}]${passes ? ' — mechanically passing.' : '.'}`,
+    };
+  }
+
+  return {
+    ok: true,
+    name,
+    found: true,
+    status: c.status,
+    totalGames: total,
+    completedGames: c.completed_games,
+    failedGames: c.failed_games,
+    leasedJobs: Number(leased.rows[0]!.n),
+    retriedJobs: Number(retried.rows[0]!.n),
+    ratePerHour,
+    etaHours,
+    hero: heroStat,
+    variants,
+    chunkStrip: strip,
+    hosts,
+    contentVersions,
+    mixedContentVersion: contentVersions.length > 1,
+    gate,
+  };
+}
