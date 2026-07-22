@@ -19,6 +19,14 @@
  * NOTE: the plan (pairings, seed formulas, variant order) mirrors the engine's
  * scripts/lib/simPlan.ts + ai-knob-grid.mts. Keep them in sync; a drift moves the
  * seeds and the flush would stop matching.
+ *
+ * Two things a RE-RUN does NOT do, on purpose: (1) it never rewrites `sim_jobs`
+ * for an existing campaign (a live arm owns those; per-job specs are already
+ * correct) — only `sim_campaigns.spec` (the admin-UI pool description) is updated
+ * in place; (2) pairings interleave by game_index for jobs seeded from here on,
+ * so interim win rates sample all matchups. Campaigns seeded before that ran
+ * pairing-blocked, so their first ~ARM_GAMES/|PAIRINGS| games per arm are skewed
+ * to one matchup — only the final all-games rates are matchup-balanced.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -98,9 +106,14 @@ function armJobs(step: string, botAIters: number, botBSimB: number, games: numbe
   const perPair = Math.max(2, Math.floor(games / PAIRINGS.length));
   const jobs: JobRow[] = [];
   let gi = 0;
-  for (let p = 0; p < PAIRINGS.length; p++) {
-    const [hA, hB] = PAIRINGS[p]!;
-    for (let i = 0; i < perPair; i++) {
+  // Interleave pairings in game_index order (i OUTER, pairing INNER) so the first
+  // N games sample ALL matchups rather than N games of pairing 0. A pairing-blocked
+  // order skews interim win rates to a single matchup for the first ~perPair games.
+  // The SEED per (pairing, i) is unchanged, so seed identity (and any flush match)
+  // holds; only the game_index→pairing assignment interleaves.
+  for (let i = 0; i < perPair; i++) {
+    for (let p = 0; p < PAIRINGS.length; p++) {
+      const [hA, hB] = PAIRINGS[p]!;
       const seed = BigInt(20_000 + p * perPair + i);
       const aPilot = expert(botAIters);
       const bPilot = mirror ? expert(MIRROR_ITERS) : hard(botBSimB);
@@ -123,9 +136,10 @@ function gridJobs(): JobRow[] {
   for (const variantId of gridVariants) {
     const vIdx = GRID_VARIANTS_ALL.indexOf(variantId);
     if (vIdx < 0) throw new Error(`unknown grid variant "${variantId}"`);
-    for (let p = 0; p < PAIRINGS.length; p++) {
-      const [hA, hB] = PAIRINGS[p]!;
-      for (let i = 0; i < perPairing; i++) {
+    // Interleave pairings in game_index order (see armJobs); seeds are unchanged.
+    for (let i = 0; i < perPairing; i++) {
+      for (let p = 0; p < PAIRINGS.length; p++) {
+        const [hA, hB] = PAIRINGS[p]!;
         const seed = BigInt(GRID_SEED + vIdx * 1_000_000 + p * 100_000 + i);
         const spec = { ...duel(hA, variantPilot(variantId), hB, hard(HARD_SIMB)), variantId, step: 'grid' };
         jobs.push({ gameIndex: gi, seed, spec });
@@ -170,46 +184,35 @@ async function resetFailedJobs(pool: Pool, campaignId: string): Promise<number> 
   return n;
 }
 
-/** Insert jobs that have neither a pending job nor a completed game yet. */
+/** The corpus deck pool (both seats draw from it) — arena.mts mixed pairings.
+ *  Order-preserving union of PAIRINGS, so the admin UI describes an arm by the
+ *  whole matchup set, not just pairing 0. */
+const DECK_POOL: string[] = (() => {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const [a, b] of PAIRINGS) for (const h of [a, b]) if (!seen.has(h)) { seen.add(h); out.push(h); }
+  return out;
+})();
+
 /**
  * A campaign-level spec in Emyrk's pool shape (his admin UI renders
- * `campaign.spec` as format/maps/teams with `decks`/`pilots` pools). Our internal
- * {kind,a,b} shorthand is preserved under the `x-ismcts` extension key so nothing
- * we rely on is lost. Uses pairing 0 as the representative matchup.
+ * `campaign.spec` as format/maps/teams with `decks`/`pilots` POOLS — the sets a
+ * seat may draw from, not one fixed matchup). BOTH seats therefore carry the full
+ * corpus deck pool (king-kong / thrall / the-mandalorian); the exact per-game
+ * pairing + seat alternation lives in each job's override spec, per his
+ * games-array pattern. Our internal {kind,a,b} shorthand is kept under the
+ * `x-ismcts` extension key so nothing we rely on is lost.
  */
 function campaignSpec(pilotA: string, pilotB: string, x: Record<string, unknown>): Record<string, unknown> {
-  const [hA, hB] = PAIRINGS[0]!;
   return {
     format: 'duel',
     maps: [MAP],
-    teams: [{ seats: [{ decks: [hA], pilots: [pilotA] }] }, { seats: [{ decks: [hB], pilots: [pilotB] }] }],
+    teams: [
+      { seats: [{ decks: DECK_POOL, pilots: [pilotA] }] },
+      { seats: [{ decks: DECK_POOL, pilots: [pilotB] }] },
+    ],
     'x-ismcts': x,
   };
-}
-
-/**
- * ROLLING-SAFE in-place migration: bring EXISTING job specs to the current shape
- * (adds `format`, canonical pilots). Only touches `pending`/`failed` rows — never
- * `leased` (a game in flight keeps the spec it was claimed with) or completed
- * (its game row is immutable). New claims pick up the updated spec, so the fleet
- * needs no restart. Returns how many rows changed.
- */
-async function updateJobSpecs(pool: Pool, campaignId: string, jobs: JobRow[]): Promise<number> {
-  if (jobs.length === 0) return 0;
-  let updated = 0;
-  for (let i = 0; i < jobs.length; i += 1000) {
-    const batch = jobs.slice(i, i + 1000);
-    const res = await pool.query(
-      `UPDATE sim_jobs sj SET spec = j.spec::jsonb
-       FROM unnest($2::integer[], $3::text[]) AS j(game_index, spec)
-       WHERE sj.campaign_id = $1 AND sj.game_index = j.game_index
-         AND sj.status IN ('pending', 'failed')
-         AND sj.spec IS DISTINCT FROM j.spec::jsonb`,
-      [campaignId, batch.map((b) => b.gameIndex), batch.map((b) => JSON.stringify(b.spec))],
-    );
-    updated += res.rowCount ?? 0;
-  }
-  return updated;
 }
 
 async function insertJobs(pool: Pool, campaignId: string, jobs: JobRow[]): Promise<number> {
@@ -248,13 +251,17 @@ async function main(): Promise<void> {
     const ids: string[] = [];
     for (const s of steps) {
       const id = await upsertCampaign(pool, s.name, s.spec, s.baseSeed, s.jobs.length);
-      // Bring the campaign-level spec to the conformant shape too (idempotent).
-      await pool.query('UPDATE sim_campaigns SET spec = $2::jsonb WHERE id = $1 AND spec IS DISTINCT FROM $2::jsonb', [id, JSON.stringify(s.spec)]);
+      // TEMPLATE-ONLY migration: update the campaign-level spec (the admin-UI pool
+      // description) in place. This is the ONLY thing a re-run mutates on an
+      // existing campaign — it deliberately does NOT touch `sim_jobs`, because a
+      // live arm is claiming/running them and the per-job override specs are
+      // already correct. New campaigns still get their jobs via insertJobs below
+      // (a no-op for any that already exist).
+      const spec = await pool.query('UPDATE sim_campaigns SET spec = $2::jsonb WHERE id = $1 AND spec IS DISTINCT FROM $2::jsonb', [id, JSON.stringify(s.spec)]);
       const reset = await resetFailedJobs(pool, id);
       const ins = await insertJobs(pool, id, s.jobs);
-      const upd = await updateJobSpecs(pool, id, s.jobs);
       ids.push(id);
-      console.log(`  ${s.name.padEnd(7)} campaign ${id} · ${s.jobs.length} planned · ${ins} inserted · ${upd} spec-migrated · ${reset} failed→pending`);
+      console.log(`  ${s.name.padEnd(7)} campaign ${id} · ${s.jobs.length} planned · ${ins} inserted · ${spec.rowCount ?? 0} spec-template updated · ${reset} failed→pending`);
     }
     const pin = ids.join(',');
     console.log('');
@@ -269,6 +276,12 @@ async function main(): Promise<void> {
     console.log('Runs only within these campaigns. A killed worker\'s in-flight games are');
     console.log('reclaimed and re-run. Grid jobs are already completed (backfill done); the');
     console.log('worker picks up the remaining arm/mirror games. See docs/eval/README.md.');
+    console.log('');
+    console.log('STATS CAVEAT: campaigns seeded BEFORE this fix ran pairings in blocks (all of');
+    console.log('pairing 0, then pairing 1, …), so their interim win rates over the first');
+    console.log(`~${Math.max(2, Math.floor(ARM_GAMES / PAIRINGS.length))} games per arm are skewed to a single matchup. Games seeded from now on`);
+    console.log('interleave pairings by game_index, so interim rates sample all matchups. Only');
+    console.log('the FINAL, all-games rates are matchup-balanced regardless.');
   } finally {
     await pool.end();
   }
