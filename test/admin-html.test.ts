@@ -36,6 +36,13 @@ describe('admin campaign editor', () => {
     expect(html).toContain('Idle');
     expect(html).toContain('/v1/admin/campaign/items');
     expect(html).toContain('pageSize=50');
+    expect(html).toContain('class="campaign-history-row"');
+    expect(html).toContain("viewCampaign('${campaign.id}', '', 'submissions')");
+    expect(html).toContain('data-campaign-bucket="submissions"');
+    expect(html).toContain('function loadCampaignSubmissions(id)');
+    expect(html).toContain('/v1/admin/campaign/submissions');
+    expect(html).toContain('Submissions by source and key label');
+    expect(html).toContain('campaign-source-credential');
     expect(html).not.toContain('id="campaign-jobs-json"');
     expect(html).toContain('Save JSON &amp; Requeue');
     expect(html).toContain("api('PATCH', '/v1/admin/campaign'");

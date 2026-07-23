@@ -7,6 +7,7 @@ import type { Pool, PoolClient } from 'pg';
 import { hashSecret, verifySecret, generateCredential, type Scope } from '../http/bearer-auth.js';
 import { wilson } from '../stats/wilson.js';
 import { simJourney, type Journey } from './sim-journey.js';
+import type { SourceStatsResponse } from '../types.js';
 
 export interface CampaignPilotStat {
   pilot: string;
@@ -982,6 +983,64 @@ export class ControlPlaneRepository {
         lastError: row.last_error,
         completedAt: null,
       })),
+    };
+  }
+
+  /** Submission contribution by source and credential label for one campaign. */
+  async campaignSubmissionStats(campaignId: string): Promise<SourceStatsResponse | null> {
+    const exists = await this.pool.query('SELECT 1 FROM sim_campaigns WHERE id = $1', [campaignId]);
+    if ((exists.rowCount ?? 0) === 0) return null;
+
+    const result = await this.pool.query<{
+      source: string | null;
+      credential_id: string | null;
+      credential_label: string | null;
+      submissions: number | string;
+      last_received_at: Date | null;
+    }>(
+      `SELECT
+         COALESCE(NULLIF(g.source, ''), 'unknown') AS source,
+         sc.id AS credential_id,
+         sc.label AS credential_label,
+         COUNT(*)::int AS submissions,
+         MAX(g.received_at) AS last_received_at
+       FROM games g
+       JOIN game_submissions submission ON submission.id = g.submission_id
+       LEFT JOIN source_credentials sc ON sc.id = submission.auth_key_id
+       WHERE g.campaign_id = $1
+       GROUP BY COALESCE(NULLIF(g.source, ''), 'unknown'), sc.id, sc.label
+       ORDER BY source ASC, submissions DESC, credential_label ASC NULLS LAST`,
+      [campaignId],
+    );
+
+    const bySource = new Map<string, SourceStatsResponse['sources'][number]>();
+    for (const row of result.rows) {
+      const source = row.source ?? 'unknown';
+      const submissions = Number(row.submissions ?? 0);
+      const lastReceivedAt = row.last_received_at?.toISOString() ?? null;
+      const aggregate = bySource.get(source) ?? {
+        source,
+        submissions: 0,
+        lastReceivedAt: null,
+        credentials: [],
+      };
+      aggregate.submissions += submissions;
+      if (lastReceivedAt && (!aggregate.lastReceivedAt || lastReceivedAt > aggregate.lastReceivedAt)) {
+        aggregate.lastReceivedAt = lastReceivedAt;
+      }
+      aggregate.credentials.push({
+        credentialId: row.credential_id,
+        label: row.credential_label ?? 'Legacy / unlabelled',
+        submissions,
+        lastReceivedAt,
+      });
+      bySource.set(source, aggregate);
+    }
+
+    const sources = [...bySource.values()].sort((a, b) => b.submissions - a.submissions || a.source.localeCompare(b.source));
+    return {
+      totalSubmissions: sources.reduce((sum, source) => sum + source.submissions, 0),
+      sources,
     };
   }
 

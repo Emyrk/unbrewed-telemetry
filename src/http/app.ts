@@ -204,6 +204,10 @@ async function handleRequest(
     await handleAdminListCampaignItems(req, url, res, cpRepo, config);
     return;
   }
+  if (req.method === 'GET' && url.pathname === '/v1/admin/campaign/submissions') {
+    await handleAdminCampaignSubmissions(req, url, res, cpRepo, config);
+    return;
+  }
   if (req.method === 'PATCH' && url.pathname === '/v1/admin/campaign') {
     await handleAdminUpdateCampaign(req, res, cpRepo, config);
     return;
@@ -1092,6 +1096,22 @@ async function handleAdminListCampaignItems(
   const page = Number.isInteger(requestedPage) ? Math.max(requestedPage, 1) : 1;
   const pageSize = Number.isInteger(requestedPageSize) ? Math.min(Math.max(requestedPageSize, 1), 100) : 50;
   const result = await cpRepo.listCampaignItems(campaignId, bucket as CampaignItemBucket, page, pageSize);
+  if (!result) { sendJson(res, 404, { ok: false, code: 'NOT_FOUND', message: 'Campaign not found' }); return; }
+  sendJson(res, 200, { ok: true, ...result });
+}
+
+async function handleAdminCampaignSubmissions(
+  req: IncomingMessage,
+  url: URL,
+  res: ServerResponse,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<void> {
+  const admin = await verifyAdminAuth(req, cpRepo, config);
+  if (!admin) { sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Admin authentication required' }); return; }
+  const campaignId = url.searchParams.get('id');
+  if (!campaignId) { sendJson(res, 400, { ok: false, code: 'MISSING_ID', message: 'id query parameter required' }); return; }
+  const result = await cpRepo.campaignSubmissionStats(campaignId);
   if (!result) { sendJson(res, 404, { ok: false, code: 'NOT_FOUND', message: 'Campaign not found' }); return; }
   sendJson(res, 200, { ok: true, ...result });
 }

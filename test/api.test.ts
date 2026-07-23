@@ -455,6 +455,67 @@ describeDb('telemetry api with postgres', () => {
     });
   });
 
+  it('groups completed campaign submissions by source and credential label', async () => {
+    const session = await cpRepo.createSession({ discordId: 'admin-123', discordUsername: 'test-admin' });
+    const source = await cpRepo.createSource('campaign-workers', null, 'test-admin');
+    const desktop = await cpRepo.createCredential(source.id, 'desktop', ['sim:claim', 'sim:complete'], 'test-admin');
+    const laptop = await cpRepo.createCredential(source.id, 'laptop', ['sim:claim', 'sim:complete'], 'test-admin');
+    const campaign = await cpRepo.createCampaign({
+      name: 'Submission attribution campaign',
+      spec: { format: 'duel' },
+      games: [{}, {}],
+      createdBy: 'test-admin',
+    });
+    const otherCampaign = await cpRepo.createCampaign({
+      name: 'Other campaign',
+      spec: { format: 'duel' },
+      games: [{}],
+      createdBy: 'test-admin',
+    });
+
+    const completeOne = async (campaignId: string, credential: { id: string; fullKey: string }, gameId: string) => {
+      const [job] = await cpRepo.claimJobs(campaignId, 1, credential.id);
+      const response = await fetch(`${baseUrl}/v1/sim/complete`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${credential.fullKey}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          jobId: job!.id,
+          leaseToken: job!.leaseToken,
+          game: sampleGame({ gameId, stateHash: `${gameId}-state` }),
+        }),
+      });
+      expect(response.status).toBe(201);
+      await response.json();
+    };
+
+    await completeOne(campaign.id, desktop, 'campaign-source-desktop');
+    await completeOne(campaign.id, laptop, 'campaign-source-laptop');
+    await completeOne(otherCampaign.id, desktop, 'other-campaign-source-desktop');
+
+    const response = await fetch(`${baseUrl}/v1/admin/campaign/submissions?id=${campaign.id}`, {
+      headers: { cookie: `session=${session.id}` },
+    });
+    expect(response.status).toBe(200);
+    const json = await response.json() as {
+      totalSubmissions: number;
+      sources: Array<{
+        source: string;
+        submissions: number;
+        credentials: Array<{ credentialId: string | null; label: string; submissions: number }>;
+      }>;
+    };
+    expect(json.totalSubmissions).toBe(2);
+    expect(json.sources).toEqual([{
+      source: 'campaign-workers',
+      submissions: 2,
+      lastReceivedAt: expect.any(String),
+      credentials: [
+        expect.objectContaining({ credentialId: desktop.id, label: 'desktop', submissions: 1 }),
+        expect.objectContaining({ credentialId: laptop.id, label: 'laptop', submissions: 1 }),
+      ],
+    }]);
+  });
+
   it('stores heartbeat checkpoints and returns them verbatim on reclaim (crash resume)', async () => {
     const source = await cpRepo.createSource('sim-checkpoint-runner', null, 'test-admin');
     const credential = await cpRepo.createCredential(source.id, 'worker', ['sim:claim'], 'test-admin');

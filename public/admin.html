@@ -138,19 +138,32 @@
     .priority-add-lane { display: flex; justify-content: center; margin-top: -0.35rem; }
     .campaign-history { display: none; }
     .campaign-history.active { display: block; }
+    .campaign-history-row { cursor: pointer; }
+    .campaign-history-row:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
     .campaign-queue { display: none; }
     .campaign-queue.active { display: block; }
     .campaign-json-editor { width: 100%; min-height: 260px; margin-top: 0.8rem; font-family: var(--mono); font-size: 0.8rem; line-height: 1.45; padding: 0.75rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: #b9f6ca; resize: vertical; }
     .campaign-json-editor:focus { outline: none; border-color: var(--accent); }
     .campaign-detail-actions { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin: 0.7rem 0; }
     .campaign-detail-status { min-height: 1rem; }
-    .campaign-buckets { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.65rem; margin: 1rem 0; }
+    .campaign-buckets { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0.65rem; margin: 1rem 0; }
     .campaign-bucket { text-align: left; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 0.8rem; color: var(--text); cursor: pointer; }
     .campaign-bucket:hover, .campaign-bucket.active { border-color: var(--accent); background: var(--surface-hover); }
     .campaign-bucket-count { display: block; font-family: var(--mono); font-size: 1.2rem; font-weight: 600; }
     .campaign-bucket-label { display: block; color: var(--text-muted); font-size: 0.75rem; margin-top: 0.2rem; text-transform: uppercase; letter-spacing: 0.04em; }
     .campaign-items { margin-top: 0.8rem; }
     .campaign-pagination { display: flex; align-items: center; justify-content: space-between; gap: 0.7rem; margin: 0.8rem 0; }
+    .campaign-source-summary { display: flex; justify-content: space-between; gap: 1rem; align-items: baseline; margin-bottom: 0.8rem; }
+    .campaign-source-group { margin-bottom: 0.55rem; }
+    .campaign-source-row { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(100px, 2fr) 72px 60px 170px; gap: 0.7rem; align-items: center; padding: 0.55rem 0.65rem; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); font-size: 0.8rem; }
+    .campaign-source-row + .campaign-source-row { margin-top: 0.3rem; }
+    .campaign-source-credential { margin-left: 1.25rem; border-style: dashed; background: var(--bg); color: var(--text-muted); }
+    .campaign-source-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .campaign-source-bar { height: 7px; background: var(--surface-hover); border-radius: 999px; overflow: hidden; }
+    .campaign-source-bar i { display: block; height: 100%; background: var(--accent); border-radius: inherit; }
+    .campaign-source-count, .campaign-source-share { font-family: var(--mono); text-align: right; }
+    .campaign-source-last { color: var(--text-muted); text-align: right; }
+    @media (max-width: 850px) { .campaign-source-row { grid-template-columns: minmax(120px, 1fr) 72px 60px; } .campaign-source-bar, .campaign-source-last { display: none; } }
     @media (max-width: 700px) { .campaign-buckets { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
     details.campaign-jobs-json { margin: 0.8rem 0; }
     details.campaign-jobs-json summary { cursor: pointer; color: var(--text-muted); font-size: 0.82rem; }
@@ -608,13 +621,13 @@
         history.innerHTML = '<div class="empty-state">No completed or cancelled campaigns.</div>';
       } else {
         history.innerHTML = `<table class="admin-table"><thead><tr><th>Name</th><th>Status</th><th>Progress</th><th>Throughput</th><th>Finished</th><th></th></tr></thead><tbody>${archived.map(campaign => `
-          <tr>
+          <tr class="campaign-history-row" tabindex="0" onclick="viewCampaign('${campaign.id}', '', 'submissions')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();viewCampaign('${campaign.id}', '', 'submissions')}">
             <td>${esc(campaign.name)}</td>
             <td>${campaignBadge(campaign)}</td>
             <td class="mono">${campaign.completedGames}/${campaign.totalGames} (${campaign.failedGames} failed)</td>
             <td>${formatThroughput(campaign.throughput)}</td>
             <td class="muted">${new Date(campaign.completedAt || campaign.cancelledAt || campaign.createdAt).toLocaleDateString()}</td>
-            <td><button class="btn btn-ghost btn-sm" onclick="viewCampaign('${campaign.id}')">View</button></td>
+            <td class="muted">View submissions →</td>
           </tr>`).join('')}</tbody></table>`;
       }
       setCampaignView(campaignView);
@@ -1242,7 +1255,7 @@
       };
     }
 
-    async function viewCampaign(id, message = '') {
+    async function viewCampaign(id, message = '', initialBucket = '') {
       const { data } = await api('GET', `/v1/admin/campaign?id=${encodeURIComponent(id)}`);
       if (!data.ok) return;
       const c = data.campaign;
@@ -1252,7 +1265,11 @@
         <button class="campaign-bucket" data-campaign-bucket="${bucket}" onclick="loadCampaignItems('${esc(c.id)}', '${bucket}', 1)">
           <span class="campaign-bucket-count">${counts[bucket] || 0}</span>
           <span class="campaign-bucket-label">${label}</span>
-        </button>`).join('');
+        </button>`).join('') + `
+        <button class="campaign-bucket" data-campaign-bucket="submissions" onclick="loadCampaignSubmissions('${esc(c.id)}')">
+          <span class="campaign-bucket-count">${c.completedGames || 0}</span>
+          <span class="campaign-bucket-label">Submissions</span>
+        </button>`;
 
       const detail = document.getElementById('campaign-detail');
       detail.innerHTML = `
@@ -1279,6 +1296,7 @@
       status.textContent = message;
       status.className = message ? 'success-msg campaign-detail-status' : 'campaign-detail-status';
       detail.style.display = '';
+      if (initialBucket === 'submissions') await loadCampaignSubmissions(id);
     }
 
     async function loadCampaignItems(id, bucket, page) {
@@ -1320,6 +1338,57 @@
         ? `<button class="btn btn-ghost btn-sm" onclick="loadCampaignItems('${esc(id)}', '${bucket}', ${data.page + 1})">Next</button>`
         : '<span></span>';
       html += `<div class="campaign-pagination">${previous}${next}</div>`;
+      container.innerHTML = html;
+    }
+
+    function campaignSourcePercent(value, total) {
+      if (!total) return '0%';
+      return `${((Number(value) / Number(total)) * 100).toFixed(Number(value) === Number(total) ? 0 : 1)}%`;
+    }
+
+    async function loadCampaignSubmissions(id) {
+      const container = document.getElementById('campaign-items');
+      if (!container) return;
+      container.innerHTML = '<div class="muted">Loading submissions…</div>';
+      document.querySelectorAll('[data-campaign-bucket]').forEach(button => {
+        button.classList.toggle('active', button.dataset.campaignBucket === 'submissions');
+      });
+      const { status, data } = await api('GET', `/v1/admin/campaign/submissions?id=${encodeURIComponent(id)}`);
+      if (status !== 200 || !data.ok) {
+        container.innerHTML = `<div class="error-msg">${esc(data.message || 'Could not load campaign submissions')}</div>`;
+        return;
+      }
+
+      const sources = data.sources || [];
+      const total = Number(data.totalSubmissions || 0);
+      let html = `<div class="campaign-source-summary"><strong>Submissions by source and key label</strong><span class="muted">${total.toLocaleString()} total</span></div>`;
+      if (!sources.length) {
+        html += '<div class="empty-state">No completed-game submissions are linked to this campaign.</div>';
+      } else {
+        html += '<div class="campaign-source-row muted"><span>Source / key label</span><span class="campaign-source-bar"></span><span class="campaign-source-count">Count</span><span class="campaign-source-share">Share</span><span class="campaign-source-last">Last submitted</span></div>';
+        for (const source of sources) {
+          const sourceLast = source.lastReceivedAt ? new Date(source.lastReceivedAt).toLocaleString() : '—';
+          html += `<div class="campaign-source-group">
+            <div class="campaign-source-row">
+              <span class="campaign-source-name" title="${esc(source.source)}">${esc(source.source)}</span>
+              <span class="campaign-source-bar"><i style="width:${campaignSourcePercent(source.submissions, total)}"></i></span>
+              <span class="campaign-source-count">${Number(source.submissions).toLocaleString()}</span>
+              <span class="campaign-source-share">${campaignSourcePercent(source.submissions, total)}</span>
+              <span class="campaign-source-last" title="${esc(source.lastReceivedAt || '')}">${esc(sourceLast)}</span>
+            </div>`;
+          for (const credential of source.credentials || []) {
+            const credentialLast = credential.lastReceivedAt ? new Date(credential.lastReceivedAt).toLocaleString() : '—';
+            html += `<div class="campaign-source-row campaign-source-credential">
+              <span class="campaign-source-name" title="${esc(credential.label)}">↳ ${esc(credential.label)}</span>
+              <span class="campaign-source-bar"><i style="width:${campaignSourcePercent(credential.submissions, source.submissions)}"></i></span>
+              <span class="campaign-source-count">${Number(credential.submissions).toLocaleString()}</span>
+              <span class="campaign-source-share">${campaignSourcePercent(credential.submissions, source.submissions)}</span>
+              <span class="campaign-source-last" title="${esc(credential.lastReceivedAt || '')}">${esc(credentialLast)}</span>
+            </div>`;
+          }
+          html += '</div>';
+        }
+      }
       container.innerHTML = html;
     }
 
