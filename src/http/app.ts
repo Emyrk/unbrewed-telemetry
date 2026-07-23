@@ -11,6 +11,14 @@ import { serveDashboardAsset } from './static.js';
 
 const RECENT_HOURLY_CACHE_MS = 5 * 60 * 1000;
 
+/**
+ * Cap on the crash-resume journal a heartbeat may store (engine #255). The
+ * worker caps its payload at 256 KB; this is a defensive server-side ceiling
+ * below the 1 MB body limit. Oversized journals are dropped, never 4xx'd —
+ * the heartbeat's lease renewal must always succeed.
+ */
+const JOURNAL_MAX_BYTES = 512 * 1024;
+
 interface RecentHourlyCacheEntry {
   expiresAt: number;
   payload?: RecentHourlyResponse;
@@ -1126,8 +1134,8 @@ async function handleSimHeartbeat(
   }
   const body = await readBody(req, config.bodyLimitBytes);
   if (!body.ok) { sendJson(res, body.status, { ok: false, code: body.code, message: body.message }); return; }
-  let data: { jobId?: string; leaseToken?: string; leaseDurationMs?: number };
-  try { data = JSON.parse(body.body.toString('utf8')) as { jobId?: string; leaseToken?: string; leaseDurationMs?: number }; }
+  let data: { jobId?: string; leaseToken?: string; leaseDurationMs?: number; journal?: unknown };
+  try { data = JSON.parse(body.body.toString('utf8')) as { jobId?: string; leaseToken?: string; leaseDurationMs?: number; journal?: unknown }; }
   catch { sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Invalid JSON' }); return; }
   if (!data.jobId || !data.leaseToken) {
     sendJson(res, 400, { ok: false, code: 'MISSING_FIELDS', message: 'jobId and leaseToken are required' });
@@ -1135,17 +1143,38 @@ async function handleSimHeartbeat(
   }
   const requestedDuration = Number.isFinite(data.leaseDurationMs) ? Math.trunc(data.leaseDurationMs!) : 5 * 60 * 1000;
   const leaseDurationMs = Math.min(Math.max(requestedDuration, 10_000), 60 * 60 * 1000);
+  // Crash-resume journal (engine #255): an opaque checkpoint stored on the job
+  // row and returned by claim, so a hard-killed worker's game can be resumed by
+  // any same-build machine. Oversized journals are dropped (the lease renewal
+  // must still go through — losing a checkpoint is safe, losing a lease is not);
+  // `journalStored` in the response lets the worker log the degradation.
+  let journal: unknown;
+  let journalStored: boolean | undefined;
+  if (data.journal !== undefined && data.journal !== null) {
+    const journalBytes = Buffer.byteLength(JSON.stringify(data.journal), 'utf8');
+    if (journalBytes <= JOURNAL_MAX_BYTES) {
+      journal = data.journal;
+      journalStored = true;
+    } else {
+      journalStored = false;
+    }
+  }
   const expiresAt = await cpRepo.renewLease(
     data.jobId,
     data.leaseToken,
     bearerCtx.credentialId,
     leaseDurationMs,
+    journal,
   );
   if (!expiresAt) {
     sendJson(res, 409, { ok: false, code: 'INVALID_LEASE', message: 'Lease is missing, expired, or owned by another credential' });
     return;
   }
-  sendJson(res, 200, { ok: true, leaseExpiresAt: expiresAt.toISOString() });
+  sendJson(res, 200, {
+    ok: true,
+    leaseExpiresAt: expiresAt.toISOString(),
+    ...(journalStored !== undefined ? { journalStored } : {}),
+  });
 }
 
 async function handleSimComplete(
