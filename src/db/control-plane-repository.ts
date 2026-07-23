@@ -140,12 +140,6 @@ export interface SimJob {
   attempts: number;
   maxAttempts: number;
   lastError: string | null;
-  /**
-   * Crash-resume checkpoint (engine #255): the worker's action journal as last
-   * heartbeated by a previous lease holder. Opaque to the control plane — the
-   * worker validates it (worker version + state hash) and discards on mismatch.
-   */
-  journal?: unknown;
 }
 
 export interface ClaimResult {
@@ -618,9 +612,9 @@ export class ControlPlaneRepository {
       // Also ensure campaign is active
       const jobRows = await client.query<{
         id: string; campaign_id: string; game_index: number; seed: string;
-        spec: unknown; attempts: number; max_attempts: number; journal: unknown;
+        spec: unknown; attempts: number; max_attempts: number;
       }>(
-        `SELECT sj.id, sj.campaign_id, sj.game_index, sj.seed, sj.spec, sj.attempts, sj.max_attempts, sj.journal
+        `SELECT sj.id, sj.campaign_id, sj.game_index, sj.seed, sj.spec, sj.attempts, sj.max_attempts
          FROM sim_jobs sj
          JOIN sim_campaigns sc ON sc.id = sj.campaign_id AND sc.status = 'active'
          WHERE sj.status = 'pending' ${campaignFilter}
@@ -664,9 +658,6 @@ export class ControlPlaneRepository {
         attempts: j.attempts + 1,
         maxAttempts: j.max_attempts,
         lastError: null,
-        // Hand any stored crash-resume journal to the new lease holder (#255).
-        // A journal survives lease expiry on purpose — that is the recovery path.
-        ...(j.journal !== null && j.journal !== undefined ? { journal: j.journal } : {}),
       }));
     } catch (error) {
       await client.query('ROLLBACK');
@@ -681,37 +672,18 @@ export class ControlPlaneRepository {
     leaseToken: string,
     leasedBy: string,
     leaseDurationMs: number,
-    journal?: unknown,
   ): Promise<Date | null> {
     const expiresAt = new Date(Date.now() + leaseDurationMs);
-    // The crash-resume journal (engine #255) rides along on the heartbeat and
-    // is only accepted from the current lease holder — the same guard as the
-    // renewal itself, so a zombie worker whose lease was reclaimed cannot
-    // overwrite the new holder's checkpoint.
     const result = await this.pool.query<{ lease_expires_at: Date }>(
-      journal === undefined
-        ? {
-            text: `UPDATE sim_jobs
-                   SET lease_expires_at = $4
-                   WHERE id = $1
-                     AND status = 'leased'
-                     AND lease_token = $2
-                     AND leased_by = $3
-                     AND lease_expires_at > now()
-                   RETURNING lease_expires_at`,
-            values: [jobId, leaseToken, leasedBy, expiresAt],
-          }
-        : {
-            text: `UPDATE sim_jobs
-                   SET lease_expires_at = $4, journal = $5, journal_updated_at = now()
-                   WHERE id = $1
-                     AND status = 'leased'
-                     AND lease_token = $2
-                     AND leased_by = $3
-                     AND lease_expires_at > now()
-                   RETURNING lease_expires_at`,
-            values: [jobId, leaseToken, leasedBy, expiresAt, JSON.stringify(journal)],
-          },
+      `UPDATE sim_jobs
+       SET lease_expires_at = $4
+       WHERE id = $1
+         AND status = 'leased'
+         AND lease_token = $2
+         AND leased_by = $3
+         AND lease_expires_at > now()
+       RETURNING lease_expires_at`,
+      [jobId, leaseToken, leasedBy, expiresAt],
     );
     return result.rows[0]?.lease_expires_at ?? null;
   }
@@ -810,13 +782,10 @@ export class ControlPlaneRepository {
       }
 
       if (job.attempts >= job.max_attempts) {
-        // Terminal failure. The journal is cleared: a game that FAILED (as
-        // opposed to being killed) may have failed because of what the journal
-        // replays, so a retry must never inherit it (engine #255).
+        // Terminal failure
         await client.query(
           `UPDATE sim_jobs SET status = 'failed', lease_token = NULL, leased_by = NULL,
-                  leased_at = NULL, lease_expires_at = NULL, last_error = $2,
-                  journal = NULL, journal_updated_at = NULL
+                  leased_at = NULL, lease_expires_at = NULL, last_error = $2
            WHERE id = $1`,
           [jobId, errorMessage],
         );
@@ -832,11 +801,10 @@ export class ControlPlaneRepository {
           [job.campaign_id],
         );
       } else {
-        // Requeue — journal cleared for the same reason as the terminal branch.
+        // Requeue
         await client.query(
           `UPDATE sim_jobs SET status = 'pending', lease_token = NULL, leased_by = NULL,
-                  leased_at = NULL, lease_expires_at = NULL, last_error = $2,
-                  journal = NULL, journal_updated_at = NULL
+                  leased_at = NULL, lease_expires_at = NULL, last_error = $2
            WHERE id = $1`,
           [jobId, errorMessage],
         );
