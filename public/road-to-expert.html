@@ -11,6 +11,7 @@
     --border: rgba(255,255,255,0.09); --border-strong: rgba(255,255,255,0.14);
     --track: rgba(255,255,255,0.08); --text: #f2ead9; --muted: #b9a5c0; --muted-2: #9d87a6;
     --accent: #e9b954; --green: #7ecb8f; --red: #e0796a; --blue: #7aa3d4; --violet: #a78bc9;
+    --amber: #dfa24f;
     --font-body: 'Archivo', system-ui, sans-serif; --font-head: 'Oswald', var(--font-body);
     --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
   }
@@ -24,12 +25,17 @@
   .meta { font-family: var(--font-mono); font-size: 11px; color: var(--muted-2); margin-top: 10px; }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
   .dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot.idle { background: var(--amber); }
   .dot.down { background: var(--muted-2); }
 
-  .runners { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-  .runner { font-family: var(--font-mono); font-size: 11px; background: var(--panel-alt); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; }
+  .workers { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .worker { font-family: var(--font-mono); font-size: 11px; background: var(--panel-alt); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; }
+  .build { display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-left: 7px; vertical-align: middle; }
+  .build.ok { background: var(--green); opacity: 0.75; }
+  .build.lag { background: var(--amber); box-shadow: 0 0 5px var(--amber); }
 
-  .ladder { max-width: 940px; margin: 0 auto; padding: 8px 24px 60px; }
+  .ladder { max-width: 940px; margin: 0 auto; padding: 8px 24px 0; }
+  .ladder.tail { padding-bottom: 60px; }
   .step { position: relative; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin: 14px 0; }
   .step.gate { border-color: rgba(233,185,84,0.5); box-shadow: 0 0 0 1px rgba(233,185,84,0.15); }
   .step-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
@@ -61,46 +67,144 @@
   .mixed { color: var(--red); font-family: var(--font-mono); font-size: 11px; margin-top: 6px; }
   .footer { color: var(--muted-2); font-family: var(--font-mono); font-size: 11px; text-align: center; padding: 20px; }
   .err { color: var(--red); font-family: var(--font-mono); text-align: center; padding: 20px; }
+
+  /* In-flight pulse — the one live line on the collapsed face. */
+  .pulse { margin-top: 10px; font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+  .pulse-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--blue); margin-right: 7px; vertical-align: middle; animation: breathe 2.4s ease-in-out infinite; }
+  @keyframes breathe { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+
+  /* Accordion — expands from the existing card; collapsed face untouched. */
+  .acc-toggle { display: flex; align-items: center; gap: 7px; width: 100%; margin-top: 14px; padding: 6px 0 0; background: none; border: 0; border-top: 1px solid var(--border); color: var(--muted-2); font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; cursor: pointer; text-align: left; }
+  .acc-toggle:hover { color: var(--muted); }
+  .acc-toggle .chev { display: inline-block; transition: transform 0.3s ease; font-size: 10px; }
+  .acc-toggle[aria-expanded="true"] .chev { transform: rotate(90deg); }
+  .acc { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 0.35s ease; }
+  .acc.open { grid-template-rows: 1fr; }
+  .acc-inner { overflow: hidden; min-height: 0; }
+  .acc-pad { padding-top: 12px; }
+  .acc-note { font-family: var(--font-mono); font-size: 11px; color: var(--muted-2); padding: 8px 0 2px; }
+
+  /* Matchup strip */
+  .mstrip { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+  .mcell { background: var(--panel-alt); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+  .mpair { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mnum { font: 500 14px var(--font-mono); color: var(--text); margin-top: 4px; }
+  .mnum .mgames { font-size: 10px; color: var(--muted-2); }
+  .mnum.warm { color: var(--muted); font-size: 12px; }
+  .mci { position: relative; height: 4px; background: var(--track); border-radius: 2px; margin-top: 7px; }
+  .mci-band { position: absolute; top: 0; height: 4px; background: rgba(122,163,212,0.45); border-radius: 2px; }
+  .mci-pt { position: absolute; top: -2px; width: 2px; height: 8px; background: var(--text); border-radius: 1px; }
+  .mci-mid { position: absolute; top: -1px; height: 6px; width: 1px; left: 50%; background: rgba(255,255,255,0.25); }
+
+  /* Gate chart */
+  .gchart { margin-top: 14px; }
+  .gc-head { font: 500 13px var(--font-mono); color: var(--text); margin-bottom: 4px; }
+  .gc-head .warm { color: var(--muted); }
+  .gchart svg { width: 100%; height: auto; display: block; }
+
+  /* Glossary */
+  a.term { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--muted-2); cursor: help; }
+  a.term:hover { border-bottom-color: var(--accent); color: var(--text); }
+  .g-group { font: 500 13px var(--font-head); letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); margin: 16px 0 4px; }
+  .g-group:first-child { margin-top: 4px; }
+  .g-entry { padding: 8px 10px; border-radius: 8px; }
+  .g-entry dt { font: 500 13px var(--font-mono); color: var(--text); }
+  .g-entry dd { margin: 3px 0 0; color: var(--muted); font-size: 13.5px; line-height: 1.5; }
+  .g-entry.flash { animation: gflash 1.6s ease; }
+  @keyframes gflash { 0% { background: rgba(233,185,84,0.22); } 100% { background: transparent; } }
+  dl { margin: 0; }
 </style>
 </head>
 <body>
   <div class="topbar"><div class="inner">
     <div class="brand">Road to Expert+</div>
-    <p class="lede">The mission: prove the sim-only <b>ISMCTS</b> tier is stronger than the flat Monte-Carlo bot we ship today — and say <i>why</i> we believe it, not just <i>that</i> we do. Each rung below is one experiment; watch the ladder fill as games land.</p>
+    <p class="lede">The mission: prove the sim-only <b><a class="term" href="#g-ismcts">ISMCTS</a></b> tier is stronger than the <a class="term" href="#g-flat-mc">flat Monte-Carlo</a> bot we ship today — and say <i>why</i> we believe it, not just <i>that</i> we do. Each rung below is one experiment; watch the ladder fill as games land.</p>
     <div class="meta" id="meta">loading…</div>
-    <div class="runners" id="runners"></div>
+    <div class="workers" id="workers"></div>
   </div></div>
   <div class="ladder" id="ladder"></div>
+
+  <div class="ladder tail">
+    <div class="step" id="glossary">
+      <div class="step-head">
+        <span class="step-title">What do these terms mean?</span>
+        <span class="role">Glossary</span>
+      </div>
+      <p class="why">Every bit of jargon on this page, explained for a curious player — no statistics degree required. Dotted-underlined words above jump straight to their entry.</p>
+      <button class="acc-toggle" data-acc="glossary" aria-expanded="false"><span class="chev">▶</span>browse the glossary</button>
+      <div class="acc" data-accbody="glossary"><div class="acc-inner"><div class="acc-pad">
+
+        <div class="g-group">The bots</div>
+        <dl>
+          <div class="g-entry" id="g-ismcts"><dt>ISMCTS</dt><dd>Information Set Monte Carlo Tree Search — the candidate “Expert+” bot. It grows a tree of possible futures before each move while accounting for what it cannot see, like the opponent’s hidden hand. The number after the @ (as in ismcts@3000) is how many playouts it gets per decision.</dd></div>
+          <div class="g-entry" id="g-flat-mc"><dt>flat Monte-Carlo (flat MC)</dt><dd>The bot Unbrewed ships today. For each legal move it plays a batch of quick random games to the end and picks the move with the best average outcome — no tree, no memory between decisions. “Flat” means every candidate move is tried the same way.</dd></div>
+          <div class="g-entry" id="g-hard-64"><dt>hard-64</dt><dd>The shipping “hard” difficulty of the flat Monte-Carlo bot: 64 playouts per candidate move. It is the yardstick — the gate arm asks whether the new tier beats exactly what players face today.</dd></div>
+          <div class="g-entry" id="g-playouts"><dt>playouts (sims)</dt><dd>One playout is one fast simulated game played through to the end. More playouts means more thinking per decision. The counts on this page — like ismcts@3000’s 3,000 or hard-64’s 64 — are playouts per decision.</dd></div>
+        </dl>
+
+        <div class="g-group">The experiments</div>
+        <dl>
+          <div class="g-entry" id="g-arm"><dt>arm</dt><dd>One experiment in the mission: a fixed pairing of two bots, run for a planned number of games. Each card above is one arm, and each isolates a different question — is it stronger, is it fair, is it worth the time.</dd></div>
+          <div class="g-entry" id="g-gate"><dt>the gate</dt><dd>The mission’s pass/fail bar. ISMCTS must win at least 60% of at least 1,000 games against hard-64, and the whole 95% interval has to sit above 50%. Clear the bar and the tier has earned the “Expert+” name.</dd></div>
+          <div class="g-entry" id="g-knob-grid"><dt>knob grid / tuned flat MC</dt><dd>A sweep over the flat Monte-Carlo bot’s settings (its “knobs”) to find its strongest configuration. The winner becomes the “tuned flat MC” opponent — so ISMCTS is measured against the best non-tree bot we can build, not a weak default.</dd></div>
+          <div class="g-entry" id="g-compute-parity"><dt>compute parity</dt><dd>A fair fight: both bots think the same total amount, so a win is credited to the smarter search, not to more thinking time. Without it, a critic could say the new bot only wins because it simulates more.</dd></div>
+          <div class="g-entry" id="g-wall-clock"><dt>wall-clock matched</dt><dd>Instead of matching playout counts, match real seconds per move. It answers the practical question directly: given the same time on the clock, does the tree still make better moves?</dd></div>
+          <div class="g-entry" id="g-mirror"><dt>mirror</dt><dd>A bot playing an identical copy of itself. Nobody is smarter, so the result must land near 50% — if it drifts away, the test setup itself is leaning on the scale, and every other arm becomes suspect.</dd></div>
+          <div class="g-entry" id="g-pairing"><dt>pairing</dt><dd>Which deck faces which deck in a game — for example Mando vs Thrall, or King-Kong against itself. Games are spread evenly across an arm’s pairings so no single matchup dominates the average.</dd></div>
+          <div class="g-entry" id="g-seat-bias"><dt>seat &amp; seeding bias</dt><dd>Going first can matter, and so can the random seed a game starts from. The harness alternates which bot goes first and varies seeds so neither side gets a hidden head start. The mirror arm exists to prove this worked.</dd></div>
+        </dl>
+
+        <div class="g-group">The statistics</div>
+        <dl>
+          <div class="g-entry" id="g-win-rate"><dt>win rate</dt><dd>Wins divided by games played, always shown from the ISMCTS side. 50% means dead even; the gate asks for 60%.</dd></div>
+          <div class="g-entry" id="g-interval"><dt>95% interval (Wilson)</dt><dd>The range where the true win rate plausibly lives, given how many games we have seen — wide when games are few, narrow as they pile up. We use the Wilson score interval, a textbook formula that stays honest even with small samples.</dd></div>
+          <div class="g-entry" id="g-exclude-50"><dt>why the interval must exclude 50%</dt><dd>If the whole plausible range sits above 50%, luck alone can no longer explain the lead. That is the difference between “currently ahead” and “actually better” — and it is what the verdict lines above are checking.</dd></div>
+          <div class="g-entry" id="g-warming-up"><dt>warming up</dt><dd>Below <span data-mingames>50</span> games a win rate jumps around too much to mean anything, so the charts show “warming up · n=…” instead of a headline number. It is not a verdict — just the page refusing to guess early.</dd></div>
+          <div class="g-entry" id="g-in-flight"><dt>in flight</dt><dd>Games the worker machines are playing right now — claimed but not yet finished. They appear in the pulse line on a running card and turn into completed games when they land.</dd></div>
+          <div class="g-entry" id="g-decisions"><dt>decisions in</dt><dd>How far along an in-flight game is, counted in moves the bots have made so far. Long games can take a while, so this is the page’s heartbeat between finished results.</dd></div>
+        </dl>
+
+      </div></div></div>
+    </div>
+  </div>
+
   <div class="footer">Public read-only view · experiment data only · auto-refreshes every 8s · <span id="src"></span></div>
 
 <script>
 // Plain-language mission narrative — WHAT each step proves and WHY it exists.
+// Dotted-underline links mark the FIRST use of a glossary term in card copy.
 const STEPS = {
   grid:   { title: 'Knob grid', role: 'Tune the opponent', gate: null, target: null, bar: false,
             what: 'Find the strongest flat Monte-Carlo settings.',
             why: 'So ISMCTS is measured against the BEST non-tree bot we can build, not a weak default. The winning variant becomes arm 3’s opponent.' },
   arm1:   { title: 'Arm 1 — ISMCTS@3000 vs hard-64', role: 'The gate', gate: 0.60, target: null, bar: true, isGate: true,
             what: 'Does the tier we’d ship beat the tier we ship today?',
-            why: 'The literal acceptance gate: ≥60% over ≥1,000 games with the 95% interval excluding 50%.' },
+            why: 'The literal acceptance <a class="term" href="#g-gate">gate</a>: ≥60% over ≥1,000 games with the <a class="term" href="#g-interval">95% interval</a> <a class="term" href="#g-exclude-50">excluding 50%</a>.' },
   arm2:   { title: 'Arm 2 — compute parity', role: 'Fair fight', gate: null, target: 0.50, bar: true,
-            what: 'Does the tree add strength at EQUAL compute, or is ISMCTS just searching more?',
-            why: '~1,000 playouts vs hard-64’s ~640 — a win here is attributable to the tree, not raw simulation count.' },
+            what: 'Does the tree add strength at <a class="term" href="#g-compute-parity">EQUAL compute</a>, or is ISMCTS just searching more?',
+            why: '~1,000 <a class="term" href="#g-playouts">playouts</a> vs <a class="term" href="#g-hard-64">hard-64</a>’s ~640 — a win here is attributable to the tree, not raw simulation count.' },
   arm5:   { title: 'Arm 5 — wall-clock matched', role: 'Equal time', gate: null, target: 0.50, bar: true,
             what: 'At the same seconds per move, does the tree still win?',
-            why: 'ismcts@3000 costs about the same wall-clock as mc@256. Answers “at equal time, is the tree better?” directly.' },
+            why: 'ismcts@3000 costs about the same <a class="term" href="#g-wall-clock">wall-clock</a> as mc@256. Answers “at equal time, is the tree better?” directly.' },
   arm3:   { title: 'Arm 3 — vs tuned flat MC', role: 'Best opponent', gate: null, target: 0.50, bar: true,
-            what: 'Beats the grid’s BEST tuned flat MC, not just the shipping config.',
+            what: 'Beats the grid’s BEST <a class="term" href="#g-knob-grid">tuned flat MC</a>, not just the shipping config.',
             why: 'The strongest claim the mission can make: better than the best non-tree bot, auto-derived from the knob grid.' },
   mirror: { title: 'Arm 4 — ISMCTS mirror', role: 'Sanity control', gate: null, target: 0.50, bar: true, isMirror: true,
-            what: 'ISMCTS vs itself must land near 50%.',
-            why: 'Proves the harness has no seat or seeding bias that could manufacture an edge in the arms above.' },
+            what: '<a class="term" href="#g-mirror">ISMCTS vs itself</a> must land near 50%.',
+            why: 'Proves the harness has no <a class="term" href="#g-seat-bias">seat or seeding bias</a> that could manufacture an edge in the <a class="term" href="#g-arm">arms</a> above.' },
   cost:   { title: 'Per-decision search cost', role: 'Measurement', gate: null, target: null, bar: false,
-            what: 'How many milliseconds each bot spends per decision.',
+            what: 'How many milliseconds each bot spends per <a class="term" href="#g-decisions">decision</a>.',
             why: 'The wall-clock-matched arm rests on these numbers — they define what “equal time” means.' },
 };
 const ORDER = ['grid','arm1','arm2','arm3','arm5','mirror','cost'];
 const pct = (x) => (x*100).toFixed(1) + '%';
 const clamp = (x) => Math.max(0, Math.min(1, x));
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let MIN_VERDICT_GAMES = 50;
+
+// Accordions stay collapsed by default; remember what the reader opened so the
+// 8s re-render never snaps a card shut on them.
+const openAcc = new Set();
 
 function statusClass(step, s) {
   if (!s.found) return ['pending', 'pending'];
@@ -118,7 +222,7 @@ function winBar(meta, hero) {
   const lineHtml = line != null
     ? `<div class="wr-line" style="left:${line*100}%"><span class="lab">${line===0.6?'60% gate':'50%'}</span></div>` : '';
   return `<div class="winrate">
-    <div class="wr-big">${hero.pilot} &middot; ${pct(hero.rate)} <span style="color:var(--muted)">(${hero.wins}/${hero.games}, 95% CI ${pct(lo)}–${pct(hi)})</span></div>
+    <div class="wr-big">${esc(hero.pilot)} &middot; ${pct(hero.rate)} <span style="color:var(--muted)">(${hero.wins}/${hero.games}, 95% CI ${pct(lo)}–${pct(hi)})</span></div>
     <div class="wr-scale">
       <div class="wr-track"></div>
       <div class="wr-ci" style="left:${clamp(lo)*100}%;width:${clamp(hi-lo)*100}%"></div>
@@ -145,22 +249,125 @@ function verdict(meta, hero) {
   return `<div class="verdict wait">Inconclusive so far — CI spans 50%.</div>`;
 }
 
+// ---- In-flight pulse (collapsed face) ----
+function pulseLine(s) {
+  const f = s.inFlight;
+  if (!f || f.jobs === 0) return '';
+  const n = `${f.jobs} in flight`;
+  if (f.reporting === 0 || f.medianDecisions == null) {
+    return `<div class="pulse"><span class="pulse-dot"></span>${n} · first moves under way</div>`;
+  }
+  return `<div class="pulse"><span class="pulse-dot"></span>${n} · median ${f.medianDecisions} decisions in · deepest ${f.maxDecisions}</div>`;
+}
+
+// ---- Matchup strip (accordion) ----
+const deckName = (id) => String(id).split('-').map((w) => w ? w[0].toUpperCase() + w.slice(1) : w).join('-');
+
+function matchupStrip(s) {
+  if (!s.matchups || s.matchups.length === 0) {
+    return '<div class="acc-note">matchups appear once the first games land</div>';
+  }
+  const cells = s.matchups.map((m) => {
+    const pair = m.heroDeck === m.oppDeck ? `${deckName(m.heroDeck)} mirror` : `${deckName(m.heroDeck)} vs ${deckName(m.oppDeck)}`;
+    const [lo, hi] = m.wilson95;
+    const num = m.games < MIN_VERDICT_GAMES
+      ? `<div class="mnum warm">warming up · n=${m.games}</div>`
+      : `<div class="mnum">${pct(m.rate)} <span class="mgames">n=${m.games}</span></div>`;
+    return `<div class="mcell">
+      <div class="mpair" title="${esc(pair)}">${esc(pair)}</div>
+      ${num}
+      <div class="mci">
+        <div class="mci-mid"></div>
+        <div class="mci-band" style="left:${clamp(lo)*100}%;width:${clamp(hi-lo)*100}%"></div>
+        <div class="mci-pt" style="left:${clamp(m.rate)*100}%"></div>
+      </div>
+    </div>`;
+  }).join('');
+  return `<div class="mstrip">${cells}</div>`;
+}
+
+// ---- Gate chart (accordion): cumulative win rate + shaded 95% CI band ----
+function gateChart(meta, s) {
+  const line = meta.gate ?? meta.target ?? null;
+  const pts = s.gateSeries || [];
+  const hero = s.hero;
+  let head;
+  if (!hero || hero.games === 0) {
+    head = '<span class="warm">awaiting games…</span>';
+  } else if (hero.games < MIN_VERDICT_GAMES) {
+    head = `<span class="warm">warming up · n=${hero.games} of ${MIN_VERDICT_GAMES}</span>`;
+  } else {
+    const last = pts[pts.length - 1];
+    head = `cumulative win rate ${pct(last.rate)} <span class="warm">(95% CI ${pct(last.wilson95[0])}–${pct(last.wilson95[1])} over ${last.n} games)</span>`;
+  }
+  let svg = '';
+  if (pts.length > 0) {
+    const W = 600, H = 150, L = 36, R = 10, T = 12, B = 20;
+    const pw = W - L - R, ph = H - T - B;
+    const maxN = pts[pts.length - 1].n;
+    const x = (n) => L + (maxN <= 1 ? pw : ((n - 1) / (maxN - 1)) * pw);
+    const y = (r) => T + (1 - clamp(r)) * ph;
+    const marks = [];
+    marks.push(`<line x1="${L}" y1="${y(0)}" x2="${W-R}" y2="${y(0)}" stroke="rgba(255,255,255,0.12)"/>`);
+    marks.push(`<line x1="${L}" y1="${y(0.5)}" x2="${W-R}" y2="${y(0.5)}" stroke="rgba(255,255,255,0.12)"/>`);
+    marks.push(`<line x1="${L}" y1="${y(1)}" x2="${W-R}" y2="${y(1)}" stroke="rgba(255,255,255,0.12)"/>`);
+    for (const [v, lab] of [[0,'0%'],[0.5,'50%'],[1,'100%']]) {
+      marks.push(`<text x="${L-5}" y="${y(v)+3}" text-anchor="end" font-size="9" fill="#9d87a6" font-family="IBM Plex Mono,monospace">${lab}</text>`);
+    }
+    if (pts.length === 1) {
+      const p = pts[0];
+      marks.push(`<line x1="${x(p.n)}" y1="${y(p.wilson95[0])}" x2="${x(p.n)}" y2="${y(p.wilson95[1])}" stroke="rgba(122,163,212,0.45)" stroke-width="4"/>`);
+      marks.push(`<circle cx="${x(p.n)}" cy="${y(p.rate)}" r="3" fill="#f2ead9"/>`);
+    } else {
+      const band = pts.map((p) => `${x(p.n).toFixed(1)},${y(p.wilson95[1]).toFixed(1)}`).join(' ')
+        + ' ' + [...pts].reverse().map((p) => `${x(p.n).toFixed(1)},${y(p.wilson95[0]).toFixed(1)}`).join(' ');
+      marks.push(`<polygon points="${band}" fill="rgba(122,163,212,0.25)"/>`);
+      const linePts = pts.map((p) => `${x(p.n).toFixed(1)},${y(p.rate).toFixed(1)}`).join(' ');
+      marks.push(`<polyline points="${linePts}" fill="none" stroke="#7aa3d4" stroke-width="1.6"/>`);
+    }
+    if (line != null) {
+      marks.push(`<line x1="${L}" y1="${y(line)}" x2="${W-R}" y2="${y(line)}" stroke="#e9b954" stroke-width="1.2" stroke-dasharray="5 4"/>`);
+      marks.push(`<text x="${W-R}" y="${y(line)-4}" text-anchor="end" font-size="9" fill="#e9b954" font-family="IBM Plex Mono,monospace">${line===0.6?'60% gate':'50%'}</text>`);
+    }
+    marks.push(`<text x="${W-R}" y="${H-6}" text-anchor="end" font-size="9" fill="#9d87a6" font-family="IBM Plex Mono,monospace">games → ${maxN}</text>`);
+    svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="cumulative win rate">${marks.join('')}</svg>`;
+  }
+  return `<div class="gchart"><div class="gc-head">${head}</div>${svg}</div>`;
+}
+
+function accordion(name, meta, s) {
+  if (!s.found) return '';
+  const open = openAcc.has(name);
+  return `<button class="acc-toggle" data-acc="${name}" aria-expanded="${open}"><span class="chev">▶</span>matchups &amp; win-rate curve</button>
+  <div class="acc${open ? ' open' : ''}" data-accbody="${name}"><div class="acc-inner"><div class="acc-pad">
+    ${matchupStrip(s)}
+    ${meta.bar ? gateChart(meta, s) : ''}
+  </div></div></div>`;
+}
+
 function render(j) {
+  MIN_VERDICT_GAMES = j.minVerdictGames ?? MIN_VERDICT_GAMES;
+  document.querySelectorAll('[data-mingames]').forEach((el) => { el.textContent = MIN_VERDICT_GAMES; });
   const meta = document.getElementById('meta');
   const done = j.steps.filter(s => s.status === 'completed').length;
   meta.textContent = `${done}/${j.steps.length} steps complete · generated ${new Date(j.generatedAt).toLocaleTimeString()}`;
   document.getElementById('src').textContent = 'GET /v1/sim/public/journey';
 
-  const rc = document.getElementById('runners');
-  rc.innerHTML = j.runners.length
-    ? j.runners.map(r => `<span class="runner"><span class="dot ${r.live?'live':'down'}"></span>${r.runner.slice(0,14)} · ${r.leasedJobs} job${r.leasedJobs===1?'':'s'}</span>`).join('')
-    : '<span class="runner"><span class="dot down"></span>no active runners</span>';
+  const wc = document.getElementById('workers');
+  const workers = j.workers ?? [];
+  wc.innerHTML = workers.length
+    ? workers.map((w) => {
+        const fresh = w.heartbeatAgeSeconds < 360;
+        const mins = Math.max(1, Math.round(w.heartbeatAgeSeconds / 60));
+        return `<span class="worker"><span class="dot ${fresh ? 'live' : 'idle'}" title="last heartbeat ${fresh ? 'moments' : `~${mins} min`} ago"></span>${esc(w.label)} · ${w.jobs} running<span class="build ${w.latestBuild ? 'ok' : 'lag'}" title="${w.latestBuild ? 'newest build' : 'older build'}"></span></span>`;
+      }).join('')
+    : '<span class="worker"><span class="dot down"></span>no live workers</span>';
 
   const byName = Object.fromEntries(j.steps.map(s => [s.name, s]));
   const ladder = document.getElementById('ladder');
   ladder.innerHTML = ORDER.map(name => {
     const meta = STEPS[name]; if (!meta) return '';
-    const s = byName[name] ?? { found:false, status:'pending', totalGames:0, completedGames:0, failedGames:0, leasedJobs:0, pilots:[], hero:null, mixedContentVersion:false };
+    const s = byName[name] ?? { found:false, status:'pending', totalGames:0, completedGames:0, failedGames:0, leasedJobs:0, pilots:[], hero:null, mixedContentVersion:false, matchups:[], gateSeries:[], inFlight:null };
     const [cls, label] = statusClass(name, s);
     const frac = s.totalGames > 0 ? s.completedGames / s.totalGames : 0;
     const bar = s.found ? `<div class="progress">
@@ -179,9 +386,39 @@ function render(j) {
       ${winBar(meta, s.hero)}
       ${s.mixedContentVersion ? '<div class="mixed">⚠ mixed engine versions in this arm — do not blend; re-check provenance.</div>' : ''}
       ${verdict(meta, s.hero)}
+      ${pulseLine(s)}
+      ${accordion(name, meta, s)}
     </div>`;
   }).join('');
 }
+
+// ---- Accordion + glossary-link behaviour (event delegation survives re-renders) ----
+function setAccOpen(name, open) {
+  if (open) openAcc.add(name); else openAcc.delete(name);
+  const body = document.querySelector(`[data-accbody="${name}"]`);
+  const btn = document.querySelector(`.acc-toggle[data-acc="${name}"]`);
+  if (body) body.classList.toggle('open', open);
+  if (btn) btn.setAttribute('aria-expanded', String(open));
+}
+
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('.acc-toggle');
+  if (btn) { setAccOpen(btn.dataset.acc, !openAcc.has(btn.dataset.acc)); return; }
+  const term = e.target.closest('a.term');
+  if (term) {
+    e.preventDefault();
+    const id = term.getAttribute('href').slice(1);
+    setAccOpen('glossary', true);
+    setTimeout(() => {
+      const entry = document.getElementById(id);
+      if (!entry) return;
+      entry.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      entry.classList.remove('flash');
+      void entry.offsetWidth;
+      entry.classList.add('flash');
+    }, 180);
+  }
+});
 
 async function tick() {
   try {
