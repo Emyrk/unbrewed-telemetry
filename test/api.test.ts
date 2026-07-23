@@ -506,6 +506,65 @@ describeDb('telemetry api with postgres', () => {
     expect('checkpoint' in withoutCheckpoint).toBe(false);
   });
 
+  it('preserves the checkpoint across a graceful stop: checkpoint → release → reclaim (issue #35)', async () => {
+    const source = await cpRepo.createSource('sim-graceful-runner', null, 'test-admin');
+    const credential = await cpRepo.createCredential(source.id, 'worker', ['sim:claim'], 'test-admin');
+    const campaign = await cpRepo.createCampaign({
+      name: 'Graceful stop campaign',
+      spec: { format: 'duel' },
+      games: [{}],
+      createdBy: 'test-admin',
+    });
+
+    const claim = await fetch(`${baseUrl}/v1/sim/claim`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${credential.fullKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ campaignId: campaign.id, count: 1 }),
+    });
+    expect(claim.status).toBe(200);
+    const claimed = await claim.json() as { jobs: { id: string; leaseToken: string; attempts: number }[] };
+    expect(claimed.jobs).toHaveLength(1);
+    const job = claimed.jobs[0]!;
+
+    // The engine's graceful stop (engine #258): final checkpoint heartbeat, then release.
+    const checkpoint = {
+      engineVersion: '1.4.2',
+      journal: { actions: ['a1', 'a2', 'a3'], prng: { main: '31337' } },
+    };
+    const heartbeat = await fetch(`${baseUrl}/v1/sim/heartbeat`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${credential.fullKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jobId: job.id, leaseToken: job.leaseToken, checkpoint }),
+    });
+    expect(heartbeat.status).toBe(200);
+
+    const release = await fetch(`${baseUrl}/v1/sim/release`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${credential.fullKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jobId: job.id, leaseToken: job.leaseToken }),
+    });
+    expect(release.status).toBe(200);
+    expect(await release.json()).toMatchObject({ ok: true });
+
+    const released = await pool.query<{ status: string; checkpoint: unknown; attempts: number }>(
+      `SELECT status, checkpoint, attempts FROM sim_jobs WHERE id = $1`, [job.id],
+    );
+    expect(released.rows[0]).toMatchObject({ status: 'pending', checkpoint, attempts: 0 });
+
+    const reclaim = await fetch(`${baseUrl}/v1/sim/claim`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${credential.fullKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ campaignId: campaign.id, count: 1 }),
+    });
+    expect(reclaim.status).toBe(200);
+    const reclaimed = await reclaim.json() as { jobs: { id: string; checkpoint?: unknown; attempts: number }[] };
+    expect(reclaimed.jobs).toHaveLength(1);
+    expect(reclaimed.jobs[0]!.id).toBe(job.id);
+    expect(reclaimed.jobs[0]!.checkpoint).toEqual(checkpoint);
+    // Release refunded the attempt, so the reclaim counts as the first again.
+    expect(reclaimed.jobs[0]!.attempts).toBe(1);
+  });
+
   it('rejects oversize and malformed checkpoints without touching job or lease', async () => {
     const source = await cpRepo.createSource('sim-checkpoint-limits', null, 'test-admin');
     const credential = await cpRepo.createCredential(source.id, 'worker', ['sim:claim'], 'test-admin');
