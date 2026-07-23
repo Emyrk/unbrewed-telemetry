@@ -3,7 +3,7 @@ import { randomUUID, createHmac } from 'node:crypto';
 import { validateGameSubmission } from '../ingest/schema.js';
 import { validateDeckDefinitions } from '../ingest/deck-schema.js';
 import type { PgTelemetryRepository } from '../db/repository.js';
-import type { CampaignItemBucket, ControlPlaneRepository } from '../db/control-plane-repository.js';
+import type { CampaignItemBucket, ControlPlaneRepository, SimJobCheckpoint } from '../db/control-plane-repository.js';
 import type { DeckDefinitionSubmission, GameSubmission, RecentHourlyResponse } from '../types.js';
 import { verifyIngestAuth } from './auth.js';
 import { parseBearer, verifySecret, hasScope, type Scope } from './bearer-auth.js';
@@ -1374,6 +1374,14 @@ async function handleSimRelease(
   });
 }
 
+/**
+ * Max stored size of a crash-resume checkpoint (engine #255). Journals are a
+ * few KB of action log + PRNG states; the cap only guards against runaway
+ * payloads. Rejected with the distinct CHECKPOINT_TOO_LARGE code so workers
+ * can log-and-degrade (heartbeat without the checkpoint).
+ */
+const SIM_CHECKPOINT_MAX_BYTES = 256 * 1024;
+
 async function handleSimHeartbeat(
   req: IncomingMessage,
   res: ServerResponse,
@@ -1390,6 +1398,7 @@ async function handleSimHeartbeat(
   let data: {
     jobId?: string; leaseToken?: string; leaseDurationMs?: number;
     sessionId?: string; concurrency?: number; workerVersion?: string;
+    checkpoint?: unknown;
   };
   try { data = JSON.parse(body.body.toString('utf8')); }
   catch { sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Invalid JSON' }); return; }
@@ -1397,6 +1406,37 @@ async function handleSimHeartbeat(
     sendJson(res, 400, { ok: false, code: 'MISSING_FIELDS', message: 'jobId and leaseToken must be supplied together' });
     return;
   }
+
+  // Crash-resume checkpoint (engine #255): validated before any write so a
+  // rejected checkpoint leaves the job, lease, and worker session untouched.
+  let checkpoint: SimJobCheckpoint | undefined;
+  if (data.checkpoint !== undefined) {
+    if (!data.jobId || !data.leaseToken) {
+      sendJson(res, 400, { ok: false, code: 'MISSING_FIELDS', message: 'checkpoint requires jobId and leaseToken' });
+      return;
+    }
+    const candidate = data.checkpoint as { engineVersion?: unknown; journal?: unknown } | null;
+    if (
+      !candidate || typeof candidate !== 'object' || Array.isArray(candidate)
+      || typeof candidate.engineVersion !== 'string' || !candidate.engineVersion.trim()
+      || !('journal' in candidate)
+    ) {
+      sendJson(res, 400, {
+        ok: false, code: 'INVALID_CHECKPOINT',
+        message: 'checkpoint must be an object with an engineVersion string and a journal',
+      });
+      return;
+    }
+    checkpoint = { engineVersion: candidate.engineVersion, journal: candidate.journal };
+    if (Buffer.byteLength(JSON.stringify(checkpoint), 'utf8') > SIM_CHECKPOINT_MAX_BYTES) {
+      sendJson(res, 413, {
+        ok: false, code: 'CHECKPOINT_TOO_LARGE',
+        message: `checkpoint exceeds ${SIM_CHECKPOINT_MAX_BYTES} bytes; heartbeat again without it`,
+      });
+      return;
+    }
+  }
+
   const workerDetails = parseWorkerDetails(data);
   if (!workerDetails.ok) { sendJson(res, 400, { ok: false, code: 'INVALID_WORKER', message: workerDetails.message }); return; }
   const sessionId = await cpRepo.touchWorkerSession(bearerCtx.credentialId, config.now(), workerDetails.details);
@@ -1409,6 +1449,7 @@ async function handleSimHeartbeat(
       data.leaseToken,
       bearerCtx.credentialId,
       leaseDurationMs,
+      checkpoint,
     );
     if (!expiresAt) {
       sendJson(res, 409, { ok: false, code: 'INVALID_LEASE', message: 'Lease is missing, expired, or owned by another credential', sessionId });

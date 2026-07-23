@@ -635,6 +635,97 @@ describeDb('control-plane repository with postgres', () => {
       expect(await repo.claimJobs(campaign.id, 2, 'runner')).toHaveLength(2);
     });
 
+    it('persists a heartbeat checkpoint and returns it verbatim on reclaim', async () => {
+      const campaign = await repo.createCampaign({
+        name: 'Checkpoint Test',
+        spec: { format: 'duel' },
+        games: [{}, {}],
+        createdBy: 'admin',
+      });
+
+      const jobs = await repo.claimJobs(campaign.id, 2, 'runner-1');
+      expect(jobs.length).toBe(2);
+      expect(jobs[0]!.checkpoint).toBeUndefined();
+
+      const checkpoint = {
+        engineVersion: '1.4.2',
+        journal: { actions: [{ t: 'draw', card: 'feint' }], prng: { main: '12345', shuffle: '678' } },
+      };
+      const renewed = await repo.renewLease(jobs[0]!.id, jobs[0]!.leaseToken!, 'runner-1', 60_000, checkpoint);
+      expect(renewed).not.toBeNull();
+
+      // Simulate a hard-killed worker: expire the lease, then reclaim from another runner.
+      await pool.query(`UPDATE sim_jobs SET lease_expires_at = now() - interval '1 second' WHERE campaign_id = $1`, [campaign.id]);
+      const reclaimed = await repo.claimJobs(campaign.id, 2, 'runner-2');
+      expect(reclaimed.length).toBe(2);
+      const withCheckpoint = reclaimed.find((j) => j.id === jobs[0]!.id);
+      const withoutCheckpoint = reclaimed.find((j) => j.id === jobs[1]!.id);
+      expect(withCheckpoint!.checkpoint).toEqual(checkpoint);
+      // Job that never sent a checkpoint: field absent, not null.
+      expect('checkpoint' in withoutCheckpoint!).toBe(false);
+    });
+
+    it('keeps the stored checkpoint on checkpoint-less heartbeats and overwrites on the next one', async () => {
+      const campaign = await repo.createCampaign({
+        name: 'Checkpoint LWW',
+        spec: {},
+        games: [{}],
+        createdBy: 'admin',
+      });
+      const [job] = await repo.claimJobs(campaign.id, 1, 'runner');
+
+      const first = { engineVersion: '1.0.0', journal: { seq: 1 } };
+      await repo.renewLease(job!.id, job!.leaseToken!, 'runner', 60_000, first);
+      // Plain heartbeat must not clear it.
+      await repo.renewLease(job!.id, job!.leaseToken!, 'runner', 60_000);
+      let stored = await pool.query<{ checkpoint: unknown }>(`SELECT checkpoint FROM sim_jobs WHERE id = $1`, [job!.id]);
+      expect(stored.rows[0]!.checkpoint).toEqual(first);
+
+      const second = { engineVersion: '1.0.0', journal: { seq: 2 } };
+      await repo.renewLease(job!.id, job!.leaseToken!, 'runner', 60_000, second);
+      stored = await pool.query<{ checkpoint: unknown }>(`SELECT checkpoint FROM sim_jobs WHERE id = $1`, [job!.id]);
+      expect(stored.rows[0]!.checkpoint).toEqual(second);
+    });
+
+    it('never writes a checkpoint on an invalid or expired lease', async () => {
+      const campaign = await repo.createCampaign({
+        name: 'Checkpoint Guard',
+        spec: {},
+        games: [{}],
+        createdBy: 'admin',
+      });
+      const [job] = await repo.claimJobs(campaign.id, 1, 'runner');
+
+      const wrongToken = await repo.renewLease(job!.id, 'wrong-token', 'runner', 60_000, { engineVersion: 'x', journal: {} });
+      expect(wrongToken).toBeNull();
+      const wrongRunner = await repo.renewLease(job!.id, job!.leaseToken!, 'other-runner', 60_000, { engineVersion: 'x', journal: {} });
+      expect(wrongRunner).toBeNull();
+
+      await pool.query(`UPDATE sim_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1`, [job!.id]);
+      const expired = await repo.renewLease(job!.id, job!.leaseToken!, 'runner', 60_000, { engineVersion: 'x', journal: {} });
+      expect(expired).toBeNull();
+
+      const stored = await pool.query<{ checkpoint: unknown }>(`SELECT checkpoint FROM sim_jobs WHERE id = $1`, [job!.id]);
+      expect(stored.rows[0]!.checkpoint).toBeNull();
+    });
+
+    it('keeps the checkpoint across a failed→pending requeue', async () => {
+      const campaign = await repo.createCampaign({
+        name: 'Checkpoint Requeue',
+        spec: {},
+        games: [{}],
+        createdBy: 'admin',
+      });
+      const [job] = await repo.claimJobs(campaign.id, 1, 'runner');
+      const checkpoint = { engineVersion: '2.0.0', journal: { turn: 40 } };
+      await repo.renewLease(job!.id, job!.leaseToken!, 'runner', 60_000, checkpoint);
+
+      await repo.failJob(job!.id, job!.leaseToken!, 'worker crashed mid-game');
+      const [reclaimed] = await repo.claimJobs(campaign.id, 1, 'runner-2');
+      expect(reclaimed!.id).toBe(job!.id);
+      expect(reclaimed!.checkpoint).toEqual(checkpoint);
+    });
+
     it('cancels a campaign and removes pending jobs', async () => {
       const campaign = await repo.createCampaign({
         name: 'Cancel Test',
