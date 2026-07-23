@@ -1375,7 +1375,14 @@ export class ControlPlaneRepository {
     return result.rows[0]?.lease_expires_at ?? null;
   }
 
-  /** Release a lease without consuming an attempt so another worker can rerun it. */
+  /**
+   * Release a lease without consuming an attempt so another worker can rerun it.
+   *
+   * The stored checkpoint MUST survive release (issue #35, superseding #30 §3):
+   * a graceful worker stop is heartbeat-with-checkpoint → release, and the next
+   * claimant resumes from that checkpoint. Only job completion (row deletion)
+   * or a newer checkpoint from the lease holder may remove it.
+   */
   async releaseJob(jobId: string, leaseToken: string, leasedBy?: string): Promise<boolean> {
     const result = await this.pool.query(
       `UPDATE sim_jobs

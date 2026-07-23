@@ -726,6 +726,47 @@ describeDb('control-plane repository with postgres', () => {
       expect(reclaimed!.checkpoint).toEqual(checkpoint);
     });
 
+    it('keeps the checkpoint across a graceful release (issue #35)', async () => {
+      const campaign = await repo.createCampaign({
+        name: 'Checkpoint Release',
+        spec: {},
+        games: [{}],
+        createdBy: 'admin',
+      });
+      const [job] = await repo.claimJobs(campaign.id, 1, 'runner');
+      const checkpoint = {
+        engineVersion: '3.1.0',
+        journal: { actions: [{ t: 'move', to: [2, 4] }], prng: { main: '424242' } },
+      };
+      await repo.renewLease(job!.id, job!.leaseToken!, 'runner', 60_000, checkpoint);
+
+      expect(await repo.releaseJob(job!.id, job!.leaseToken!, 'runner')).toBe(true);
+
+      const stored = await pool.query<{
+        status: string; checkpoint: unknown; lease_token: string | null;
+        leased_by: string | null; leased_at: Date | null; lease_expires_at: Date | null;
+        attempts: number; last_error: string | null;
+      }>(
+        `SELECT status, checkpoint, lease_token, leased_by, leased_at, lease_expires_at, attempts, last_error
+         FROM sim_jobs WHERE id = $1`,
+        [job!.id],
+      );
+      expect(stored.rows[0]).toMatchObject({
+        status: 'pending',
+        checkpoint,
+        lease_token: null,
+        leased_by: null,
+        leased_at: null,
+        lease_expires_at: null,
+        attempts: 0,
+        last_error: null,
+      });
+
+      const [reclaimed] = await repo.claimJobs(campaign.id, 1, 'runner-2');
+      expect(reclaimed!.id).toBe(job!.id);
+      expect(reclaimed!.checkpoint).toEqual(checkpoint);
+    });
+
     it('cancels a campaign and removes pending jobs', async () => {
       const campaign = await repo.createCampaign({
         name: 'Cancel Test',
