@@ -33,6 +33,7 @@
     .topbar a, .topbar button.link { color: var(--text-muted); text-decoration: none; font-size: 0.85rem; background: none; border: none; cursor: pointer; font-family: var(--sans); }
     .topbar a:hover, .topbar button.link:hover { color: var(--text); }
     .container { max-width: 960px; margin: 0 auto; padding: 2rem 1.5rem; }
+    .container.fleet-wide { max-width: none; }
     .btn { font-family: var(--sans); font-size: 0.85rem; font-weight: 600; padding: 0.5rem 1.2rem; border: none; border-radius: 6px; cursor: pointer; transition: background 0.15s; }
     .btn-primary { background: var(--accent); color: #fff; }
     .btn-primary:hover { background: var(--accent-hover); }
@@ -405,6 +406,7 @@
         document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
         document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
         tab.classList.add('active');
+        document.querySelector('.container').classList.toggle('fleet-wide', tab.dataset.tab === 'fleet');
         if (tab.dataset.tab === 'fleet') void loadFleet();
         document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
       });

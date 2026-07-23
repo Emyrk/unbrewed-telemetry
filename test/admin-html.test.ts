@@ -61,6 +61,8 @@ describe('admin campaign editor', () => {
     expect(html).toContain('Mark active');
     expect(html).toContain("api('POST', '/v1/admin/campaign/active'");
 
+    expect(html).toContain('.container.fleet-wide { max-width: none; }');
+    expect(html).toContain("classList.toggle('fleet-wide', tab.dataset.tab === 'fleet')");
     expect(html).toContain('data-tab="fleet"');
     expect(html).toContain('id="tab-fleet"');
     expect(html).toContain('id="fleet-dashboard"');
