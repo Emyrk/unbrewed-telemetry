@@ -455,6 +455,109 @@ describeDb('telemetry api with postgres', () => {
     });
   });
 
+  it('stores heartbeat checkpoints and returns them verbatim on reclaim (crash resume)', async () => {
+    const source = await cpRepo.createSource('sim-checkpoint-runner', null, 'test-admin');
+    const credential = await cpRepo.createCredential(source.id, 'worker', ['sim:claim'], 'test-admin');
+    const campaign = await cpRepo.createCampaign({
+      name: 'Checkpoint campaign',
+      spec: { format: 'duel' },
+      games: [{}, {}],
+      createdBy: 'test-admin',
+    });
+
+    const claim = await fetch(`${baseUrl}/v1/sim/claim`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${credential.fullKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ campaignId: campaign.id, count: 2 }),
+    });
+    expect(claim.status).toBe(200);
+    const claimed = await claim.json() as { jobs: { id: string; leaseToken: string; checkpoint?: unknown }[] };
+    expect(claimed.jobs).toHaveLength(2);
+    expect('checkpoint' in claimed.jobs[0]!).toBe(false);
+
+    const checkpoint = {
+      engineVersion: '1.4.2',
+      journal: { actions: ['a1', 'a2'], prng: { main: '999' } },
+    };
+    const heartbeat = await fetch(`${baseUrl}/v1/sim/heartbeat`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${credential.fullKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jobId: claimed.jobs[0]!.id,
+        leaseToken: claimed.jobs[0]!.leaseToken,
+        checkpoint,
+      }),
+    });
+    expect(heartbeat.status).toBe(200);
+
+    // Hard-kill the worker: expire both leases, then reclaim.
+    await pool.query(`UPDATE sim_jobs SET lease_expires_at = now() - interval '1 second' WHERE campaign_id = $1`, [campaign.id]);
+    const reclaim = await fetch(`${baseUrl}/v1/sim/claim`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${credential.fullKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ campaignId: campaign.id, count: 2 }),
+    });
+    expect(reclaim.status).toBe(200);
+    const reclaimed = await reclaim.json() as { jobs: { id: string; checkpoint?: unknown }[] };
+    expect(reclaimed.jobs).toHaveLength(2);
+    const withCheckpoint = reclaimed.jobs.find((j) => j.id === claimed.jobs[0]!.id)!;
+    const withoutCheckpoint = reclaimed.jobs.find((j) => j.id === claimed.jobs[1]!.id)!;
+    expect(withCheckpoint.checkpoint).toEqual(checkpoint);
+    expect('checkpoint' in withoutCheckpoint).toBe(false);
+  });
+
+  it('rejects oversize and malformed checkpoints without touching job or lease', async () => {
+    const source = await cpRepo.createSource('sim-checkpoint-limits', null, 'test-admin');
+    const credential = await cpRepo.createCredential(source.id, 'worker', ['sim:claim'], 'test-admin');
+    const campaign = await cpRepo.createCampaign({
+      name: 'Checkpoint limits',
+      spec: {},
+      games: [{}],
+      createdBy: 'test-admin',
+    });
+    const [job] = await cpRepo.claimJobs(campaign.id, 1, credential.id);
+    const before = await pool.query<{ checkpoint: unknown; lease_expires_at: Date }>(
+      `SELECT checkpoint, lease_expires_at FROM sim_jobs WHERE id = $1`, [job!.id],
+    );
+
+    const oversize = await fetch(`${baseUrl}/v1/sim/heartbeat`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${credential.fullKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jobId: job!.id,
+        leaseToken: job!.leaseToken,
+        checkpoint: { engineVersion: '1.0.0', journal: 'x'.repeat(256 * 1024) },
+      }),
+    });
+    expect(oversize.status).toBe(413);
+    expect(await oversize.json()).toMatchObject({ ok: false, code: 'CHECKPOINT_TOO_LARGE' });
+
+    const malformed = await fetch(`${baseUrl}/v1/sim/heartbeat`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${credential.fullKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jobId: job!.id, leaseToken: job!.leaseToken, checkpoint: { journal: {} } }),
+    });
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toMatchObject({ ok: false, code: 'INVALID_CHECKPOINT' });
+
+    const wrongLease = await fetch(`${baseUrl}/v1/sim/heartbeat`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${credential.fullKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jobId: job!.id,
+        leaseToken: 'not-the-lease-token',
+        checkpoint: { engineVersion: '1.0.0', journal: {} },
+      }),
+    });
+    expect(wrongLease.status).toBe(409);
+
+    const after = await pool.query<{ checkpoint: unknown; lease_expires_at: Date }>(
+      `SELECT checkpoint, lease_expires_at FROM sim_jobs WHERE id = $1`, [job!.id],
+    );
+    expect(after.rows[0]!.checkpoint).toBeNull();
+    expect(after.rows[0]!.lease_expires_at.toISOString()).toBe(before.rows[0]!.lease_expires_at.toISOString());
+  });
+
   it('rolls back job completion when telemetry ingest fails', async () => {
     await postGame(baseUrl, secret, sampleGame({ gameId: 'sim-conflict', stateHash: 'existing-state' }), 'existing-sim-conflict');
     const source = await cpRepo.createSource('sim-rollback-runner', null, 'test-admin');

@@ -172,6 +172,17 @@ export interface SimJob {
   attempts: number;
   maxAttempts: number;
   lastError: string | null;
+  /** Crash-resume journal pushed by a worker via heartbeat; absent until one is stored. */
+  checkpoint?: SimJobCheckpoint;
+}
+
+/**
+ * Stored verbatim and returned verbatim on claim; the server never interprets
+ * `journal` — the worker decides whether to resume (engine #255).
+ */
+export interface SimJobCheckpoint {
+  engineVersion: string;
+  journal: unknown;
 }
 
 export type CampaignItemBucket = 'succeeded' | 'failed' | 'leased' | 'idle';
@@ -1242,6 +1253,7 @@ export class ControlPlaneRepository {
       const jobRows = await client.query<{
         id: string; campaign_id: string; game_index: number; seed: string;
         spec: unknown; attempts: number; max_attempts: number;
+        checkpoint: SimJobCheckpoint | null;
       }>(
         `WITH active_tier AS (
            SELECT MIN(sc.priority_tier) AS priority_tier
@@ -1263,7 +1275,7 @@ export class ControlPlaneRepository {
            JOIN active_tier ON active_tier.priority_tier = sc.priority_tier
            WHERE sj.status = 'pending' ${campaignFilter}
          )
-         SELECT sj.id, sj.campaign_id, sj.game_index, sj.seed, sj.spec, sj.attempts, sj.max_attempts
+         SELECT sj.id, sj.campaign_id, sj.game_index, sj.seed, sj.spec, sj.attempts, sj.max_attempts, sj.checkpoint
          FROM ranked
          JOIN sim_jobs sj ON sj.id = ranked.id
          ORDER BY ranked.priority_tier,
@@ -1324,6 +1336,7 @@ export class ControlPlaneRepository {
         attempts: j.attempts + 1,
         maxAttempts: j.max_attempts,
         lastError: null,
+        ...(j.checkpoint !== null ? { checkpoint: j.checkpoint } : {}),
       }));
     } catch (error) {
       await client.query('ROLLBACK');
@@ -1333,23 +1346,31 @@ export class ControlPlaneRepository {
     }
   }
 
+  /**
+   * Renew a lease, optionally storing a crash-resume checkpoint in the same
+   * statement (last-write-wins; omitting it keeps the stored one). The WHERE
+   * clause guards the write: an invalid or expired lease never persists a
+   * checkpoint.
+   */
   async renewLease(
     jobId: string,
     leaseToken: string,
     leasedBy: string,
     leaseDurationMs: number,
+    checkpoint?: SimJobCheckpoint,
   ): Promise<Date | null> {
     const expiresAt = new Date(Date.now() + leaseDurationMs);
     const result = await this.pool.query<{ lease_expires_at: Date }>(
       `UPDATE sim_jobs
-       SET lease_expires_at = $4
+       SET lease_expires_at = $4,
+           checkpoint = COALESCE($5::jsonb, checkpoint)
        WHERE id = $1
          AND status = 'leased'
          AND lease_token = $2
          AND leased_by = $3
          AND lease_expires_at > now()
        RETURNING lease_expires_at`,
-      [jobId, leaseToken, leasedBy, expiresAt],
+      [jobId, leaseToken, leasedBy, expiresAt, checkpoint === undefined ? null : JSON.stringify(checkpoint)],
     );
     return result.rows[0]?.lease_expires_at ?? null;
   }
