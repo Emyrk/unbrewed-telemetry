@@ -62,7 +62,11 @@ function duration(ms) {
   return `${Math.floor(hours/24)}d ${hours%24}h`;
 }
 function render(data) {
-  const workers = data.workers || [];
+  const statusOrder = { working: 0, idle: 1, offline: 2 };
+  const workers = (data.workers || []).slice().sort((a, b) =>
+    (statusOrder[a.status] ?? 9) - (statusOrder[b.status] ?? 9)
+    || a.workerLabel.localeCompare(b.workerLabel)
+  );
   const summaries = [
     ['Live workers', data.liveWorkers],
     ['Working / idle', `${data.workingWorkers} / ${data.idleWorkers}`],
