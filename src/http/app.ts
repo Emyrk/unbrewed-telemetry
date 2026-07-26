@@ -1253,7 +1253,7 @@ async function handleAdminCancelCampaign(
 // ============================================================================
 
 /** The mission's campaign ladder, in order. Override with ?campaigns=a,b,c. */
-const DEFAULT_JOURNEY_STEPS = ['grid', 'arm1', 'arm2', 'arm3', 'arm5', 'mirror', 'cost'];
+const DEFAULT_JOURNEY_STEPS = ['grid', 'arm1', 'arm2', 'arm3', 'arm5', 'mirror', 'arm6a', 'arm6b', 'arm6c', 'cost'];
 
 async function handleSimJourney(
   url: URL,
