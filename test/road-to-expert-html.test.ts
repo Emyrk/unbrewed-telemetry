@@ -40,6 +40,29 @@ describe('road-to-expert page', () => {
     expect(html).toContain('first moves under way');
   });
 
+  it('renders the arm6 serveable-budget sweep, and leaves the existing ladder in place (#39)', async () => {
+    const html = await load();
+    const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)][0]![1]!;
+    // Evaluate ONLY the STEPS/ORDER declarations — the rest of the script touches
+    // `document` at load time. ORDER drives the rendered card list, and a name
+    // missing from STEPS renders nothing (`const meta = STEPS[name]; if (!meta) return ''`).
+    const declStart = script.indexOf('const STEPS = {');
+    const declEnd = script.indexOf('\n', script.indexOf('const ORDER = ['));
+    expect(declStart).toBeGreaterThan(-1);
+    expect(declEnd).toBeGreaterThan(declStart);
+    const decls = script.slice(declStart, declEnd);
+    const [steps, order] = new Function(`${decls}; return [STEPS, ORDER];`)() as [Record<string, unknown>, string[]];
+    expect(order).toEqual(['grid', 'arm1', 'arm2', 'arm3', 'arm5', 'mirror', 'arm6a', 'arm6b', 'arm6c', 'cost']);
+    for (const name of order) {
+      expect(steps[name], `ORDER lists ${name} but STEPS has no card for it`).toBeTruthy();
+    }
+    for (const name of ['arm6a', 'arm6b', 'arm6c']) {
+      expect((steps[name] as { title: string }).title).toMatch(/serveable budget/);
+    }
+    // The cost step stays — its instrumentation is a separate follow-up.
+    expect(order).toContain('cost');
+  });
+
   it('applies the warming-up treatment below the verdict threshold', async () => {
     const html = await load();
     expect(html).toContain('warming up · n=');

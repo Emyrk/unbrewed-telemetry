@@ -192,11 +192,20 @@ const STEPS = {
   mirror: { title: 'Arm 4 — ISMCTS mirror', role: 'Sanity control', gate: null, target: 0.50, bar: true, isMirror: true,
             what: '<a class="term" href="#g-mirror">ISMCTS vs itself</a> must land near 50%.',
             why: 'Proves the harness has no <a class="term" href="#g-seat-bias">seat or seeding bias</a> that could manufacture an edge in the <a class="term" href="#g-arm">arms</a> above.' },
+  arm6a:  { title: 'Arm 6a — serveable budget, 128', role: 'Can we ship it?', gate: null, target: 0.50, bar: true,
+            what: 'Is the tree still ahead at only 128 <a class="term" href="#g-playouts">playouts</a> per move?',
+            why: 'Every result above is measured at 1,000+ playouts, but a budget we could actually give a live player is ~128–512. This is the cheapest rung of that ladder.' },
+  arm6b:  { title: 'Arm 6b — serveable budget, 256', role: 'Can we ship it?', gate: null, target: 0.50, bar: true,
+            what: 'The same question at 256 playouts per move.',
+            why: 'Seeded to the same games as the arms above, so the 128→256→512→1,000→3,000 curve is one like-for-like comparison rather than five separate experiments.' },
+  arm6c:  { title: 'Arm 6c — serveable budget, 512', role: 'Can we ship it?', gate: null, target: 0.50, bar: true,
+            what: 'The same question at 512 playouts per move.',
+            why: 'The top of the serveable range, and the closest rung to arm 2’s 1,000 — it shows how much strength is lost on the way down.' },
   cost:   { title: 'Per-decision search cost', role: 'Measurement', gate: null, target: null, bar: false,
             what: 'How many milliseconds each bot spends per <a class="term" href="#g-decisions">decision</a>.',
             why: 'The wall-clock-matched arm rests on these numbers — they define what “equal time” means.' },
 };
-const ORDER = ['grid','arm1','arm2','arm3','arm5','mirror','cost'];
+const ORDER = ['grid','arm1','arm2','arm3','arm5','mirror','arm6a','arm6b','arm6c','cost'];
 const pct = (x) => (x*100).toFixed(1) + '%';
 const clamp = (x) => Math.max(0, Math.min(1, x));
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));

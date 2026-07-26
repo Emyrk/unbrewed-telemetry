@@ -72,8 +72,9 @@ describeDb('public journey', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { ok: boolean; steps: Array<{ name: string; found: boolean; hero: { pilot: string; wins: number; games: number; wilson95: [number, number] } | null; completedGames: number }> };
     expect(body.ok).toBe(true);
-    // default mission order includes grid, arm1, arm2, arm3, arm5, mirror, cost
-    expect(body.steps.map((s) => s.name)).toEqual(['grid', 'arm1', 'arm2', 'arm3', 'arm5', 'mirror', 'cost']);
+    // default mission order; arm6a/b/c (the serveable-budget sweep, #39) sit
+    // after the mirror control and before the still-outstanding cost step.
+    expect(body.steps.map((s) => s.name)).toEqual(['grid', 'arm1', 'arm2', 'arm3', 'arm5', 'mirror', 'arm6a', 'arm6b', 'arm6c', 'cost']);
     const g = body.steps.find((s) => s.name === 'grid')!;
     expect(g.found).toBe(false); // no grid campaign yet → pending
     const a1 = body.steps.find((s) => s.name === 'arm1')!;
