@@ -401,16 +401,24 @@ describeDb('telemetry api with postgres', () => {
     });
     expect(heartbeat.status).toBe(200);
 
+    const completedGame = sampleGame({ gameId: 'sim-api-game-001', stateHash: 'sim-api-state-001', source: 'spoofed' });
+    completedGame.teams[0]!.seats[0]!.botExecution = sampleBotExecution();
     const complete = await fetch(`${baseUrl}/v1/sim/complete`, {
       method: 'POST',
       headers: { authorization: `Bearer ${credential.fullKey}`, 'content-type': 'application/json' },
       body: JSON.stringify({
         jobId: claimed.jobs[0]!.id,
         leaseToken: claimed.jobs[0]!.leaseToken,
-        game: sampleGame({ gameId: 'sim-api-game-001', stateHash: 'sim-api-state-001', source: 'spoofed' }),
+        game: completedGame,
       }),
     });
     expect(complete.status).toBe(201);
+
+    const execution = await pool.query<{ bot_execution: unknown }>(
+      `SELECT bot_execution FROM game_seats
+       WHERE game_id = 'sim-api-game-001' AND team_index = 0 AND seat_index = 0`,
+    );
+    expect(execution.rows[0]?.bot_execution).toEqual(sampleBotExecution());
 
     const detail = await cpRepo.getCampaign(campaign.id);
     expect(detail).toMatchObject({ completedGames: 1, failedGames: 0, status: 'completed' });

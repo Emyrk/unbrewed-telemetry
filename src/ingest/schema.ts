@@ -53,6 +53,18 @@ function semanticErrors(submission: GameSubmission): string[] {
       if (completedIterations.mean > cap || completedIterations.p50 > cap || completedIterations.p95 > cap) {
         errors.push(`${path}/search/completedIterations: values must not exceed budget.iterationCap`);
       }
+      const elapsedMs = execution.search.elapsedMs;
+      if (elapsedMs) {
+        if (elapsedMs.count > decisions) {
+          errors.push(`${path}/search/elapsedMs: count must not exceed total decisions`);
+        }
+        if (elapsedMs.p50 > elapsedMs.p90 || elapsedMs.p90 > elapsedMs.max) {
+          errors.push(`${path}/search/elapsedMs: percentiles must satisfy p50 <= p90 <= max`);
+        }
+        if (elapsedMs.mean > elapsedMs.max) {
+          errors.push(`${path}/search/elapsedMs: mean must not exceed max`);
+        }
+      }
     });
   });
   const cardsPlayed = submission.telemetry?.cardsPlayed ?? [];

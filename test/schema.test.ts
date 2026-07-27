@@ -36,6 +36,28 @@ describe('game submission schema', () => {
     });
   });
 
+  it('keeps elapsed bot timing optional for existing producers', () => {
+    const game = sampleGame();
+    const execution = sampleBotExecution();
+    const { elapsedMs: _elapsedMs, ...search } = execution.search;
+    game.teams[0]!.seats[0]!.botExecution = { ...execution, search };
+
+    expect(validateGameSubmission(game)).toEqual({ ok: true, errors: [] });
+  });
+
+  it('rejects inconsistent elapsed bot timing summaries', () => {
+    const game = sampleGame();
+    const execution = sampleBotExecution();
+    execution.search.elapsedMs = { count: 43, mean: 250, p50: 200, p90: 190, max: 180 };
+    game.teams[0]!.seats[0]!.botExecution = execution;
+
+    const result = validateGameSubmission(game);
+    expect(result.ok).toBe(false);
+    expect(result.errors.join('\n')).toContain('count must not exceed total decisions');
+    expect(result.errors.join('\n')).toContain('percentiles must satisfy p50 <= p90 <= max');
+    expect(result.errors.join('\n')).toContain('mean must not exceed max');
+  });
+
   it('rejects bot execution metadata on human seats', () => {
     const game = sampleGame();
     game.teams[0]!.seats[0]!.pilot = 'human';
