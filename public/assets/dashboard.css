@@ -113,6 +113,14 @@ body {
   box-shadow: inset 0 0 0 1px rgba(126, 203, 143, 0.25);
 }
 
+.pilot-chip.selected {
+  background: rgba(233, 185, 84, 0.18);
+  border-color: rgba(233, 185, 84, 0.72);
+  color: var(--text);
+}
+.pilot-chip.compact { padding: 4px 8px; }
+
+
 
 /* ---------- Layout ---------- */
 .content { max-width: 1240px; margin: 0 auto; padding: 26px 28px 60px; }
@@ -213,7 +221,52 @@ body {
 .bar-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; }
 .extreme .wr { font: 600 12px var(--font-mono); text-align: right; }
 
+.coming-soon {
+  min-height: 300px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+.coming-soon-kicker {
+  color: var(--accent);
+  font: 600 12px var(--font-body);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.coming-soon-title {
+  margin-top: 8px;
+  font: 600 36px var(--font-head);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.coming-soon-copy { margin-top: 8px; color: var(--muted); font-size: 13px; }
+
 /* ---------- Heroes table ---------- */
+.heroes-pilot-controls {
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) minmax(280px, 1fr);
+  gap: 16px;
+  align-items: end;
+  margin-bottom: 14px;
+  padding: 14px 16px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.heroes-vs-field { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.heroes-control-label {
+  font: 600 10.5px var(--font-body);
+  color: var(--muted-2);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.heroes-empty { padding: 24px 20px; }
+@media (max-width: 760px) {
+  .heroes-pilot-controls { grid-template-columns: 1fr; }
+}
+
 .deck-grid {
   display: grid;
   grid-template-columns: minmax(190px, 1.3fr) 90px 120px minmax(220px, 1fr) 150px;

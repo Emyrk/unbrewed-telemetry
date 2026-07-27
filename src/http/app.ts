@@ -556,10 +556,15 @@ function statsFiltersFromUrl(url: URL): {
   partner: string | null;
   heroPilot: string | null;
   opponentPilot: string | null;
+  opponentPilots: string[];
 } {
   const format = blankToNull(url.searchParams.get('format'));
-  const pilotParam = blankToNull(url.searchParams.get('pilots')) ?? blankToNull(url.searchParams.get('pilot'));
-  const pilots = pilotParam ? pilotParam.split(',').map((value) => value.trim()).filter(Boolean) : [];
+  const repeatedPilots = url.searchParams.getAll('pilot').map((value) => value.trim()).filter(Boolean);
+  const legacyPilotParam = blankToNull(url.searchParams.get('pilots'));
+  const pilots = repeatedPilots.length > 0
+    ? repeatedPilots
+    : legacyPilotParam ? legacyPilotParam.split(',').map((value) => value.trim()).filter(Boolean) : [];
+  const opponentPilots = url.searchParams.getAll('opponentPilotAllowed').map((value) => value.trim()).filter(Boolean);
   return {
     format,
     pilots,
@@ -567,6 +572,7 @@ function statsFiltersFromUrl(url: URL): {
     partner: blankToNull(url.searchParams.get('partner')),
     heroPilot: blankToNull(url.searchParams.get('heroPilot')),
     opponentPilot: blankToNull(url.searchParams.get('opponentPilot')),
+    opponentPilots,
   };
 }
 

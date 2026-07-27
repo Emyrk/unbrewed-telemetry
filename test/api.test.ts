@@ -931,7 +931,7 @@ describeDb('telemetry api with postgres', () => {
     expect(swapped.status).toBe(200);
     expect(await swapped.json()).toMatchObject({ games: 1, wins: 0, winRate: 0 });
 
-    const matchupMatrix = await fetch(`${baseUrl}/v1/stats/dashboard?format=duel&pilots=human&heroPilot=bot%3Ahard%2864%2C2s%29&opponentPilot=bot%3Ahard`);
+    const matchupMatrix = await fetch(`${baseUrl}/v1/stats/dashboard?format=duel&pilot=bot%3Ahard&heroPilot=bot%3Ahard%2864%2C2s%29&opponentPilot=bot%3Ahard`);
     expect(matchupMatrix.status).toBe(200);
     const matchupJson = await matchupMatrix.json() as {
       matchups: { rowDeckId: string; colDeckId: string; games: number; wins: number }[];
@@ -948,6 +948,15 @@ describeDb('telemetry api with postgres', () => {
       games: 1,
       wins: 1,
     }));
+
+    const heroTable = await fetch(`${baseUrl}/v1/stats/dashboard?format=duel&pilot=bot%3Ahard%2864%2C2s%29&pilot=bot%3Ahard&heroPilot=bot%3Ahard%2864%2C2s%29&opponentPilotAllowed=bot%3Ahard`);
+    expect(heroTable.status).toBe(200);
+    const heroTableJson = await heroTable.json() as {
+      totalGames: number;
+      decks: { deck: string; games: number; wins: number }[];
+    };
+    expect(heroTableJson.totalGames).toBe(4);
+    expect(heroTableJson.decks.find((deck) => deck.deck === 'king-kong@0.1.0')).toMatchObject({ games: 3, wins: 3 });
 
     const comparison = await fetch(`${baseUrl}/v1/stats/pilot-comparison?pilotA=bot%3Ahard%2864%2C2s%29&pilotB=bot%3Ahard&opponentPilot=bot%3Ahard&opponent=the-mandalorian%400.1.0`);
     expect(comparison.status).toBe(200);

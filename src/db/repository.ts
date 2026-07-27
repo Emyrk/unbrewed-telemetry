@@ -60,6 +60,7 @@ export interface DeckStatsFilters {
   partner?: string | null;
   heroPilot?: string | null;
   opponentPilot?: string | null;
+  opponentPilots?: string[];
 }
 
 interface DuplicateRow {
@@ -893,7 +894,9 @@ export class PgTelemetryRepository {
     const pilotFilter = filters.pilots.length > 0 ? filters.pilots : null;
     const matchupHeroPilot = filters.heroPilot ?? null;
     const matchupOpponentPilot = filters.opponentPilot ?? null;
-    const matchupPilotFilter = matchupHeroPilot || matchupOpponentPilot ? null : pilotFilter;
+    const heroOpponentPilots = filters.opponentPilots?.length ? filters.opponentPilots : null;
+    const heroStatsPilot = heroOpponentPilots ? matchupHeroPilot : null;
+    const matchupPilotFilter = pilotFilter;
 
     // Wave 1: everything independent of totalGames, fetched concurrently.
     const [summary, submissions, formats, pilots, matchups, synergy] = await Promise.all([
@@ -909,6 +912,7 @@ export class PgTelemetryRepository {
             FROM games g
             WHERE ($1::text IS NULL OR g.format = $1)
               AND ${pilotFilterSql()}
+              AND ${heroOpponentGameFilterSql()}
           )
           SELECT
             COUNT(*)::int AS total_games,
@@ -917,7 +921,7 @@ export class PgTelemetryRepository {
             COUNT(*) FILTER (WHERE first_player_team IS NOT NULL AND winner_team IS NOT NULL AND first_player_team = winner_team)::int AS first_player_wins
           FROM selected_games g
         `,
-        [filters.format, pilotFilter],
+        [filters.format, pilotFilter, heroStatsPilot, heroOpponentPilots],
       ),
       this.pool.query<{ total_submissions: number; invalid_submissions: number }>(
         `
@@ -941,7 +945,7 @@ export class PgTelemetryRepository {
     // Wave 2: these need totalGames (pick rate / map share), fetched concurrently.
     const [maps, decks] = await Promise.all([
       this.mapRows(filters.format, pilotFilter, totalGames),
-      this.deckRows(filters.format, pilotFilter, totalGames),
+      this.deckRows(filters.format, pilotFilter, totalGames, heroStatsPilot, heroOpponentPilots),
     ]);
 
     return {
@@ -966,7 +970,13 @@ export class PgTelemetryRepository {
     };
   }
 
-  private async deckRows(format: string | null, pilotFilter: string[] | null, totalGames: number): Promise<DeckStatsResponse['decks']> {
+  private async deckRows(
+    format: string | null,
+    pilotFilter: string[] | null,
+    totalGames: number,
+    heroPilot: string | null = null,
+    opponentPilots: string[] | null = null,
+  ): Promise<DeckStatsResponse['decks']> {
     const rows = await this.pool.query<{
       deck: string;
       deck_id: string;
@@ -994,10 +1004,18 @@ export class PgTelemetryRepository {
           COUNT(*) FILTER (WHERE s.won)::int AS wins
         FROM game_seats s
         JOIN filtered_games g ON g.id = s.game_id
+        WHERE ($3::text IS NULL OR s.pilot = $3)
+          AND ($4::text[] IS NULL OR EXISTS (
+            SELECT 1
+            FROM game_seats opponent
+            WHERE opponent.game_id = s.game_id
+              AND opponent.team_index <> s.team_index
+              AND opponent.pilot = ANY($4::text[])
+          ))
         GROUP BY s.deck_id
         ORDER BY games DESC, s.deck_id ASC
       `,
-      [format, pilotFilter],
+      [format, pilotFilter, heroPilot, opponentPilots],
     );
 
     const [profiles, compositions] = await Promise.all([
@@ -2132,6 +2150,7 @@ function pilotFilterSql(paramIndex = 2): string {
   // Pilot matching is prefix-based: allowlist entry 'bot:hard' matches
   // 'bot:hard', 'bot:hard(64,2s)', 'bot:hard(64,5s)', etc.
   // An exact pilot_kind match is also accepted (e.g. 'bot' matches any bot seat).
+  // Legacy must: entries remain supported for existing API consumers.
   return `($${paramIndex}::text[] IS NULL OR (
               (
                 NOT EXISTS (
@@ -2160,6 +2179,22 @@ function pilotFilterSql(paramIndex = 2): string {
                       AND (s3.pilot LIKE substring(required.pilot from 6) || '%' OR s3.pilot_kind = substring(required.pilot from 6))
                   )
               )
+            ))`;
+}
+
+function heroOpponentGameFilterSql(heroPilotParam = 3, opponentPilotsParam = 4): string {
+  return `($${heroPilotParam}::text IS NULL OR $${opponentPilotsParam}::text[] IS NULL OR EXISTS (
+              SELECT 1
+              FROM game_seats me
+              WHERE me.game_id = g.id
+                AND me.pilot = $${heroPilotParam}
+                AND EXISTS (
+                  SELECT 1
+                  FROM game_seats opponent
+                  WHERE opponent.game_id = me.game_id
+                    AND opponent.team_index <> me.team_index
+                    AND opponent.pilot = ANY($${opponentPilotsParam}::text[])
+                )
             ))`;
 }
 

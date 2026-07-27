@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Oswald:wght@500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/assets/dashboard.css?v=pilot-datapoints-1">
+  <link rel="stylesheet" href="/assets/dashboard.css?v=format-pilot-filters-1">
 </head>
 <body>
   <div class="app" data-screen-label="Balance Dashboard">
@@ -66,13 +66,8 @@
         </details>
 
         <details class="faq">
-          <summary>What does the 2v2 synergy Δ mean?</summary>
-          <p>Δ = the pair's actual 2v2 win rate minus its <em>expected</em> win rate (the average of each deck's solo 2v2 win rate). A big positive Δ means the duo is more than the sum of its parts. Click a pair to see the opponents it beats and loses to.</p>
-        </details>
-
-        <details class="faq">
           <summary>How do I read the matchup matrix &amp; pilot filters?</summary>
-          <p><strong>Matrix:</strong> each cell is the row deck's 1v1 win rate vs the column deck (green favors the row), needing at least 3 games — “·” means not enough data. <strong>Pilots:</strong> chips cycle through included, green <em>MUST</em>, and excluded. Included types are allowed in every seat; MUST means matching games also need at least one seat with that pilot type.</p>
+          <p><strong>Matrix:</strong> each cell is the row deck's 1v1 win rate vs the column deck (green favors the row), needing at least 3 games; “·” means not enough data. <strong>Pilots:</strong> the top-level multi-select defines which pilots are allowed. The Heroes and Matchups controls only offer pilots from that selection.</p>
         </details>
 
         <p class="footer-note">Aggregate statistics only — no per-player or raw game data is shown.</p>
@@ -82,6 +77,6 @@
 
   <div id="modal-root"></div>
 
-  <script src="/assets/dashboard.js?v=pilot-datapoints-1" type="module"></script>
+  <script src="/assets/dashboard.js?v=format-pilot-filters-1" type="module"></script>
 </body>
 </html>

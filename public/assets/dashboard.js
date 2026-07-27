@@ -21,15 +21,19 @@ const FLAG_MIN_GAMES = 30;
 const MATRIX_MIN_GAMES = 3;
 const MATRIX_MAX_DECKS = 30;
 const MATCHUP_FORMATS = new Set(['duel', '1v1']);
-const DEFAULT_INCLUDED_PILOTS = new Set(['human', 'bot:hard']);
+const DEFAULT_FORMAT = 'duel';
+const DEFAULT_INCLUDED_PILOTS = new Set(['bot:mc(64,400ms)']);
+const FORMATS = [
+  ['duel', 'Duel'],
+  ['team-2v2', '2v2 Teams'],
+  ['ffa-3', '3 FFA'],
+];
 
-const TABS = [
+const DUEL_TABS = [
   ['overview', 'Overview'],
   ['heroes', 'Heroes'],
   ['matchups', 'Matchups'],
   ['scatter', 'Pick vs Win'],
-  ['formats', 'Formats'],
-  ['synergy', '2v2 Synergy'],
   ['pilot-comparisons', 'Pilot Comparisons'],
   ['scenario', 'Scenario'],
   ['submissions', 'Submissions'],
@@ -89,20 +93,24 @@ document.addEventListener('keydown', (event) => {
 // ---------- state / url ----------
 function readStateFromUrl() {
   const params = new URLSearchParams(location.search);
-  const hasExplicitExclusions = params.has('exclude');
-  const exclude = params.get('exclude');
-  const require = params.get('require');
+  const excludedPilots = params.getAll('excludePilot').filter(Boolean);
+  const legacyExclude = params.get('exclude');
+  const hasExplicitExclusions = excludedPilots.length > 0 || params.has('exclude');
+  const format = normalizedParam(params.get('format')) || DEFAULT_FORMAT;
+  const heroVsPilots = params.getAll('heroVsPilot').filter(Boolean);
   return {
     tab: params.get('tab') === 'recent' ? 'submissions' : (params.get('tab') || 'overview'),
-    format: normalizedParam(params.get('format')),
-    excluded: new Set(exclude ? exclude.split(',').map((v) => v.trim()).filter(Boolean) : []),
-    required: new Set(require ? require.split(',').map((v) => v.trim()).filter(Boolean) : []),
+    format: FORMATS.some(([value]) => value === format) ? format : DEFAULT_FORMAT,
+    excluded: new Set(excludedPilots.length > 0 ? excludedPilots : legacyExclude ? legacyExclude.split(',').map((v) => v.trim()).filter(Boolean) : []),
     hasExplicitExclusions,
     deck: params.get('deck') || null,
     pair: params.get('pair') || null,
     matchup: params.get('matchup') || null,
     matchupHeroPilot: params.get('matchupHeroPilot') || null,
     matchupOpponentPilot: params.get('matchupOpponentPilot') || null,
+    heroPilot: params.get('heroPilot') || null,
+    heroVsPilots: new Set(heroVsPilots),
+    hasExplicitHeroVsPilots: params.has('heroVsPilot'),
     pilotComparison: {
       pilotA: params.get('pcPilotA') || null,
       pilotB: params.get('pcPilotB') || null,
@@ -125,14 +133,17 @@ function readStateFromUrl() {
 function writeStateToUrl() {
   const params = new URLSearchParams();
   if (state.tab !== 'overview') params.set('tab', state.tab);
-  if (state.format) params.set('format', state.format);
-  if (state.excluded.size) params.set('exclude', [...state.excluded].join(','));
-  if (state.required.size) params.set('require', [...state.required].join(','));
+  if (state.format !== DEFAULT_FORMAT) params.set('format', state.format);
+  for (const pilot of state.excluded) params.append('excludePilot', pilot);
   if (state.deck) params.set('deck', state.deck);
   if (state.pair) params.set('pair', state.pair);
   if (state.tab === 'matchups' && state.matchup) params.set('matchup', state.matchup);
   if (state.matchupHeroPilot) params.set('matchupHeroPilot', state.matchupHeroPilot);
   if (state.matchupOpponentPilot) params.set('matchupOpponentPilot', state.matchupOpponentPilot);
+  if (state.tab === 'heroes') {
+    if (state.heroPilot) params.set('heroPilot', state.heroPilot);
+    for (const pilot of state.heroVsPilots) params.append('heroVsPilot', pilot);
+  }
   if (state.pilotComparison?.pilotA) params.set('pcPilotA', state.pilotComparison.pilotA);
   if (state.pilotComparison?.pilotB) params.set('pcPilotB', state.pilotComparison.pilotB);
   if (state.pilotComparison?.hero) params.set('pcHero', state.pilotComparison.hero);
@@ -186,20 +197,20 @@ function setTwoVTwoMode(mode, summary) {
   }
 }
 
-// Pilots selected for the broad API allow-list: the set that is *not* excluded.
-// Empty means no broad pilot filter unless a MUST filter is active.
+// Pilots selected for the broad API allow-list: the set that is not excluded.
+// Empty means no broad pilot filter.
 function includedPilots() {
   if (!state.excluded.size) return [];
   return allPilots.filter((pilot) => !state.excluded.has(pilot));
 }
 
+function allowedPilots() {
+  return state.excluded.size ? includedPilots() : [...allPilots];
+}
+
 function pilotQueryValues() {
-  const included = state.excluded.size ? includedPilots() : [...allPilots];
-  const required = [...state.required]
-    .filter((pilot) => !state.excluded.has(pilot))
-    .map((pilot) => `must:${pilot}`);
-  if (!state.excluded.size && required.length === 0) return [];
-  return included.concat(required);
+  if (!state.excluded.size) return [];
+  return includedPilots();
 }
 
 function applyDefaultPilotExclusions() {
@@ -215,11 +226,45 @@ function applyDefaultPilotExclusions() {
   return changed;
 }
 
+function normalizeScopedPilotSelections() {
+  const allowed = allowedPilots();
+  const allowedSet = new Set(allowed);
+  let changed = false;
+  if (allowed.length === 0) return false;
+
+  if (state.matchupHeroPilot && !allowedSet.has(state.matchupHeroPilot)) {
+    state.matchupHeroPilot = null;
+    changed = true;
+  }
+  if (state.matchupOpponentPilot && !allowedSet.has(state.matchupOpponentPilot)) {
+    state.matchupOpponentPilot = null;
+    changed = true;
+  }
+  if (!state.heroPilot || !allowedSet.has(state.heroPilot)) {
+    state.heroPilot = allowed[0] || null;
+    changed = true;
+  }
+
+  const nextVs = [...state.heroVsPilots].filter((pilot) => allowedSet.has(pilot));
+  if (!state.hasExplicitHeroVsPilots || nextVs.length === 0) {
+    state.heroVsPilots = new Set(allowed);
+    state.hasExplicitHeroVsPilots = true;
+    changed = true;
+  } else if (nextVs.length !== state.heroVsPilots.size) {
+    state.heroVsPilots = new Set(nextVs);
+    changed = true;
+  }
+  return changed;
+}
+
 function statsQuery() {
   const params = new URLSearchParams();
   if (state.format) params.set('format', state.format);
-  const pilots = pilotQueryValues();
-  if (pilots.length) params.set('pilots', pilots.join(','));
+  for (const pilot of pilotQueryValues()) params.append('pilot', pilot);
+  if (state.tab === 'heroes' && !state.deck) {
+    if (state.heroPilot) params.set('heroPilot', state.heroPilot);
+    for (const pilot of state.heroVsPilots) params.append('opponentPilotAllowed', pilot);
+  }
   if (state.tab === 'matchups' && !state.deck && state.matchupHeroPilot) params.set('heroPilot', state.matchupHeroPilot);
   if (state.tab === 'matchups' && !state.deck && state.matchupOpponentPilot) params.set('opponentPilot', state.matchupOpponentPilot);
   return params;
@@ -267,6 +312,11 @@ async function loadDashboard() {
       return;
     }
   }
+  if (normalizeScopedPilotSelections()) {
+    writeStateToUrl();
+    await loadDashboard();
+    return;
+  }
   current = json;
   els.heroTotal.textContent = number(json.totalGames);
   const fp = json.firstPlayer && json.firstPlayer.winRate != null ? ` · first player ${pct(json.firstPlayer.winRate, 0)}` : '';
@@ -290,25 +340,19 @@ async function fetchJson(url) {
 
 // ---------- controls ----------
 function renderControls(data) {
-  const formats = data.formats || [];
-  els.formatChips.innerHTML = [chip('All formats', !state.format, () => setFormat(null))]
-    .concat(formats.map((f) => chip(f.label, state.format === f.format, () => setFormat(f.format))))
+  els.formatChips.innerHTML = FORMATS
+    .map(([format, label]) => chip(label, state.format === format, () => setFormat(format)))
     .join('');
   bindHandlers(els.formatChips);
 
   const pilots = pilotOptions(data.pilots || []);
   els.pilotChips.innerHTML = pilots.map((pilot) => {
-    const off = state.excluded.has(pilot.value);
-    const must = !off && state.required.has(pilot.value);
+    const selected = !state.excluded.has(pilot.value);
     const id = registerHandler(() => togglePilot(pilot.value));
-    const title = off
-      ? `Excluded — games with ${pilot.label} are hidden. Click to include ${pilot.label}.`
-      : must
-        ? `MUST include ${pilot.label} — matching games need at least one ${pilot.label} seat. Click to exclude ${pilot.label}.`
-        : `Included — games may include ${pilot.label}. Click to make this a MUST include filter.`;
-    const mode = must ? ' must' : off ? ' off' : '';
-    const label = must ? `MUST ${pilot.label}` : pilot.label;
-    return `<button class="pilot-chip${mode}" data-handler="${id}" type="button" title="${esc(title)}" aria-pressed="${must ? 'true' : 'false'}">${esc(label)}</button>`;
+    const title = selected
+      ? `${pilot.label} is allowed. Click to remove it from the pilot filter.`
+      : `${pilot.label} is not allowed. Click to add it to the pilot filter.`;
+    return `<button class="pilot-chip${selected ? ' selected' : ' off'}" data-handler="${id}" type="button" title="${esc(title)}" aria-pressed="${selected ? 'true' : 'false'}"><span aria-hidden="true">${selected ? '✓' : '+'}</span> ${esc(pilot.label)}</button>`;
   }).join('');
   bindHandlers(els.pilotChips);
 }
@@ -328,27 +372,35 @@ function titleCase(value) {
 }
 
 function setFormat(format) {
-  state.format = format;
+  state.format = format || DEFAULT_FORMAT;
+  state.tab = 'overview';
+  state.deck = null;
+  state.pair = null;
+  state.matchup = null;
+  matrixFocus = null;
   writeStateToUrl();
+  renderTabs();
   loadDashboard().catch(showError);
 }
 
 function togglePilot(pilot) {
   if (state.excluded.has(pilot)) {
     state.excluded.delete(pilot);
-  } else if (state.required.has(pilot)) {
-    state.required.delete(pilot);
-    state.excluded.add(pilot);
   } else {
-    state.required.add(pilot);
+    const selected = allowedPilots();
+    if (selected.length <= 1) return;
+    state.excluded.add(pilot);
   }
-  if (state.excluded.has(pilot)) state.required.delete(pilot);
+  normalizeScopedPilotSelections();
   writeStateToUrl();
   loadDashboard().catch(showError);
 }
 
 function renderTabs() {
-  els.tabs.innerHTML = TABS.map(([key, label]) =>
+  const tabs = state.format === DEFAULT_FORMAT ? DUEL_TABS : [];
+  if (!tabs.some(([key]) => key === state.tab)) state.tab = 'overview';
+  els.tabs.hidden = tabs.length === 0;
+  els.tabs.innerHTML = tabs.map(([key, label]) =>
     `<button class="tab${state.tab === key ? ' active' : ''}" data-tab="${key}" type="button">${esc(label)}</button>`,
   ).join('');
   els.tabs.querySelectorAll('[data-tab]').forEach((button) => {
@@ -367,8 +419,12 @@ function renderTabs() {
 
 // ---------- view routing ----------
 function renderView(data) {
+  if (state.format !== DEFAULT_FORMAT) {
+    renderComingSoonFormat();
+    return;
+  }
   if (state.deck) { renderDeckPage(); return; }
-  if (data.totalGames === 0) {
+  if (data.totalGames === 0 && state.tab !== 'heroes') {
     els.view.innerHTML = card(empty('No completed games match these filters yet. Submit sample data or run local simulations to populate the dashboard.'));
     return;
   }
@@ -381,12 +437,23 @@ function renderView(data) {
   if (state.tab === 'heroes') renderHeroes(data, decks);
   else if (state.tab === 'matchups') renderMatchups(data, decks);
   else if (state.tab === 'scatter') renderScatter(data, decks);
-  else if (state.tab === 'formats') renderFormats(data);
-  else if (state.tab === 'synergy') renderSynergy(data);
   else if (state.tab === 'pilot-comparisons') { renderPilotComparisons(data); return; }
   else if (state.tab === 'scenario') { renderScenario(data); return; }
   else renderOverview(data, decks);
   bindHandlers(els.view);
+}
+
+function renderComingSoonFormat() {
+  const entry = FORMATS.find(([format]) => format === state.format);
+  const label = entry ? entry[1] : state.format;
+  const detail = state.format === 'team-2v2'
+    ? 'Team breakdowns and 2v2 synergy will live here.'
+    : 'Free-for-all balance breakdowns will live here.';
+  els.view.innerHTML = `<div class="card panel coming-soon">
+    <div class="coming-soon-kicker">${esc(label)}</div>
+    <div class="coming-soon-title">Coming soon</div>
+    <div class="coming-soon-copy">${esc(detail)}</div>
+  </div>`;
 }
 
 // Attach balance-flag classification to each deck once, shared across views.
@@ -461,6 +528,45 @@ function extremeRow(deck) {
 }
 
 // ---------- heroes table ----------
+function heroesPilotControls() {
+  const pilots = allowedPilots();
+  const options = pilots.map((pilot) => `<option value="${esc(pilot)}"${pilot === state.heroPilot ? ' selected' : ''}>${esc(pilotLabel(pilot))}</option>`).join('');
+  const vs = pilots.map((pilot) => {
+    const selected = state.heroVsPilots.has(pilot);
+    return `<button class="pilot-chip compact${selected ? ' selected' : ' off'}" data-hero-vs-pilot="${esc(pilot)}" type="button" aria-pressed="${selected ? 'true' : 'false'}"><span aria-hidden="true">${selected ? '✓' : '+'}</span> ${esc(pilotLabel(pilot))}</button>`;
+  }).join('');
+  return `<div class="heroes-pilot-controls">
+    <label class="scenario-field heroes-pilot-field"><span>Hero pilot</span><select data-hero-pilot>${options}</select></label>
+    <div class="heroes-vs-field"><span class="heroes-control-label">Vs pilots</span><div class="pilot-pills">${vs}</div></div>
+  </div>`;
+}
+
+function bindHeroesPilotControls(root) {
+  const heroSelect = root.querySelector('[data-hero-pilot]');
+  if (heroSelect) {
+    heroSelect.addEventListener('change', () => {
+      state.heroPilot = heroSelect.value || null;
+      writeStateToUrl();
+      loadDashboard().catch(showError);
+    });
+  }
+  root.querySelectorAll('[data-hero-vs-pilot]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const pilot = button.dataset.heroVsPilot;
+      if (!pilot) return;
+      if (state.heroVsPilots.has(pilot)) {
+        if (state.heroVsPilots.size <= 1) return;
+        state.heroVsPilots.delete(pilot);
+      } else {
+        state.heroVsPilots.add(pilot);
+      }
+      state.hasExplicitHeroVsPilots = true;
+      writeStateToUrl();
+      loadDashboard().catch(showError);
+    });
+  });
+}
+
 function renderHeroes(data, decks) {
   const rows = sortDecks(decks);
   const header = `<div class="deck-grid deck-head">
@@ -470,9 +576,9 @@ function renderHeroes(data, decks) {
     ${sortHeader('wr', 'Win rate · 95% CI (25–75% scale)')}
     <span class="th-btn" style="cursor:default">Deck profile</span>
   </div>`;
-  els.view.innerHTML = `<div class="card">
+  els.view.innerHTML = `${heroesPilotControls()}<div class="card">
     ${header}
-    ${rows.map(deckRow).join('')}
+    ${rows.length ? rows.map(deckRow).join('') : `<div class="empty heroes-empty">No Duel games match this hero and opponent pilot selection.</div>`}
     <div class="legend">
       ${legendSwatch('#d9705c', 'Attack')}
       ${legendSwatch('#7aa3d4', 'Defense')}
@@ -481,6 +587,7 @@ function renderHeroes(data, decks) {
       <span class="legend-spacer">Profile = how the deck spends its cards · click a deck for full detail</span>
     </div>
   </div>`;
+  bindHeroesPilotControls(els.view);
 }
 
 function sortHeader(key, label, right = false) {
@@ -571,7 +678,7 @@ function profileBar(deck) {
 
 // ---------- matchups ----------
 function matchupPilotControls() {
-  const options = [['', 'Any pilot'], ...allPilots.map((pilot) => [pilot, pilotLabel(pilot)])];
+  const options = [['', 'Any allowed pilot'], ...allowedPilots().map((pilot) => [pilot, pilotLabel(pilot)])];
   const select = (label, field, value) => {
     const opts = options.map(([optionValue, optionLabel]) => `<option value="${esc(optionValue)}"${optionValue === value ? ' selected' : ''}>${esc(optionLabel)}</option>`).join('');
     return `<label class="scenario-field matchup-pilot-field"><span>${esc(label)}</span><select data-matchup-pilot-field="${esc(field)}">${opts}</select></label>`;
@@ -2197,11 +2304,9 @@ function selectedFormatLabel(data) {
 }
 
 function pilotSummary() {
-  const must = [...state.required].filter((pilot) => !state.excluded.has(pilot));
-  const mustText = must.length ? `; must include ${must.map(pilotLabel).join(', ')}` : '';
-  if (!state.excluded.size) return `all pilots${mustText}`;
+  if (!state.excluded.size) return 'all pilots';
   const included = includedPilots();
-  return included.length ? `${included.length} pilot type${included.length === 1 ? '' : 's'}${mustText}` : 'none';
+  return included.length ? `${included.length} allowed pilot${included.length === 1 ? '' : 's'}` : 'none';
 }
 
 // ---------- handler registry ----------
