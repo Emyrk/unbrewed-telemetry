@@ -1318,6 +1318,12 @@ export class ControlPlaneRepository {
            SELECT MIN(sc.priority_tier) AS priority_tier
            FROM sim_campaigns sc
            WHERE sc.status = 'active'
+             AND EXISTS (
+               SELECT 1
+               FROM sim_jobs pending_job
+               WHERE pending_job.campaign_id = sc.id
+                 AND pending_job.status = 'pending'
+             )
              ${campaignId ? `AND sc.id = $${params.length}` : ''}
          ), ranked AS (
            SELECT sj.id,

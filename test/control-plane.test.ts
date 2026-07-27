@@ -429,11 +429,15 @@ describeDb('control-plane repository with postgres', () => {
         roundRobinA.id,
         roundRobinB.id,
       ]);
-      // Lower tiers remain blocked even when every higher-tier job is leased.
-      expect(await repo.claimJobs(null, 1, 'other-runner')).toEqual([]);
-      for (const job of batch) await repo.completeJob(job.id, job.leaseToken!);
+      // Once a tier has no pending jobs, workers may drain its leased tail while
+      // claims cascade into the next tier.
       const [next] = await repo.claimJobs(null, 1, 'other-runner');
       expect(next!.campaignId).toBe(first.id);
+
+      // If a higher-tier lease becomes pending again, it immediately regains priority.
+      expect(await repo.releaseJob(batch[0]!.id, batch[0]!.leaseToken!, 'runner')).toBe(true);
+      const [reclaimed] = await repo.claimJobs(null, 1, 'third-runner');
+      expect(reclaimed!.campaignId).toBe(roundRobinA.id);
     });
 
     it('rotates single-job claims across campaigns in one priority tier', async () => {
