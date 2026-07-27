@@ -48,6 +48,13 @@ export interface BotExecutionSubmission {
       p50: number;
       p95: number;
     };
+    elapsedMs?: {
+      count: number;
+      mean: number;
+      p50: number;
+      p90: number;
+      max: number;
+    };
     clockTruncatedDecisions: number;
     earlyStoppedDecisions: number;
   };

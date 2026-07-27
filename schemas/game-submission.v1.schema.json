@@ -194,6 +194,19 @@
                 "p95": { "type": "number", "minimum": 0 }
               }
             },
+            "elapsedMs": {
+              "type": "object",
+              "description": "Per-decision wall clock in milliseconds, aggregated over searched decisions.",
+              "required": ["count", "mean", "p50", "p90", "max"],
+              "additionalProperties": false,
+              "properties": {
+                "count": { "type": "integer", "minimum": 0 },
+                "mean": { "type": "number", "minimum": 0 },
+                "p50": { "type": "number", "minimum": 0 },
+                "p90": { "type": "number", "minimum": 0 },
+                "max": { "type": "number", "minimum": 0 }
+              }
+            },
             "clockTruncatedDecisions": { "type": "integer", "minimum": 0 },
             "earlyStoppedDecisions": { "type": "integer", "minimum": 0 }
           }

@@ -6,6 +6,7 @@ export function sampleBotExecution() {
     search: {
       decisions: 42,
       completedIterations: { mean: 61.5, p50: 64, p95: 64 },
+      elapsedMs: { count: 42, mean: 125.5, p50: 110, p90: 190, max: 240 },
       clockTruncatedDecisions: 3,
       earlyStoppedDecisions: 0,
     },
