@@ -850,6 +850,26 @@ describeDb('telemetry api with postgres', () => {
     expect(json.firstPlayer).toMatchObject({ games: 1, wins: 1, winRate: 1 });
   });
 
+  it('omits pilots with no games in the selected format', async () => {
+    await postGame(baseUrl, secret, sampleGame({ gameId: 'duel-pilots-001', stateHash: 'duel-pilots-state-001' }), 'duel-pilots-001');
+    await postGame(baseUrl, secret, sampleGame({
+      gameId: 'team-pilots-001',
+      stateHash: 'team-pilots-state-001',
+      format: 'team-2v2',
+      formatLabel: '2v2 Teams',
+      teams: [
+        { seats: [{ deck: 'king-kong@0.1.0', pilot: 'bot:easy', runtimePlayerId: 'p1', heroId: 'king-kong', botDifficulty: 'easy', finalHealth: 7 }] },
+        { seats: [{ deck: 'the-mandalorian@0.1.0', pilot: 'bot:easy', runtimePlayerId: 'p2', heroId: 'the-mandalorian', botDifficulty: 'easy', finalHealth: 0 }] },
+      ],
+    }), 'team-pilots-001');
+
+    const response = await fetch(`${baseUrl}/v1/stats/dashboard?format=duel`);
+    expect(response.status).toBe(200);
+    const json = await response.json() as { pilots: { pilot: string; seats: number; games: number }[] };
+    expect(json.pilots).toContainEqual(expect.objectContaining({ pilot: 'bot:hard', seats: 2, games: 1 }));
+    expect(json.pilots).not.toContainEqual(expect.objectContaining({ pilot: 'bot:easy' }));
+  });
+
   it('serves deck detail with card influence and matchups', async () => {
     await postGame(baseUrl, secret, sampleGame({ gameId: 'detail-game-001', stateHash: 'detail-state-001' }), 'detail-game-001');
 

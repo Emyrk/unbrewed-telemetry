@@ -932,7 +932,7 @@ export class PgTelemetryRepository {
         `,
       ),
       this.formatRows(pilotFilter),
-      this.pilotRows(),
+      this.pilotRows(filters.format),
       this.matchupRows(filters.format, matchupPilotFilter, matchupHeroPilot, matchupOpponentPilot),
       this.synergyRows(filters.format, pilotFilter),
     ]);
@@ -1220,23 +1220,28 @@ export class PgTelemetryRepository {
     }));
   }
 
-  private async pilotRows(): Promise<DashboardStatsResponse['pilots']> {
+  private async pilotRows(format: string | null): Promise<DashboardStatsResponse['pilots']> {
     const rows = await this.pool.query<{
       pilot: string;
       pilot_kind: 'human' | 'bot' | 'unknown';
       seats: number;
+      games: number;
     }>(
       `
-        SELECT pilot, pilot_kind, COUNT(*)::int AS seats
-        FROM game_seats
-        GROUP BY pilot, pilot_kind
-        ORDER BY seats DESC, pilot ASC
+        SELECT s.pilot, s.pilot_kind, COUNT(*)::int AS seats, COUNT(DISTINCT s.game_id)::int AS games
+        FROM game_seats s
+        JOIN games g ON g.id = s.game_id
+        WHERE ($1::text IS NULL OR g.format = $1)
+        GROUP BY s.pilot, s.pilot_kind
+        ORDER BY seats DESC, s.pilot ASC
       `,
+      [format],
     );
     return rows.rows.map((row) => ({
       pilot: row.pilot,
       pilotKind: row.pilot_kind,
       seats: Number(row.seats),
+      games: Number(row.games),
     }));
   }
 

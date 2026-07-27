@@ -23,8 +23,11 @@ describe('balance dashboard format and pilot controls', () => {
     expect(script).toContain('data-hero-vs-pilot');
     expect(script).toContain('Any allowed pilot');
     expect(script).toContain('data-pilot-search');
+    expect(script).toContain('pilot-option-count');
+    expect(script).toContain('gameCounts');
     expect(script).toContain('function scheduleDashboardLoad()');
     expect(script).toContain('FILTER_DEBOUNCE_MS');
+    expect(script).toContain('allPilots = (json.pilots || []).map((row) => row.pilot)');
     expect(script).toContain("params.append('opponentPilotAllowed', pilot)");
     expect(script).toContain('...allowedPilots().map((pilot)');
   });

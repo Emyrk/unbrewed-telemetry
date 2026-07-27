@@ -299,6 +299,7 @@ export interface DashboardPilotStat {
   pilot: string;
   pilotKind: 'human' | 'bot' | 'unknown';
   seats: number;
+  games: number;
 }
 
 export interface DashboardMatchupStat {

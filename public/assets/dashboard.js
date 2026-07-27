@@ -309,13 +309,12 @@ async function loadDashboard() {
     dashCache.set(key, { at: Date.now(), json });
   }
   if (requestId !== dashboardLoadSequence) return;
-  if (allPilots.length === 0) {
-    allPilots = (json.pilots || []).map((row) => row.pilot);
-    if (applyDefaultPilotExclusions()) {
-      writeStateToUrl();
-      await loadDashboard();
-      return;
-    }
+  const previousPilots = allPilots;
+  allPilots = (json.pilots || []).map((row) => row.pilot);
+  if (previousPilots.length === 0 && applyDefaultPilotExclusions()) {
+    writeStateToUrl();
+    await loadDashboard();
+    return;
   }
   if (normalizeScopedPilotSelections()) {
     writeStateToUrl();
@@ -358,11 +357,16 @@ function pilotSelectionSummary(selected) {
   return `${selected.length} pilots selected`;
 }
 
-function pilotCheckboxRows(pilots, selected, attribute) {
-  return pilots.map((pilot) => `<label class="pilot-option" data-pilot-option data-search-text="${esc(pilotLabel(pilot).toLowerCase())}">
-    <input type="checkbox" ${attribute}="${esc(pilot)}"${selected.has(pilot) ? ' checked' : ''}>
-    <span>${esc(pilotLabel(pilot))}</span>
-  </label>`).join('');
+function pilotCheckboxRows(pilots, selected, attribute, gameCounts = null) {
+  return pilots.map((pilot) => {
+    const count = gameCounts?.get(pilot);
+    const countHtml = count == null ? '' : `<span class="pilot-option-count">${number(count)} game${count === 1 ? '' : 's'}</span>`;
+    return `<label class="pilot-option" data-pilot-option data-search-text="${esc(pilotLabel(pilot).toLowerCase())}">
+      <input type="checkbox" ${attribute}="${esc(pilot)}"${selected.has(pilot) ? ' checked' : ''}>
+      <span class="pilot-option-name">${esc(pilotLabel(pilot))}</span>
+      ${countHtml}
+    </label>`;
+  }).join('');
 }
 
 function bindPilotSearch(root) {
@@ -385,11 +389,12 @@ function renderControls(data) {
 
   const pilots = pilotOptions(data.pilots || []);
   const selected = new Set(allowedPilots());
+  const gameCounts = new Map(pilots.map((pilot) => [pilot.value, pilot.games]));
   els.pilotChips.innerHTML = `<details class="pilot-select">
     <summary><span data-pilot-summary>${esc(pilotSelectionSummary([...selected]))}</span><span class="pilot-select-chevron" aria-hidden="true">▾</span></summary>
     <div class="pilot-menu">
       <input class="pilot-search" data-pilot-search type="search" placeholder="Search pilots" aria-label="Search pilots">
-      <div class="pilot-option-list">${pilotCheckboxRows(pilots.map((pilot) => pilot.value), selected, 'data-top-pilot')}</div>
+      <div class="pilot-option-list">${pilotCheckboxRows(pilots.map((pilot) => pilot.value), selected, 'data-top-pilot', gameCounts)}</div>
     </div>
   </details>`;
   bindPilotSearch(els.pilotChips);
@@ -399,7 +404,7 @@ function renderControls(data) {
 }
 
 function pilotOptions(rows) {
-  return rows.map((row) => ({ value: row.pilot, label: pilotLabel(row.pilot), seats: row.seats }));
+  return rows.map((row) => ({ value: row.pilot, label: pilotLabel(row.pilot), games: row.games ?? row.seats }));
 }
 
 function pilotLabel(pilot) {
