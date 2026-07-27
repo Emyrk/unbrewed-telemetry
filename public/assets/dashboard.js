@@ -49,6 +49,7 @@ const BUCKET_META = {
   other: { tag: '—', color: '#9d87a6' },
 };
 
+const FILTER_DEBOUNCE_MS = 350;
 const TWO_V_TWO_MODE_KEY = 'unbrewed.twoVTwoPartnerMode';
 const CARD_INFLUENCE_MODE_KEY = 'unbrewed.cardInfluenceMode';
 const state = readStateFromUrl();
@@ -66,6 +67,8 @@ const els = {
   modalRoot: document.querySelector('#modal-root'),
 };
 
+let dashboardLoadTimer = null;
+let dashboardLoadSequence = 0;
 let cardInfluenceMode = readStoredCardInfluenceMode();
 let twoVTwoMode = readStoredTwoVTwoMode();
 let deckFormatTab = null;
@@ -240,8 +243,8 @@ function normalizeScopedPilotSelections() {
     state.matchupOpponentPilot = null;
     changed = true;
   }
-  if (!state.heroPilot || !allowedSet.has(state.heroPilot)) {
-    state.heroPilot = allowed[0] || null;
+  if (state.heroPilot && !allowedSet.has(state.heroPilot)) {
+    state.heroPilot = null;
     changed = true;
   }
 
@@ -293,6 +296,7 @@ async function fetchDeckDetail(deck, extra = {}, allowNotFound = false) {
 
 // ---------- data loading ----------
 async function loadDashboard() {
+  const requestId = ++dashboardLoadSequence;
   setStatus('Loading telemetry…');
   const params = statsQuery();
   const key = params.toString();
@@ -304,6 +308,7 @@ async function loadDashboard() {
     json = await fetchJson(`/v1/stats/dashboard${key ? `?${key}` : ''}`);
     dashCache.set(key, { at: Date.now(), json });
   }
+  if (requestId !== dashboardLoadSequence) return;
   if (allPilots.length === 0) {
     allPilots = (json.pilots || []).map((row) => row.pilot);
     if (applyDefaultPilotExclusions()) {
@@ -338,6 +343,39 @@ async function fetchJson(url) {
   return json;
 }
 
+function scheduleDashboardLoad() {
+  if (dashboardLoadTimer) clearTimeout(dashboardLoadTimer);
+  dashboardLoadSequence += 1; // Ignore an older request that is still in flight.
+  dashboardLoadTimer = setTimeout(() => {
+    dashboardLoadTimer = null;
+    loadDashboard().catch(showError);
+  }, FILTER_DEBOUNCE_MS);
+}
+
+function pilotSelectionSummary(selected) {
+  if (selected.length === 0) return 'No pilots selected';
+  if (selected.length === 1) return pilotLabel(selected[0]);
+  return `${selected.length} pilots selected`;
+}
+
+function pilotCheckboxRows(pilots, selected, attribute) {
+  return pilots.map((pilot) => `<label class="pilot-option" data-pilot-option data-search-text="${esc(pilotLabel(pilot).toLowerCase())}">
+    <input type="checkbox" ${attribute}="${esc(pilot)}"${selected.has(pilot) ? ' checked' : ''}>
+    <span>${esc(pilotLabel(pilot))}</span>
+  </label>`).join('');
+}
+
+function bindPilotSearch(root) {
+  const search = root.querySelector('[data-pilot-search]');
+  if (!search) return;
+  search.addEventListener('input', () => {
+    const query = search.value.trim().toLowerCase();
+    root.querySelectorAll('[data-pilot-option]').forEach((option) => {
+      option.hidden = query !== '' && !option.dataset.searchText.includes(query);
+    });
+  });
+}
+
 // ---------- controls ----------
 function renderControls(data) {
   els.formatChips.innerHTML = FORMATS
@@ -346,15 +384,18 @@ function renderControls(data) {
   bindHandlers(els.formatChips);
 
   const pilots = pilotOptions(data.pilots || []);
-  els.pilotChips.innerHTML = pilots.map((pilot) => {
-    const selected = !state.excluded.has(pilot.value);
-    const id = registerHandler(() => togglePilot(pilot.value));
-    const title = selected
-      ? `${pilot.label} is allowed. Click to remove it from the pilot filter.`
-      : `${pilot.label} is not allowed. Click to add it to the pilot filter.`;
-    return `<button class="pilot-chip${selected ? ' selected' : ' off'}" data-handler="${id}" type="button" title="${esc(title)}" aria-pressed="${selected ? 'true' : 'false'}"><span aria-hidden="true">${selected ? '✓' : '+'}</span> ${esc(pilot.label)}</button>`;
-  }).join('');
-  bindHandlers(els.pilotChips);
+  const selected = new Set(allowedPilots());
+  els.pilotChips.innerHTML = `<details class="pilot-select">
+    <summary><span data-pilot-summary>${esc(pilotSelectionSummary([...selected]))}</span><span class="pilot-select-chevron" aria-hidden="true">▾</span></summary>
+    <div class="pilot-menu">
+      <input class="pilot-search" data-pilot-search type="search" placeholder="Search pilots" aria-label="Search pilots">
+      <div class="pilot-option-list">${pilotCheckboxRows(pilots.map((pilot) => pilot.value), selected, 'data-top-pilot')}</div>
+    </div>
+  </details>`;
+  bindPilotSearch(els.pilotChips);
+  els.pilotChips.querySelectorAll('[data-top-pilot]').forEach((checkbox) => {
+    checkbox.addEventListener('change', () => togglePilot(checkbox.dataset.topPilot, checkbox));
+  });
 }
 
 function pilotOptions(rows) {
@@ -383,17 +424,24 @@ function setFormat(format) {
   loadDashboard().catch(showError);
 }
 
-function togglePilot(pilot) {
+function togglePilot(pilot, checkbox) {
+  if (!pilot) return;
   if (state.excluded.has(pilot)) {
     state.excluded.delete(pilot);
   } else {
     const selected = allowedPilots();
-    if (selected.length <= 1) return;
+    if (selected.length <= 1) {
+      checkbox.checked = true;
+      return;
+    }
     state.excluded.add(pilot);
   }
   normalizeScopedPilotSelections();
   writeStateToUrl();
-  loadDashboard().catch(showError);
+  const summary = els.pilotChips.querySelector('[data-pilot-summary]');
+  if (summary) summary.textContent = pilotSelectionSummary(allowedPilots());
+  if (current && state.tab === 'heroes') renderView(current);
+  scheduleDashboardLoad();
 }
 
 function renderTabs() {
@@ -530,14 +578,22 @@ function extremeRow(deck) {
 // ---------- heroes table ----------
 function heroesPilotControls() {
   const pilots = allowedPilots();
-  const options = pilots.map((pilot) => `<option value="${esc(pilot)}"${pilot === state.heroPilot ? ' selected' : ''}>${esc(pilotLabel(pilot))}</option>`).join('');
-  const vs = pilots.map((pilot) => {
-    const selected = state.heroVsPilots.has(pilot);
-    return `<button class="pilot-chip compact${selected ? ' selected' : ' off'}" data-hero-vs-pilot="${esc(pilot)}" type="button" aria-pressed="${selected ? 'true' : 'false'}"><span aria-hidden="true">${selected ? '✓' : '+'}</span> ${esc(pilotLabel(pilot))}</button>`;
-  }).join('');
+  const options = [
+    `<option value=""${state.heroPilot ? '' : ' selected'}>Any allowed pilot</option>`,
+    ...pilots.map((pilot) => `<option value="${esc(pilot)}"${pilot === state.heroPilot ? ' selected' : ''}>${esc(pilotLabel(pilot))}</option>`),
+  ].join('');
   return `<div class="heroes-pilot-controls">
     <label class="scenario-field heroes-pilot-field"><span>Hero pilot</span><select data-hero-pilot>${options}</select></label>
-    <div class="heroes-vs-field"><span class="heroes-control-label">Vs pilots</span><div class="pilot-pills">${vs}</div></div>
+    <div class="heroes-vs-field">
+      <span class="heroes-control-label">Vs pilots</span>
+      <details class="pilot-select hero-vs-select">
+        <summary><span data-hero-vs-summary>${esc(pilotSelectionSummary([...state.heroVsPilots]))}</span><span class="pilot-select-chevron" aria-hidden="true">▾</span></summary>
+        <div class="pilot-menu">
+          <input class="pilot-search" data-pilot-search type="search" placeholder="Search allowed pilots" aria-label="Search opponent pilots">
+          <div class="pilot-option-list">${pilotCheckboxRows(pilots, state.heroVsPilots, 'data-hero-vs-pilot')}</div>
+        </div>
+      </details>
+    </div>
   </div>`;
 }
 
@@ -547,22 +603,28 @@ function bindHeroesPilotControls(root) {
     heroSelect.addEventListener('change', () => {
       state.heroPilot = heroSelect.value || null;
       writeStateToUrl();
-      loadDashboard().catch(showError);
+      scheduleDashboardLoad();
     });
   }
-  root.querySelectorAll('[data-hero-vs-pilot]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const pilot = button.dataset.heroVsPilot;
+  bindPilotSearch(root.querySelector('.hero-vs-select') || root);
+  root.querySelectorAll('[data-hero-vs-pilot]').forEach((checkbox) => {
+    checkbox.addEventListener('change', () => {
+      const pilot = checkbox.dataset.heroVsPilot;
       if (!pilot) return;
       if (state.heroVsPilots.has(pilot)) {
-        if (state.heroVsPilots.size <= 1) return;
+        if (state.heroVsPilots.size <= 1) {
+          checkbox.checked = true;
+          return;
+        }
         state.heroVsPilots.delete(pilot);
       } else {
         state.heroVsPilots.add(pilot);
       }
       state.hasExplicitHeroVsPilots = true;
       writeStateToUrl();
-      loadDashboard().catch(showError);
+      const summary = root.querySelector('[data-hero-vs-summary]');
+      if (summary) summary.textContent = pilotSelectionSummary([...state.heroVsPilots]);
+      scheduleDashboardLoad();
     });
   });
 }

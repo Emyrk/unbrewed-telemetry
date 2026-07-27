@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Oswald:wght@500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/assets/dashboard.css?v=format-pilot-filters-1">
+  <link rel="stylesheet" href="/assets/dashboard.css?v=pilot-menu-debounce-1">
 </head>
 <body>
   <div class="app" data-screen-label="Balance Dashboard">
@@ -25,7 +25,7 @@
           <nav id="tabs" class="tabs" aria-label="Dashboard sections"></nav>
           <div class="pilot-filter" role="group" aria-label="Pilot filter">
             <span class="pilot-label">Pilots</span>
-            <div id="pilot-chips" class="pilot-pills"></div>
+            <div id="pilot-chips" class="pilot-select-host"></div>
           </div>
         </div>
       </div>
@@ -77,6 +77,6 @@
 
   <div id="modal-root"></div>
 
-  <script src="/assets/dashboard.js?v=format-pilot-filters-1" type="module"></script>
+  <script src="/assets/dashboard.js?v=pilot-menu-debounce-1" type="module"></script>
 </body>
 </html>
