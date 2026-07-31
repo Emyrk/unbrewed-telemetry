@@ -1213,6 +1213,27 @@ describeDb('telemetry api with postgres', () => {
     expect(rerun.skipped).toContain('012_deck_rules_canonical.sql');
   });
 
+  it('leaves rows written before the archive untouched: no backfill, lossy cards kept', async () => {
+    // A row as 011 left it: cards payload, fingerprint, nothing else.
+    await pool.query(
+      `INSERT INTO deck_definitions (deck_id, version, cards, card_count, rules_hash)
+       VALUES ('legacy-deck', '0.0.1', $1::jsonb, 30, 'fp1-9c3a17b40e21')`,
+      [JSON.stringify([{ type: 'attack', value: 5, quantity: 30 }])],
+    );
+    await migrate(pool);
+
+    const row = await pool.query<{ cards: unknown; card_count: number; rules_hash: string; rules_canonical: string | null; rules: unknown }>(
+      `SELECT cards, card_count, rules_hash, rules_canonical, rules FROM deck_definitions WHERE deck_id = 'legacy-deck'`,
+    );
+    expect(row.rows[0]).toEqual({
+      cards: [{ type: 'attack', value: 5, quantity: 30 }],
+      card_count: 30,
+      rules_hash: 'fp1-9c3a17b40e21',
+      rules_canonical: null,
+      rules: null,
+    });
+  });
+
   it('archives canonical deck rules and re-archives them on conflict', async () => {
     // A push the way producers push today leaves both new columns NULL.
     expect((await postDecks(baseUrl, secret, sampleDeckBatch())).status).toBe(200);
