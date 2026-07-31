@@ -1,4 +1,56 @@
+import { createHash } from 'node:crypto';
 import type { GameSubmission } from '../src/types.js';
+
+export interface CanonicalRulesOverrides {
+  heroHealth?: number;
+  sidekickHealth?: number;
+  attackValue?: number;
+  attackQuantity?: number;
+  /** Stands in for an effect program: an ordered list, so a reorder is a change. */
+  attackEffect?: unknown[];
+}
+
+/**
+ * A canonical deck rules string in the engine's `fp1` framing:
+ * `fp1|hero=<json>|cards=[<json>,...]`, every object's keys in sorted order and
+ * the card list sorted as a multiset of canonicalized strings.
+ *
+ * Hand-built rather than imported from the engine on purpose: telemetry must
+ * never depend on the canonicalizer: it hashes the bytes it is handed. This
+ * fixture exists to produce realistic bytes, not to define them.
+ */
+export function sampleCanonicalRules(overrides: CanonicalRulesOverrides = {}): string {
+  const hero = {
+    health: overrides.heroHealth ?? 18,
+    id: 'king-kong',
+    sidekick: { health: overrides.sidekickHealth ?? 8, id: 'king-kong-sidekick' },
+    startingSpace: 'kk-1',
+  };
+  const cards = [
+    {
+      boost: 2,
+      effects: overrides.attackEffect ?? [{ op: 'damage', value: 2 }],
+      id: 'king-kong/a',
+      quantity: overrides.attackQuantity ?? 12,
+      title: 'Crushing Blow',
+      type: 'attack',
+      value: overrides.attackValue ?? 5,
+    },
+    { boost: 2, id: 'king-kong/d', quantity: 6, title: 'Iron Guard', type: 'defense', value: 2 },
+    { boost: 2, id: 'king-kong/v', quantity: 8, title: 'Skull Island', type: 'versatile', value: 3 },
+    { boost: 2, id: 'king-kong/s', quantity: 4, title: 'Cruel Bargain', type: 'scheme', value: null },
+  ];
+  const cardJson = cards.map((card) => JSON.stringify(card)).sort();
+  return `fp1|hero=${JSON.stringify(hero)}|cards=[${cardJson.join(',')}]`;
+}
+
+/**
+ * The fingerprint the engine would stamp on `canonical`: 12 hex of its SHA-256.
+ * Computed with node:crypto so tests never lean on the code under test.
+ */
+export function fingerprintFor(canonical: string, algorithm = 'fp1'): string {
+  return `${algorithm}-${createHash('sha256').update(canonical, 'utf8').digest('hex').slice(0, 12)}`;
+}
 
 export function sampleBotExecution() {
   return {

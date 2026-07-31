@@ -147,6 +147,46 @@ Each deck may carry the same fingerprint as `rulesHash`, in the same format and
 with the same optionality as the seat-level `deckRulesHash` above. It is stored
 on `deck_definitions.rules_hash` and surfaced on the deck composition read path.
 
+#### Canonical rules archive
+
+A deck may also carry `rulesCanonical`: the exact string the engine digested to
+produce `rulesHash`, as returned by `canonicalDeckRules(hero, cards)`.
+
+```json
+{
+  "deckId": "king-kong",
+  "version": "0.10.0",
+  "rulesHash": "fp1-9c3a17b40e21",
+  "rulesCanonical": "fp1|hero={\"health\":18,\"id\":\"king-kong\"}|cards=[…]"
+}
+```
+
+The fingerprint alone says a deck's rules *changed*; the archive says *how* they
+changed, which is what deck balancing needs to attribute a win-rate move to a
+specific rules edit. It lands in two columns (migration `012`): `rules_canonical`
+keeps the bytes verbatim as the integrity anchor, and `rules` keeps the same
+content parsed as `{ hero, cards }` so card values, quantities, effect programs
+and hero/sidekick stats are queryable in SQL. Read them back with
+`repo.deckRulesArchive({ deckId, version, rulesHash })` — deliberately off the
+dashboard's composition query, which no view needs and which would grow by
+several kilobytes per deck. All 27 shipped decks together are about 127 KB.
+
+**Verification.** On ingest the service recomputes `sha256(rulesCanonical)` and
+compares it to `rulesHash`; a disagreement is a `400` — a fingerprint that does
+not describe its own rules is worse than no archive at all. The received bytes
+are hashed **verbatim**: no re-serialization, no key reordering. Canonicalization
+belongs to the engine, and a second implementation of it here would drift.
+
+The `fp<n>-` prefix versions the algorithm, and only algorithms this service
+knows (currently `fp1`) are verified. An unknown prefix is **stored unverified,
+never rejected**, with a `[decks] …` warning in the log — otherwise the day the
+engine ships `fp2` before telemetry is updated, every deck push starts failing.
+
+Both columns are nullable and additive: a push without `rulesCanonical` upserts
+exactly as before, historical rows keep their lossy `cards` payload, and no
+backfill is performed. **Run `npm run db:migrate` before deploying this code**:
+the deck upsert references the new columns unconditionally.
+
 ### Admin control plane
 
 `GET /admin` uses Discord OAuth and the `ADMIN_DISCORD_IDS` allowlist. Admins can:

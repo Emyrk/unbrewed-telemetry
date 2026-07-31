@@ -7,7 +7,7 @@ import { PgTelemetryRepository } from '../src/db/repository.js';
 import { ControlPlaneRepository } from '../src/db/control-plane-repository.js';
 import { createApp } from '../src/http/app.js';
 import { signBody } from '../src/http/auth.js';
-import { sampleBotExecution, sampleGame } from './fixtures.js';
+import { fingerprintFor, sampleBotExecution, sampleCanonicalRules, sampleGame } from './fixtures.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const describeDb = databaseUrl ? describe : describe.skip;
@@ -1185,6 +1185,163 @@ describeDb('telemetry api with postgres', () => {
     expect(await response.json()).toMatchObject({ ok: false, code: 'VALIDATION_FAILED' });
   });
 
+  it('adds the canonical deck rules columns additively and is safe to re-apply', async () => {
+    // migrate() already ran 001..012 in beforeAll; re-running the file by hand
+    // must be a no-op, the way an operator would retry a half-finished deploy.
+    const sql = await readFile(new URL('../migrations/012_deck_rules_canonical.sql', import.meta.url), 'utf8');
+    await pool.query(sql);
+    await pool.query(sql);
+
+    const columns = await pool.query<{ column_name: string; data_type: string; is_nullable: string; column_default: string | null }>(
+      `SELECT column_name, data_type, is_nullable, column_default
+       FROM information_schema.columns
+       WHERE table_name = 'deck_definitions' AND column_name IN ('rules_canonical', 'rules')
+       ORDER BY column_name`,
+    );
+    expect(columns.rows).toEqual([
+      { column_name: 'rules', data_type: 'jsonb', is_nullable: 'YES', column_default: null },
+      { column_name: 'rules_canonical', data_type: 'text', is_nullable: 'YES', column_default: null },
+    ]);
+
+    const index = await pool.query(
+      `SELECT indexdef FROM pg_indexes WHERE indexname = 'deck_definitions_rules_hash_idx'`,
+    );
+    expect(index.rowCount).toBe(1);
+
+    const rerun = await migrate(pool);
+    expect(rerun.applied).toEqual([]);
+    expect(rerun.skipped).toContain('012_deck_rules_canonical.sql');
+  });
+
+  it('archives canonical deck rules and re-archives them on conflict', async () => {
+    // A push the way producers push today leaves both new columns NULL.
+    expect((await postDecks(baseUrl, secret, sampleDeckBatch())).status).toBe(200);
+    expect((await archivedRules(pool)).rows[0]).toMatchObject({ rules_canonical: null, rules: null, card_count: 30 });
+
+    const canonical = sampleCanonicalRules();
+    const push = await postDecks(baseUrl, secret, sampleDeckBatch({
+      rulesCanonical: canonical,
+      rulesHash: fingerprintFor(canonical),
+    }));
+    expect(push.status).toBe(200);
+
+    // Same (deck_id, version): the ON CONFLICT path must adopt the archive.
+    const stored = (await archivedRules(pool)).rows[0]!;
+    expect(stored.rules_canonical).toBe(canonical);
+    expect(stored.rules_hash).toBe(fingerprintFor(canonical));
+    expect(stored.rules).toMatchObject({ hero: { id: 'king-kong', health: 18 } });
+    expect((stored.rules as { cards: unknown[] }).cards).toHaveLength(4);
+    expect(stored.card_count).toBe(30);
+
+    // Re-pushing identical content stays a no-op on (deck_id, version).
+    expect((await postDecks(baseUrl, secret, sampleDeckBatch({
+      rulesCanonical: canonical,
+      rulesHash: fingerprintFor(canonical),
+    }))).status).toBe(200);
+    const rows = await pool.query(`SELECT 1 FROM deck_definitions WHERE deck_id = 'king-kong'`);
+    expect(rows.rowCount).toBe(1);
+  });
+
+  it('rejects rules whose digest disagrees with the fingerprint they are filed under', async () => {
+    const canonical = sampleCanonicalRules();
+    const response = await postDecks(baseUrl, secret, sampleDeckBatch({
+      rulesCanonical: canonical,
+      // The fingerprint of a *different* balance of the same deck.
+      rulesHash: fingerprintFor(sampleCanonicalRules({ attackValue: 6 })),
+    }));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ ok: false, code: 'VALIDATION_FAILED' });
+
+    const stored = await pool.query(`SELECT 1 FROM deck_definitions WHERE deck_id = 'king-kong'`);
+    expect(stored.rowCount).toBe(0);
+  });
+
+  it('stores rules under an unknown algorithm prefix unverified instead of rejecting', async () => {
+    // The engine may ship fp2 before this service learns to verify it. Rejecting
+    // would break every deck push on that day; storing keeps the archive going.
+    const response = await postDecks(baseUrl, secret, sampleDeckBatch({
+      rulesCanonical: 'fp2|hero={"id":"king-kong"}|cards=[{"quantity":30,"type":"attack"}]',
+      rulesHash: 'fp2-0123456789abcdef',
+    }));
+    expect(response.status).toBe(200);
+
+    const stored = (await archivedRules(pool)).rows[0]!;
+    expect(stored.rules_hash).toBe('fp2-0123456789abcdef');
+    expect(stored.rules_canonical).toBe('fp2|hero={"id":"king-kong"}|cards=[{"quantity":30,"type":"attack"}]');
+  });
+
+  it('keeps two versions of one deck diffable down to values, quantities, effects and stats', async () => {
+    const before = sampleCanonicalRules();
+    const after = sampleCanonicalRules({
+      heroHealth: 17,
+      sidekickHealth: 7,
+      attackValue: 6,
+      attackQuantity: 10,
+      attackEffect: [{ op: 'damage', value: 3 }],
+    });
+    expect((await postDecks(baseUrl, secret, sampleDeckBatch({
+      version: '0.1.0', rulesCanonical: before, rulesHash: fingerprintFor(before),
+    }))).status).toBe(200);
+    expect((await postDecks(baseUrl, secret, sampleDeckBatch({
+      version: '0.2.0', rulesCanonical: after, rulesHash: fingerprintFor(after),
+    }))).status).toBe(200);
+
+    const repo = new PgTelemetryRepository(pool);
+    const versions = await repo.deckRulesArchive({ deckId: 'king-kong' });
+    expect(versions).toHaveLength(2);
+    expect(versions.map((row) => row.version).sort()).toEqual(['0.1.0', '0.2.0']);
+    expect(versions.every((row) => row.rulesCanonical !== null && row.rules !== null)).toBe(true);
+
+    // Fingerprint -> rules: the lookup a balancing run makes from a seat's hash.
+    const byFingerprint = await repo.deckRulesArchive({ rulesHash: fingerprintFor(after) });
+    expect(byFingerprint).toHaveLength(1);
+    expect(byFingerprint[0]).toMatchObject({ deckId: 'king-kong', version: '0.2.0', rulesCanonical: after });
+
+    const heroOf = (version: string) => versions.find((row) => row.version === version)!.rules!.hero as {
+      health: number; sidekick: { health: number };
+    };
+    expect(heroOf('0.1.0').health).toBe(18);
+    expect(heroOf('0.2.0').health).toBe(17);
+    expect(heroOf('0.1.0').sidekick.health).toBe(8);
+    expect(heroOf('0.2.0').sidekick.health).toBe(7);
+
+    const attackOf = (version: string) => (versions.find((row) => row.version === version)!.rules!.cards as {
+      id: string; value: number; quantity: number; effects: unknown[];
+    }[]).find((card) => card.id === 'king-kong/a')!;
+    expect(attackOf('0.1.0')).toMatchObject({ value: 5, quantity: 12, effects: [{ op: 'damage', value: 2 }] });
+    expect(attackOf('0.2.0')).toMatchObject({ value: 6, quantity: 10, effects: [{ op: 'damage', value: 3 }] });
+
+    // Same facts are reachable in SQL, without parsing text.
+    const sql = await pool.query<{ version: string; hero_health: number; attack_value: number }>(
+      `SELECT version,
+              (rules -> 'hero' ->> 'health')::int AS hero_health,
+              (card ->> 'value')::int AS attack_value
+       FROM deck_definitions, jsonb_array_elements(rules -> 'cards') AS card
+       WHERE deck_id = 'king-kong' AND card ->> 'id' = 'king-kong/a'
+       ORDER BY version`,
+    );
+    expect(sql.rows).toEqual([
+      { version: '0.1.0', hero_health: 18, attack_value: 5 },
+      { version: '0.2.0', hero_health: 17, attack_value: 6 },
+    ]);
+  });
+
+  it('does not disturb the dashboard composition read path when rules are archived', async () => {
+    const canonical = sampleCanonicalRules();
+    expect((await postDecks(baseUrl, secret, sampleDeckBatch({
+      rulesCanonical: canonical, rulesHash: fingerprintFor(canonical),
+    }))).status).toBe(200);
+    await postGame(baseUrl, secret, sampleGame({ gameId: 'rules-arch-001', stateHash: 'rules-arch-state-001' }), 'rules-arch-001');
+
+    const dash = await fetch(`${baseUrl}/v1/stats/dashboard?format=duel&pilots=bot:hard`);
+    const dashJson = await dash.json() as { decks: { deck: string; composition: Record<string, unknown> | null }[] };
+    const composition = dashJson.decks.find((deck) => deck.deck === 'king-kong@0.1.0')?.composition;
+    expect(composition).toMatchObject({ cardCount: 30, attack: 12, rulesHash: fingerprintFor(canonical) });
+    // The multi-kilobyte archive stays off the dashboard payload.
+    expect(composition).not.toHaveProperty('rulesCanonical');
+    expect(composition).not.toHaveProperty('rules');
+  });
+
   it('requires a signature to push deck definitions', async () => {
     const response = await fetch(`${baseUrl}/v1/decks`, {
       method: 'POST',
@@ -1427,7 +1584,9 @@ describeDb('telemetry api with postgres', () => {
   });
 });
 
-function sampleDeckBatch(overrides: { version?: string; rulesHash?: string } = {}): unknown {
+function sampleDeckBatch(
+  overrides: { version?: string; rulesHash?: string; rulesCanonical?: string } = {},
+): unknown {
   return {
     schemaVersion: 1,
     source: 'test',
@@ -1437,6 +1596,7 @@ function sampleDeckBatch(overrides: { version?: string; rulesHash?: string } = {
         deckId: 'king-kong',
         version: overrides.version ?? '0.1.0',
         ...(overrides.rulesHash === undefined ? {} : { rulesHash: overrides.rulesHash }),
+        ...(overrides.rulesCanonical === undefined ? {} : { rulesCanonical: overrides.rulesCanonical }),
         name: 'King Kong',
         tier: 'community',
         cards: [
@@ -1448,6 +1608,18 @@ function sampleDeckBatch(overrides: { version?: string; rulesHash?: string } = {
       },
     ],
   };
+}
+
+function archivedRules(pool: Pool) {
+  return pool.query<{
+    rules_hash: string | null;
+    rules_canonical: string | null;
+    rules: unknown;
+    card_count: number;
+  }>(
+    `SELECT rules_hash, rules_canonical, rules, card_count
+     FROM deck_definitions WHERE deck_id = 'king-kong' ORDER BY version`,
+  );
 }
 
 async function postDecks(baseUrl: string, secret: string, payload: unknown): Promise<Response> {

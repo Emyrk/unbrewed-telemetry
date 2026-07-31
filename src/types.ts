@@ -221,6 +221,13 @@ export interface DeckDefinitionSubmission {
      * rules move, which is what makes deck-balancing comparisons attributable.
      */
     rulesHash?: string;
+    /**
+     * The exact canonical rules string `rulesHash` digests, as produced by the
+     * engine. Archived verbatim so two fingerprints can be diffed, not merely
+     * distinguished. Verified byte-for-byte on ingest when the algorithm is
+     * known; see ingest/deck-rules.ts.
+     */
+    rulesCanonical?: string;
     name?: string;
     tier?: string;
     cards: DeckDefinitionCard[];
