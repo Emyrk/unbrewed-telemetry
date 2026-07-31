@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { Ajv2020 } from 'ajv/dist/2020.js';
 import type { ErrorObject } from 'ajv';
 import type { DeckDefinitionSubmission, ValidationResult } from '../types.js';
+import { deckRulesErrors } from './deck-rules.js';
 
 const schemaUrl = new URL('../../schemas/deck-definitions.v1.schema.json', import.meta.url);
 const schema = JSON.parse(readFileSync(schemaUrl, 'utf8')) as object;
@@ -26,6 +27,9 @@ function semanticErrors(submission: DeckDefinitionSubmission): string[] {
     if (seen.has(key)) errors.push(`/decks/${i}: duplicate deck ${key} in batch`);
     seen.add(key);
   });
+  // An archived rules string whose digest disagrees with the fingerprint it is
+  // filed under is rejected outright; see ingest/deck-rules.ts.
+  errors.push(...deckRulesErrors(submission));
   return errors;
 }
 

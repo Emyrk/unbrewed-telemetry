@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomUUID, createHmac } from 'node:crypto';
 import { validateGameSubmission } from '../ingest/schema.js';
 import { validateDeckDefinitions } from '../ingest/deck-schema.js';
+import { deckRulesNotices } from '../ingest/deck-rules.js';
 import type { PgTelemetryRepository } from '../db/repository.js';
 import type { CampaignItemBucket, ControlPlaneRepository, SimJobCheckpoint } from '../db/control-plane-repository.js';
 import type { DeckDefinitionSubmission, GameSubmission, RecentHourlyResponse } from '../types.js';
@@ -418,7 +419,14 @@ async function handleDeckIngest(
     return;
   }
 
-  const result = await repo.upsertDeckDefinitions(parsed as DeckDefinitionSubmission, config.now(), sourceOverride);
+  const submission = parsed as DeckDefinitionSubmission;
+  // Archived rules we could not check (an algorithm newer than this service, say)
+  // are still stored — but the operator needs to know telemetry is behind.
+  for (const notice of deckRulesNotices(submission)) {
+    console.warn(`[decks] ${notice}`);
+  }
+
+  const result = await repo.upsertDeckDefinitions(submission, config.now(), sourceOverride);
   sendJson(res, 200, { ok: true, upserted: result.upserted });
 }
 

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { normalizeSubmission } from '../ingest/normalize.js';
+import { parseCanonicalDeckRules, type DeckRulesDocument } from '../ingest/deck-rules.js';
 import { wilson } from '../stats/wilson.js';
 import { buildDeckProfile, type CardBucketCounts } from '../stats/profile.js';
 import { countCards, leanFrom } from '../stats/composition.js';
@@ -51,6 +52,42 @@ export interface InvalidIngestArgs {
   errors: string[];
   sourceOverride?: string | null;
   sourceId?: string | null;
+}
+
+export interface DeckRulesArchiveFilter {
+  deckId?: string | null;
+  version?: string | null;
+  /** Fingerprint from a seat's `deck_rules_hash` or a deck's `rules_hash`. */
+  rulesHash?: string | null;
+}
+
+/**
+ * One archived deck definition's rules, keyed by `(deckId, version)` and filed
+ * under `rulesHash`. `rulesCanonical` is the exact string the engine hashed —
+ * the integrity anchor — and `rules` is that same content parsed, so card
+ * values, quantities, effect programs and hero/sidekick stats can be compared
+ * across two versions of one deck without parsing text.
+ */
+export interface DeckRulesArchiveEntry {
+  deckId: string;
+  version: string;
+  rulesHash: string | null;
+  rulesCanonical: string | null;
+  rules: DeckRulesDocument | null;
+  name: string | null;
+  contentVersion: string | null;
+  receivedAt: string;
+}
+
+interface DeckRulesArchiveRow {
+  deck_id: string;
+  version: string;
+  rules_hash: string | null;
+  rules_canonical: string | null;
+  rules: DeckRulesDocument | null;
+  name: string | null;
+  content_version: string | null;
+  received_at: Date;
 }
 
 export interface DeckStatsFilters {
@@ -159,16 +196,21 @@ export class PgTelemetryRepository {
       await client.query('BEGIN');
       for (const deck of payload.decks) {
         const counts = countCards(deck.cards);
+        // The canonical string is the archive; `rules` is its parsed convenience
+        // form, so an unparseable (e.g. future-algorithm) string still stores.
+        const rules = deck.rulesCanonical === undefined ? null : parseCanonicalDeckRules(deck.rulesCanonical);
         await client.query(
           `
             INSERT INTO deck_definitions (
-              deck_id, version, rules_hash, name, tier, source, content_version,
+              deck_id, version, rules_hash, rules_canonical, rules, name, tier, source, content_version,
               card_count, attack_count, defense_count, versatile_count, scheme_count,
               attack_value, defense_value, cards, received_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18)
             ON CONFLICT (deck_id, version) DO UPDATE SET
               rules_hash = EXCLUDED.rules_hash,
+              rules_canonical = EXCLUDED.rules_canonical,
+              rules = EXCLUDED.rules,
               name = EXCLUDED.name,
               tier = EXCLUDED.tier,
               source = EXCLUDED.source,
@@ -187,6 +229,8 @@ export class PgTelemetryRepository {
             deck.deckId,
             deck.version,
             deck.rulesHash ?? null,
+            deck.rulesCanonical ?? null,
+            rules === null ? null : JSON.stringify(rules),
             deck.name ?? null,
             deck.tier ?? null,
             source,
@@ -211,6 +255,38 @@ export class PgTelemetryRepository {
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * Archived deck rules, for fingerprint -> rules lookup and version diffing.
+   *
+   * Deliberately separate from the dashboard's composition query: the canonical
+   * string is several kilobytes per deck and no dashboard view needs it, so it is
+   * fetched only when something actually wants the rules. Filters are ANDed and
+   * all optional; rows come back newest-first within a deck.
+   */
+  async deckRulesArchive(filter: DeckRulesArchiveFilter = {}): Promise<DeckRulesArchiveEntry[]> {
+    const rows = await this.pool.query<DeckRulesArchiveRow>(
+      `
+        SELECT deck_id, version, rules_hash, rules_canonical, rules, name, content_version, received_at
+        FROM deck_definitions
+        WHERE ($1::text IS NULL OR deck_id = $1)
+          AND ($2::text IS NULL OR version = $2)
+          AND ($3::text IS NULL OR rules_hash = $3)
+        ORDER BY deck_id ASC, received_at DESC
+      `,
+      [filter.deckId ?? null, filter.version ?? null, filter.rulesHash ?? null],
+    );
+    return rows.rows.map((row) => ({
+      deckId: row.deck_id,
+      version: row.version,
+      rulesHash: row.rules_hash,
+      rulesCanonical: row.rules_canonical,
+      rules: row.rules,
+      name: row.name,
+      contentVersion: row.content_version,
+      receivedAt: row.received_at.toISOString(),
+    }));
   }
 
   async deckStats(filters: DeckStatsFilters): Promise<DeckStatsResponse> {

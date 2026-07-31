@@ -37,6 +37,12 @@
           "pattern": "^fp[0-9]+-[0-9a-f]{8,64}$",
           "examples": ["fp1-9c3a17b40e21"]
         },
+        "rulesCanonical": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The exact canonical rules string that `rulesHash` digests, as produced by the engine's canonicalDeckRules(hero, cards). Archived verbatim so two fingerprints can be diffed rather than only distinguished. When present alongside a rulesHash whose algorithm this service knows, ingest recomputes the digest over these exact bytes and rejects a mismatch; an unknown algorithm prefix is stored unverified.",
+          "examples": ["fp1|hero={\"health\":18,\"id\":\"king-kong\"}|cards=[{\"quantity\":12,\"type\":\"attack\",\"value\":5}]"]
+        },
         "name": { "type": "string" },
         "tier": { "type": "string" },
         "cards": {
