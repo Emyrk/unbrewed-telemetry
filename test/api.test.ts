@@ -1,4 +1,5 @@
 import { createServer, type Server } from 'node:http';
+import { readFile } from 'node:fs/promises';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { migrate } from '../src/db/migrate.js';
@@ -1074,6 +1075,116 @@ describeDb('telemetry api with postgres', () => {
     expect(bossFormat?.bosses).toContainEqual(expect.objectContaining({ boss: 'marrow-king', winRate: 1 }));
   });
 
+  it('adds the deck rules hash columns additively and is safe to re-apply', async () => {
+    // migrate() already ran 001..011 in beforeAll; re-running the file by hand
+    // must be a no-op, the way an operator would retry a half-finished deploy.
+    const sql = await readFile(new URL('../migrations/011_deck_rules_hash.sql', import.meta.url), 'utf8');
+    await pool.query(sql);
+    await pool.query(sql);
+
+    const columns = await pool.query<{ table_name: string; column_name: string; data_type: string; is_nullable: string; column_default: string | null }>(
+      `SELECT table_name, column_name, data_type, is_nullable, column_default
+       FROM information_schema.columns
+       WHERE (table_name = 'game_seats' AND column_name = 'deck_rules_hash')
+          OR (table_name = 'deck_definitions' AND column_name = 'rules_hash')
+       ORDER BY table_name`,
+    );
+    expect(columns.rows).toEqual([
+      { table_name: 'deck_definitions', column_name: 'rules_hash', data_type: 'text', is_nullable: 'YES', column_default: null },
+      { table_name: 'game_seats', column_name: 'deck_rules_hash', data_type: 'text', is_nullable: 'YES', column_default: null },
+    ]);
+
+    const index = await pool.query<{ indexdef: string }>(
+      `SELECT indexdef FROM pg_indexes WHERE indexname = 'game_seats_deck_rules_hash_idx'`,
+    );
+    expect(index.rowCount).toBe(1);
+
+    const rerun = await migrate(pool);
+    expect(rerun.applied).toEqual([]);
+    expect(rerun.skipped).toContain('011_deck_rules_hash.sql');
+  });
+
+  it('persists the deck rules fingerprint per seat and leaves it null without one', async () => {
+    const withHash = sampleGame({ gameId: 'rules-hash-001', stateHash: 'rules-hash-state-001' });
+    withHash.teams[0]!.seats[0]!.deckRulesHash = 'fp1-9c3a17b40e21';
+    expect((await postGame(baseUrl, secret, withHash, 'rules-hash-001')).status).toBe(201);
+
+    const stored = await pool.query<{ seat_index: number; team_index: number; deck: string; deck_rules_hash: string | null }>(
+      `SELECT team_index, seat_index, deck, deck_rules_hash
+       FROM game_seats WHERE game_id = $1 ORDER BY team_index`,
+      ['rules-hash-001'],
+    );
+    expect(stored.rows).toEqual([
+      { team_index: 0, seat_index: 0, deck: 'king-kong@0.1.0', deck_rules_hash: 'fp1-9c3a17b40e21' },
+      { team_index: 1, seat_index: 0, deck: 'the-mandalorian@0.1.0', deck_rules_hash: null },
+    ]);
+
+    // A producer that has not enabled the flag stores exactly as before.
+    const without = sampleGame({ gameId: 'rules-hash-002', stateHash: 'rules-hash-state-002' });
+    expect((await postGame(baseUrl, secret, without, 'rules-hash-002')).status).toBe(201);
+    const legacy = await pool.query<{ deck_rules_hash: string | null; deck_version: string }>(
+      `SELECT deck_rules_hash, deck_version FROM game_seats WHERE game_id = $1 ORDER BY team_index`,
+      ['rules-hash-002'],
+    );
+    expect(legacy.rows).toEqual([
+      { deck_rules_hash: null, deck_version: '0.1.0' },
+      { deck_rules_hash: null, deck_version: '0.1.0' },
+    ]);
+
+    // Both games still render on the read paths that existed before this column.
+    const recent = await fetch(`${baseUrl}/v1/stats/recent?limit=10`);
+    const recentJson = await recent.json() as {
+      games: { gameId: string; teams: { seats: { deck: string; deckRulesHash: string | null }[] }[] }[];
+    };
+    const hashed = recentJson.games.find((game) => game.gameId === 'rules-hash-001');
+    const plain = recentJson.games.find((game) => game.gameId === 'rules-hash-002');
+    expect(hashed?.teams[0]?.seats[0]?.deckRulesHash).toBe('fp1-9c3a17b40e21');
+    expect(hashed?.teams[1]?.seats[0]?.deckRulesHash).toBeNull();
+    expect(plain?.teams[0]?.seats[0]).toMatchObject({ deck: 'king-kong@0.1.0', deckRulesHash: null });
+  });
+
+  it('rejects a malformed deck rules fingerprint without storing the game', async () => {
+    const game = sampleGame({ gameId: 'rules-hash-bad-001', stateHash: 'rules-hash-bad-state-001' });
+    game.teams[0]!.seats[0]!.deckRulesHash = 'sha256-nothex';
+
+    const response = await postGame(baseUrl, secret, game, 'rules-hash-bad-001');
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ ok: false, code: 'VALIDATION_FAILED' });
+
+    const seats = await pool.query(`SELECT 1 FROM game_seats WHERE game_id = $1`, ['rules-hash-bad-001']);
+    expect(seats.rowCount).toBe(0);
+  });
+
+  it('upserts deck definitions with and without a rules fingerprint', async () => {
+    // Pushed the way producers push today: no rulesHash at all.
+    expect((await postDecks(baseUrl, secret, sampleDeckBatch())).status).toBe(200);
+    const before = await pool.query<{ rules_hash: string | null; card_count: number }>(
+      `SELECT rules_hash, card_count FROM deck_definitions WHERE deck_id = $1 AND version = $2`,
+      ['king-kong', '0.1.0'],
+    );
+    expect(before.rows[0]).toEqual({ rules_hash: null, card_count: 30 });
+
+    // Re-pushing the same version with a fingerprint adopts it.
+    expect((await postDecks(baseUrl, secret, sampleDeckBatch({ rulesHash: 'fp1-9c3a17b40e21' }))).status).toBe(200);
+    const after = await pool.query<{ rules_hash: string | null; card_count: number }>(
+      `SELECT rules_hash, card_count FROM deck_definitions WHERE deck_id = $1 AND version = $2`,
+      ['king-kong', '0.1.0'],
+    );
+    expect(after.rows[0]).toEqual({ rules_hash: 'fp1-9c3a17b40e21', card_count: 30 });
+
+    await postGame(baseUrl, secret, sampleGame({ gameId: 'rules-comp-001', stateHash: 'rules-comp-state-001' }), 'rules-comp-001');
+    const dash = await fetch(`${baseUrl}/v1/stats/dashboard?format=duel&pilots=bot:hard`);
+    const dashJson = await dash.json() as { decks: { deck: string; composition: { rulesHash: string | null } | null }[] };
+    expect(dashJson.decks.find((deck) => deck.deck === 'king-kong@0.1.0')?.composition)
+      .toMatchObject({ rulesHash: 'fp1-9c3a17b40e21' });
+  });
+
+  it('rejects a deck definition with a malformed rules fingerprint', async () => {
+    const response = await postDecks(baseUrl, secret, sampleDeckBatch({ rulesHash: 'fp1-XYZ' }));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ ok: false, code: 'VALIDATION_FAILED' });
+  });
+
   it('requires a signature to push deck definitions', async () => {
     const response = await fetch(`${baseUrl}/v1/decks`, {
       method: 'POST',
@@ -1316,7 +1427,7 @@ describeDb('telemetry api with postgres', () => {
   });
 });
 
-function sampleDeckBatch(overrides: { version?: string } = {}): unknown {
+function sampleDeckBatch(overrides: { version?: string; rulesHash?: string } = {}): unknown {
   return {
     schemaVersion: 1,
     source: 'test',
@@ -1325,6 +1436,7 @@ function sampleDeckBatch(overrides: { version?: string } = {}): unknown {
       {
         deckId: 'king-kong',
         version: overrides.version ?? '0.1.0',
+        ...(overrides.rulesHash === undefined ? {} : { rulesHash: overrides.rulesHash }),
         name: 'King Kong',
         tier: 'community',
         cards: [

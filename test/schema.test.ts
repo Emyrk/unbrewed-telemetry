@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { validateGameSubmission } from '../src/ingest/schema.js';
+import { validateDeckDefinitions } from '../src/ingest/deck-schema.js';
 import { normalizeSubmission } from '../src/ingest/normalize.js';
 import { wilson } from '../src/stats/wilson.js';
 import { sampleBotExecution, sampleGame } from './fixtures.js';
@@ -123,6 +124,79 @@ describe('game submission schema', () => {
     expect(normalized.cards).toHaveLength(0);
   });
 });
+
+describe('seat deck rules hash', () => {
+  it('stays optional: a submission without it validates and normalizes to null', () => {
+    const game = sampleGame();
+    expect(validateGameSubmission(game)).toEqual({ ok: true, errors: [] });
+    const normalized = normalizeSubmission(game, 'idem-1');
+    expect(normalized.seats.map((seat) => seat.deckRulesHash)).toEqual([null, null]);
+  });
+
+  it('accepts and passes through a rules fingerprint per seat', () => {
+    const game = sampleGame();
+    game.teams[0]!.seats[0]!.deckRulesHash = 'fp1-9c3a17b40e21';
+
+    expect(validateGameSubmission(game)).toEqual({ ok: true, errors: [] });
+    const normalized = normalizeSubmission(game, 'idem-1');
+    expect(normalized.seats[0]).toMatchObject({ deckId: 'king-kong', deckRulesHash: 'fp1-9c3a17b40e21' });
+    // Sibling seats are untouched by one seat reporting a hash.
+    expect(normalized.seats[1]!.deckRulesHash).toBeNull();
+  });
+
+  it('accepts a future algorithm-version prefix without a schema change', () => {
+    const game = sampleGame();
+    game.teams[0]!.seats[0]!.deckRulesHash = 'fp2-0123456789abcdef0123';
+    expect(validateGameSubmission(game)).toEqual({ ok: true, errors: [] });
+  });
+
+  it.each([
+    ['wrong prefix', 'sha256-9c3a17b40e21'],
+    ['no version in prefix', 'fp-9c3a17b40e21'],
+    ['non-hex digest', 'fp1-zzzzzzzzzzzz'],
+    ['uppercase digest', 'fp1-9C3A17B40E21'],
+    ['digest too short', 'fp1-9c3a17b'],
+    ['digest too long', `fp1-${'a'.repeat(65)}`],
+    ['empty', ''],
+  ])('rejects a malformed fingerprint (%s)', (_label, value) => {
+    const game = sampleGame();
+    game.teams[0]!.seats[0]!.deckRulesHash = value;
+
+    const result = validateGameSubmission(game);
+    expect(result.ok).toBe(false);
+    expect(result.errors.join('\n')).toContain('/teams/0/seats/0/deckRulesHash');
+  });
+});
+
+describe('deck definition rules hash', () => {
+  it('stays optional: a batch without it still validates', () => {
+    expect(validateDeckDefinitions(deckBatch())).toEqual({ ok: true, errors: [] });
+  });
+
+  it('accepts a rules fingerprint, including a future algorithm version', () => {
+    expect(validateDeckDefinitions(deckBatch('fp1-9c3a17b40e21'))).toEqual({ ok: true, errors: [] });
+    expect(validateDeckDefinitions(deckBatch('fp2-0123456789abcdef'))).toEqual({ ok: true, errors: [] });
+  });
+
+  it('rejects a malformed rules fingerprint', () => {
+    const result = validateDeckDefinitions(deckBatch('nope-123'));
+    expect(result.ok).toBe(false);
+    expect(result.errors.join('\n')).toContain('/decks/0/rulesHash');
+  });
+});
+
+function deckBatch(rulesHash?: string): unknown {
+  return {
+    schemaVersion: 1,
+    source: 'test',
+    decks: [{
+      deckId: 'king-kong',
+      version: '0.1.0',
+      ...(rulesHash === undefined ? {} : { rulesHash }),
+      cards: [{ type: 'attack', value: 5, quantity: 12 }],
+    }],
+  };
+}
 
 describe('wilson interval', () => {
   it('handles empty samples', () => {

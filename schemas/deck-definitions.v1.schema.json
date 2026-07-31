@@ -31,6 +31,12 @@
       "properties": {
         "deckId": { "type": "string", "minLength": 1 },
         "version": { "type": "string", "minLength": 1 },
+        "rulesHash": {
+          "type": "string",
+          "description": "Content-derived fingerprint of this deck's gameplay rules, '<algorithm>-<hex digest>' (for example fp1-9c3a17b40e21). Moves when card values, quantities, effect programs, hero/sidekick stats, or matched card titles move; stable across art, flavor, name, and tier changes. Optional: decks pushed without it keep their hand-set version as the only identity.",
+          "pattern": "^fp[0-9]+-[0-9a-f]{8,64}$",
+          "examples": ["fp1-9c3a17b40e21"]
+        },
         "name": { "type": "string" },
         "tier": { "type": "string" },
         "cards": {

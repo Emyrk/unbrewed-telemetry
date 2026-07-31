@@ -111,9 +111,41 @@ stores it as JSONB on the normalized seat while preserving the original game
 payload. Deploy this ingest change before producers begin sending the field,
 because the v1 schema rejects unknown properties.
 
+#### Deck rules fingerprint
+
+Seats may include an optional `deckRulesHash`: a content-derived fingerprint of
+the deck's gameplay rules, formatted `<algorithm>-<hex digest>`.
+
+```json
+{
+  "deck": "hollow-oak-spice@0.10.0",
+  "pilot": "bot:hard",
+  "deckRulesHash": "fp1-9c3a17b40e21"
+}
+```
+
+It moves when card values, quantities, effect programs, hero/sidekick stats, or
+matched card titles move, and stays put across art, flavor, display name, and
+tier changes. That is what `deck@version` cannot do: the version is a single
+hand-set `CONTENT_VERSION` shared by every deck, so two different balances can
+silently share a label. Storing the fingerprint alongside the version makes each
+row self-describing and lets deck balancing attribute a stat change to a
+specific rules change.
+
+The algorithm version lives in the prefix and is not pinned by the schema, so a
+future `fp2-` canonicalization needs no schema change and cannot collide with
+`fp1-` digests. The field is optional and nullable end to end: submissions
+without it store `NULL` and behave exactly as before. Deploy this ingest change
+and run the migration before producers begin sending the field, because the v1
+schema rejects unknown properties.
+
 ### `POST /v1/decks`
 
 Upserts versioned deck definitions. Use a named bearer credential with `decks:submit` scope. The credential's source name overrides the payload source.
+
+Each deck may carry the same fingerprint as `rulesHash`, in the same format and
+with the same optionality as the seat-level `deckRulesHash` above. It is stored
+on `deck_definitions.rules_hash` and surfaced on the deck composition read path.
 
 ### Admin control plane
 
