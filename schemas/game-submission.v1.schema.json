@@ -157,11 +157,18 @@
         "botDifficulty": { "type": "string" },
         "botVersion": { "type": "string" },
         "botExecution": { "$ref": "#/$defs/botExecution" },
+        "deckRulesHash": { "$ref": "#/$defs/rulesHash" },
         "finalHealth": { "type": "integer", "minimum": 0 },
         "finalDeckCount": { "type": "integer", "minimum": 0 },
         "finalHandCount": { "type": "integer", "minimum": 0 },
         "finalDiscardCount": { "type": "integer", "minimum": 0 }
       }
+    },
+    "rulesHash": {
+      "type": "string",
+      "description": "Content-derived fingerprint of the deck's gameplay rules, '<algorithm>-<hex digest>' (for example fp1-9c3a17b40e21). Moves when card values, quantities, effect programs, hero/sidekick stats, or matched card titles move; stable across art, flavor, display name, and tier changes. Distinct from the hand-set deck version in deck.",
+      "pattern": "^fp[0-9]+-[0-9a-f]{8,64}$",
+      "examples": ["fp1-9c3a17b40e21"]
     },
     "botExecution": {
       "type": "object",

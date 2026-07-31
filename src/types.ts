@@ -70,6 +70,8 @@ export interface SeatSubmission {
   botDifficulty?: string;
   botVersion?: string;
   botExecution?: BotExecutionSubmission;
+  /** Content-derived fingerprint of the deck's rules, `fp<n>-<hex>`. See DeckDefinitionSubmission.decks[].rulesHash. */
+  deckRulesHash?: string;
   finalHealth?: number;
   finalDeckCount?: number;
   finalHandCount?: number;
@@ -162,6 +164,7 @@ export interface NormalizedSeat {
   botDifficulty: string | null;
   botVersion: string | null;
   botExecution: BotExecutionSubmission | null;
+  deckRulesHash: string | null;
   playerId: string | null;
   firstPlayer: boolean;
   won: boolean;
@@ -212,6 +215,12 @@ export interface DeckDefinitionSubmission {
   decks: {
     deckId: string;
     version: string;
+    /**
+     * Content-derived fingerprint of the deck's gameplay rules, `fp<n>-<hex>`.
+     * Unlike `version` (hand-set, shared across decks) it moves exactly when the
+     * rules move, which is what makes deck-balancing comparisons attributable.
+     */
+    rulesHash?: string;
     name?: string;
     tier?: string;
     cards: DeckDefinitionCard[];
@@ -225,6 +234,8 @@ export interface DeckDefinitionSubmission {
  */
 export interface DeckComposition {
   version: string;
+  /** Rules fingerprint from the pushed registry row, null for decks pushed before/without it. */
+  rulesHash: string | null;
   name: string | null;
   tier: string | null;
   cardCount: number;
@@ -485,6 +496,8 @@ export interface RecentGameSeat {
   seatIndex: number;
   deck: string;
   deckId: string;
+  /** Rules fingerprint reported by the producer for this seat, null for seats submitted without it. */
+  deckRulesHash: string | null;
   heroName: string | null;
   pilot: string;
   pilotKind: 'human' | 'bot' | 'unknown';

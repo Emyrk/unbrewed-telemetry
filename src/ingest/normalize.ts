@@ -86,6 +86,7 @@ export function normalizeSubmission(
         botDifficulty: nullableString(seat.botDifficulty),
         botVersion: nullableString(seat.botVersion),
         botExecution: seat.botExecution ?? null,
+        deckRulesHash: seat.deckRulesHash ?? null,
         playerId: nullableString(seat.playerId),
         firstPlayer: submission.firstPlayerTeam === teamIndex,
         won: winnerTeam === teamIndex,

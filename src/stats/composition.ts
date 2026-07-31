@@ -42,11 +42,18 @@ export function leanFrom(attackValue: number, defenseValue: number): DeckComposi
 }
 
 export function buildComposition(
-  card: { version: string; name: string | null; tier: string | null; counts: CompositionCounts },
+  card: {
+    version: string;
+    name: string | null;
+    tier: string | null;
+    counts: CompositionCounts;
+    rulesHash?: string | null;
+  },
 ): DeckComposition {
   const { counts } = card;
   return {
     version: card.version,
+    rulesHash: card.rulesHash ?? null,
     name: card.name,
     tier: card.tier,
     cardCount: counts.cardCount,

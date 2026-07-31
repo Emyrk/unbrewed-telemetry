@@ -162,12 +162,13 @@ export class PgTelemetryRepository {
         await client.query(
           `
             INSERT INTO deck_definitions (
-              deck_id, version, name, tier, source, content_version,
+              deck_id, version, rules_hash, name, tier, source, content_version,
               card_count, attack_count, defense_count, versatile_count, scheme_count,
               attack_value, defense_value, cards, received_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16)
             ON CONFLICT (deck_id, version) DO UPDATE SET
+              rules_hash = EXCLUDED.rules_hash,
               name = EXCLUDED.name,
               tier = EXCLUDED.tier,
               source = EXCLUDED.source,
@@ -185,6 +186,7 @@ export class PgTelemetryRepository {
           [
             deck.deckId,
             deck.version,
+            deck.rulesHash ?? null,
             deck.name ?? null,
             deck.tier ?? null,
             source,
@@ -771,6 +773,7 @@ export class PgTelemetryRepository {
       role: string | null;
       deck: string;
       deck_id: string;
+      deck_rules_hash: string | null;
       hero_name: string | null;
       pilot: string;
       pilot_kind: 'human' | 'bot' | 'unknown';
@@ -778,7 +781,7 @@ export class PgTelemetryRepository {
     }>(
       `
         SELECT s.game_id, s.team_index, s.seat_index, t.role,
-               s.deck, s.deck_id, s.hero_name, s.pilot, s.pilot_kind, s.won
+               s.deck, s.deck_id, s.deck_rules_hash, s.hero_name, s.pilot, s.pilot_kind, s.won
         FROM game_seats s
         LEFT JOIN game_teams t ON t.game_id = s.game_id AND t.team_index = s.team_index
         WHERE s.game_id = ANY($1)
@@ -801,6 +804,7 @@ export class PgTelemetryRepository {
         seatIndex: row.seat_index,
         deck: row.deck,
         deckId: row.deck_id,
+        deckRulesHash: row.deck_rules_hash,
         heroName: row.hero_name,
         pilot: row.pilot,
         pilotKind: row.pilot_kind,
@@ -1055,7 +1059,7 @@ export class PgTelemetryRepository {
   private async deckCompositionMap(): Promise<Map<string, DeckCompositionEntry>> {
     const rows = await this.pool.query<DeckDefinitionRow>(
       `
-        SELECT deck_id, version, name, tier, card_count, attack_count, defense_count,
+        SELECT deck_id, version, rules_hash, name, tier, card_count, attack_count, defense_count,
                versatile_count, scheme_count, attack_value, defense_value
         FROM deck_definitions
         ORDER BY deck_id ASC, received_at DESC
@@ -2092,6 +2096,7 @@ export interface AdminDeckList {
 interface DeckDefinitionRow {
   deck_id: string;
   version: string;
+  rules_hash: string | null;
   name: string | null;
   tier: string | null;
   card_count: number;
@@ -2114,6 +2119,7 @@ function compositionFromRow(row: DeckDefinitionRow): DeckComposition {
   const cardCount = Number(row.card_count);
   return {
     version: row.version,
+    rulesHash: row.rules_hash,
     name: row.name,
     tier: row.tier,
     cardCount,
@@ -2375,14 +2381,14 @@ async function insertSeats(client: PoolClient, seats: NormalizedSeat[]): Promise
         INSERT INTO game_seats (
           game_id, team_index, seat_index, runtime_player_id, deck, deck_id, deck_version,
           hero_id, hero_name, pilot, pilot_kind, bot_id, bot_difficulty, bot_version,
-          bot_execution, player_id, first_player, won, final_health, final_deck_count,
+          bot_execution, deck_rules_hash, player_id, first_player, won, final_health, final_deck_count,
           final_hand_count, final_discard_count
         )
         VALUES (
           $1, $2, $3, $4, $5, $6, $7,
           $8, $9, $10, $11, $12, $13, $14,
-          $15::jsonb, $16, $17, $18, $19, $20,
-          $21, $22
+          $15::jsonb, $16, $17, $18, $19, $20, $21,
+          $22, $23
         )
       `,
       [
@@ -2401,6 +2407,7 @@ async function insertSeats(client: PoolClient, seats: NormalizedSeat[]): Promise
         seat.botDifficulty,
         seat.botVersion,
         seat.botExecution === null ? null : JSON.stringify(seat.botExecution),
+        seat.deckRulesHash,
         seat.playerId,
         seat.firstPlayer,
         seat.won,
