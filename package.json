@@ -15,7 +15,8 @@
     "db:compose:down": "docker compose down -v",
     "submit:sample": "tsx scripts/submit-sample.mts",
     "sim:seed-credentials": "tsx scripts/seed-sim-credentials.mts",
-    "sim:seed-campaign": "tsx scripts/seed-sim-campaign.mts"
+    "sim:seed-campaign": "tsx scripts/seed-sim-campaign.mts",
+    "sim:seed-deck-tuning": "tsx scripts/seed-deck-tuning-campaign.mts"
   },
   "dependencies": {
     "ajv": "^8.17.1",

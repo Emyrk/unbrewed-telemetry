@@ -314,6 +314,8 @@ npm start
 
 `npm run sim:seed-credentials -- <host> [<host> ...]` provisions per-host sim-fleet bearer credentials **without** the Discord admin UI or Railway env access (for #248). It creates the `sim-fleet` telemetry source and one credential per host (scopes `sim:claim`, `sim:complete`, `games:submit`) directly in the DB, and writes the plaintext `ubk_…` keys to `sim-credentials.local.json` (gitignored, mode 600) for out-of-band distribution. Only scrypt hashes live in Postgres; **no secret ever touches the repo, a PR, or an issue.**
 
+`npm run sim:seed-campaign` and `npm run sim:seed-deck-tuning` bootstrap control-plane campaigns + jobs against `DATABASE_URL` without the Discord admin UI. The first seeds the fixed ISMCTS **mission** plan (grid/arm steps); the second seeds a **deck-tuning** round — one campaign per candidate deck version against a shared opponent pool plus a mirror, seeded so candidates are seed-matched game-for-game (paired comparison), tiered ahead of the mission so a dormant arm cannot starve it. Both are idempotent (top-up only; never rewrite live jobs, never re-tier an existing campaign). Dials are documented in each script's header; the plan halves are pure and unit-tested (`scripts/lib/*-plan.mts`).
+
 Other useful commands:
 
 ```sh

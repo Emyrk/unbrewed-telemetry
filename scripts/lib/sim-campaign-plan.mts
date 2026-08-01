@@ -24,6 +24,10 @@ export interface PlanStep {
   spec: Record<string, unknown>;
   /** Lower tiers are claimed first; see `priority_tier` in migration 008. */
   priorityTier: number;
+  /** `sim_campaigns.description`; omitted → the ISMCTS-mission default. */
+  description?: string;
+  /** `sim_campaigns.created_by`; omitted → 'seed-sim-campaign'. */
+  createdBy?: string;
 }
 
 export interface Plan {
