@@ -38,6 +38,7 @@ export interface SeedResult {
  */
 async function upsertCampaign(
   pool: Pool, name: string, spec: unknown, baseSeed: bigint, totalGames: number, priorityTier: number,
+  labels: { description: string; createdBy: string },
 ): Promise<{ id: string; created: boolean; tier: number }> {
   const existing = await pool.query<{ id: string; priority_tier: number }>(
     'SELECT id, priority_tier FROM sim_campaigns WHERE name = $1 ORDER BY created_at DESC LIMIT 1', [name],
@@ -47,8 +48,8 @@ async function upsertCampaign(
   const id = randomUUID();
   await pool.query(
     `INSERT INTO sim_campaigns (id, name, description, spec, base_seed, total_games, created_by, priority_tier, priority_position)
-     VALUES ($1, $2, $3, $4::jsonb, $5, $6, 'seed-sim-campaign', $7, 0)`,
-    [id, name, `ISMCTS mission — ${name} (#248)`, JSON.stringify(spec), baseSeed.toString(), totalGames, priorityTier],
+     VALUES ($1, $2, $3, $4::jsonb, $5, $6, $8, $7, 0)`,
+    [id, name, labels.description, JSON.stringify(spec), baseSeed.toString(), totalGames, priorityTier, labels.createdBy],
   );
   return { id, created: true, tier: priorityTier };
 }
@@ -112,7 +113,12 @@ async function insertJobs(pool: Pool, campaignId: string, jobs: JobRow[]): Promi
 export async function seedCampaigns(pool: Pool, steps: PlanStep[]): Promise<SeedResult[]> {
   const results: SeedResult[] = [];
   for (const s of steps) {
-    const { id, created, tier } = await upsertCampaign(pool, s.name, s.spec, s.baseSeed, s.jobs.length, s.priorityTier);
+    // Defaults reproduce the ISMCTS-mission labels byte-for-byte; only a plan
+    // that opts in (the deck-tuning plan) writes anything else.
+    const { id, created, tier } = await upsertCampaign(pool, s.name, s.spec, s.baseSeed, s.jobs.length, s.priorityTier, {
+      description: s.description ?? `ISMCTS mission — ${s.name} (#248)`,
+      createdBy: s.createdBy ?? 'seed-sim-campaign',
+    });
     const spec = await pool.query(
       'UPDATE sim_campaigns SET spec = $2::jsonb WHERE id = $1 AND spec IS DISTINCT FROM $2::jsonb',
       [id, JSON.stringify(s.spec)],
