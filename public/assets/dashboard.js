@@ -212,6 +212,12 @@ function allowedPilots() {
 }
 
 function pilotQueryValues() {
+  // The first request has not discovered the full pilot list yet. Query the
+  // known default directly instead of loading every pilot and immediately
+  // repeating the expensive dashboard request after defaults are applied.
+  if (!state.hasExplicitExclusions && allPilots.length === 0) {
+    return [...DEFAULT_INCLUDED_PILOTS];
+  }
   if (!state.excluded.size) return [];
   return includedPilots();
 }
@@ -298,6 +304,7 @@ async function fetchDeckDetail(deck, extra = {}, allowNotFound = false) {
 async function loadDashboard() {
   const requestId = ++dashboardLoadSequence;
   setStatus('Loading telemetry…');
+  const bootstrappingDefaultPilots = !state.hasExplicitExclusions && allPilots.length === 0;
   const params = statsQuery();
   const key = params.toString();
   const cached = dashCache.get(key);
@@ -313,8 +320,10 @@ async function loadDashboard() {
   allPilots = (json.pilots || []).map((row) => row.pilot);
   if (previousPilots.length === 0 && applyDefaultPilotExclusions()) {
     writeStateToUrl();
-    await loadDashboard();
-    return;
+    if (!bootstrappingDefaultPilots) {
+      await loadDashboard();
+      return;
+    }
   }
   if (normalizeScopedPilotSelections()) {
     writeStateToUrl();
