@@ -28,6 +28,9 @@ describe('balance dashboard format and pilot controls', () => {
     expect(script).toContain('function scheduleDashboardLoad()');
     expect(script).toContain('FILTER_DEBOUNCE_MS');
     expect(script).toContain('allPilots = (json.pilots || []).map((row) => row.pilot)');
+    expect(script).toContain('!state.hasExplicitExclusions && allPilots.length === 0');
+    expect(script).toContain('return [...DEFAULT_INCLUDED_PILOTS]');
+    expect(script).toContain('if (!bootstrappingDefaultPilots)');
     expect(script).toContain("params.append('opponentPilotAllowed', pilot)");
     expect(script).toContain('...allowedPilots().map((pilot)');
   });
