@@ -38,6 +38,7 @@ describeDb('telemetry api with postgres', () => {
         discordRedirectUri: '',
         adminDiscordIds: ['admin-123'],
         secureCookies: false,
+        accountsReadToken: '',
       },
     }));
     await new Promise<void>((resolve) => server.listen(0, resolve));

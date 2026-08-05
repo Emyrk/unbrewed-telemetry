@@ -38,6 +38,7 @@ ADMIN_DISCORD_IDS=
 SECURE_COOKIES=0
 TELEMETRY_API_KEY=
 TELEMETRY_SECRET=dev-telemetry-secret-change-me
+ACCOUNTS_READ_TOKEN=
 TELEMETRY_SOURCE=
 ALLOW_UNAUTHENTICATED_INGEST=0
 RUN_MIGRATIONS_ON_START=0
@@ -46,6 +47,8 @@ RUN_MIGRATIONS_ON_START=0
 Discord OAuth protects `/admin`. `ADMIN_DISCORD_IDS` is a comma-separated allowlist of Discord user IDs. Production should set `PUBLIC_URL`, use its matching OAuth callback URL, and leave secure cookies enabled.
 
 Named bearer credentials created by an admin are the primary machine authentication. A credential belongs to a named telemetry source, has explicit scopes, is displayed only once, and is stored as a salted scrypt hash. The service derives submission `source` from the credential rather than trusting the payload. `TELEMETRY_SECRET` remains only for legacy HMAC producer compatibility and may be unset once all producers use bearer keys.
+
+`ACCOUNTS_READ_TOKEN` is a third, deliberately separate credential for the read-only accounts API (`/accounts/players/*`). It is held by exactly one consumer — the unbrewed accounts service — so its blast radius is read-only and it can be rotated without touching any producer or sim worker. Leave it unset and those endpoints refuse every request with `503 AUTH_NOT_CONFIGURED`; they never fail open.
 
 `TELEMETRY_SOURCE` is used only by direct local seed tooling; authenticated HTTP submissions ignore payload-provided source names.
 
@@ -231,6 +234,39 @@ Runner requests use named bearer credentials. A typical runner credential has `s
 - `POST /v1/sim/fail` with `{ "jobId", "leaseToken", "error" }` requeues the game until its maximum attempts, then retains it as a terminal failed job.
 
 Leases are bound to the credential that claimed them. Expired leases are reaped during subsequent claim requests. Successful games retain `campaign_id` and `campaign_game_index` provenance while their transient job rows are deleted.
+
+### Accounts read API
+
+Server-to-server only, authenticated with `Authorization: Bearer $ACCOUNTS_READ_TOKEN`. The unbrewed accounts service (`unbrewed-api`) proxies these for a signed-in player; **never expose them to a browser**. Both endpoints are read-only, exclude sim/campaign games (`games.campaign_id IS NOT NULL` rows never appear), and treat an unknown player id as an empty result rather than a 404 — telemetry does not know the accounts service's user directory, so absence is not an error.
+
+`playerId` is the pseudonymous account uuid the engine stamps on a signed-in player's seat (`game_seats.player_id`).
+
+- `GET /accounts/players/:playerId/games?limit=20&before=<cursor>` returns that player's history newest first:
+
+  ```json
+  { "games": [{ "id": "…", "endedAt": "…", "map": "…", "turns": 17, "durationSeconds": 1234,
+                "endCondition": "hero_defeated", "draw": false,
+                "you": { "heroId": "…", "heroName": "…", "won": true, "finalHealth": 6 },
+                "opponents": [{ "heroId": "…", "heroName": "…", "pilot": "bot:hard", "botDifficulty": "hard" }] }],
+    "nextBefore": "<cursor|null>" }
+  ```
+
+  `you` is the seat whose `player_id` matches; `opponents` is every other seat in the game, teammates included. `limit` defaults to 20 and is capped at 50. `nextBefore` is an **opaque** cursor — pass it back verbatim as `before`; it is `null` when the history is exhausted, and a cursor this API did not issue is a `400 BAD_CURSOR`.
+
+- `GET /accounts/players/:playerId/stats` returns lifetime aggregates:
+
+  ```json
+  { "totalGames": 7, "wins": 4, "losses": 2, "draws": 1,
+    "byHero": [{ "heroId": "king-kong", "heroName": "King Kong", "games": 4, "wins": 3 }],
+    "firstGameAt": "…", "lastGameAt": "…" }
+  ```
+
+  `wins` comes from the player's own seat's `won`, `draws` from `games.draw`, and a loss is exactly "my seat did not win and the game was not a draw". `byHero` groups by the player's own seat hero, ordered by games descending.
+
+```sh
+curl -H "Authorization: Bearer $ACCOUNTS_READ_TOKEN" \
+  'http://localhost:8788/accounts/players/11111111-1111-4111-8111-111111111111/games?limit=20'
+```
 
 ### `GET /v1/stats/bot-execution`
 

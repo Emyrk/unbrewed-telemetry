@@ -33,6 +33,13 @@ export interface Config {
   port: number;
   databaseUrl: string;
   telemetrySecret: string;
+  /**
+   * Shared secret for the server-to-server accounts read API (#52). Empty means
+   * the endpoints are unconfigured and refuse every request; it is deliberately
+   * separate from `telemetrySecret` and from any `ubk_` bearer credential so a
+   * read-only consumer can be rotated on its own.
+   */
+  accountsReadToken: string;
   allowUnauthenticatedIngest: boolean;
   bodyLimitBytes: number;
   runMigrationsOnStart: boolean;
@@ -59,6 +66,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
   const databaseUrl = env.DATABASE_URL;
   if (!databaseUrl) throw new Error('DATABASE_URL is required');
   const telemetrySecret = env.TELEMETRY_SECRET ?? '';
+  const accountsReadToken = env.ACCOUNTS_READ_TOKEN ?? '';
   const allowUnauthenticatedIngest = boolFromEnv(env.ALLOW_UNAUTHENTICATED_INGEST, false);
   const publicUrl = env.PUBLIC_URL?.replace(/\/$/, '') ?? '';
   const discordRedirectUri = env.DISCORD_REDIRECT_URI || (publicUrl ? `${publicUrl}/auth/discord/callback` : '');
@@ -68,6 +76,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     port: intFromEnv(env.PORT, 8788),
     databaseUrl,
     telemetrySecret,
+    accountsReadToken,
     allowUnauthenticatedIngest,
     bodyLimitBytes: intFromEnv(env.MAX_BODY_BYTES, 1024 * 1024),
     runMigrationsOnStart: boolFromEnv(env.RUN_MIGRATIONS_ON_START, false),

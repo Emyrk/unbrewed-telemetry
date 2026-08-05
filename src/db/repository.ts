@@ -5,6 +5,13 @@ import { parseCanonicalDeckRules, type DeckRulesDocument } from '../ingest/deck-
 import { wilson } from '../stats/wilson.js';
 import { buildDeckProfile, type CardBucketCounts } from '../stats/profile.js';
 import { countCards, leanFrom } from '../stats/composition.js';
+import {
+  playerGames,
+  playerStats,
+  type PlayerGamesCursor,
+  type PlayerGamesPage,
+  type PlayerStats,
+} from './accounts.js';
 import type {
   BotExecutionStatsResponse,
   CardContextBucket,
@@ -110,6 +117,19 @@ export class PgTelemetryRepository {
 
   async ping(): Promise<void> {
     await this.pool.query('SELECT 1');
+  }
+
+  /** Accounts read API (#52): one page of a player's own game history. */
+  async playerGames(
+    playerId: string,
+    options: { limit: number; before: PlayerGamesCursor | null },
+  ): Promise<PlayerGamesPage> {
+    return playerGames(this.pool, playerId, options);
+  }
+
+  /** Accounts read API (#52): lifetime aggregates for one player. */
+  async playerStats(playerId: string): Promise<PlayerStats> {
+    return playerStats(this.pool, playerId);
   }
 
   async ingestValid(args: IngestArgs): Promise<IngestCreated | IngestDuplicate> {
