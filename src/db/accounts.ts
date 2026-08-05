@@ -64,6 +64,49 @@ export interface PlayerHeroStat {
   wins: number;
 }
 
+/** A win/loss/draw from the player's point of view. */
+export type PlayerResult = 'W' | 'L' | 'D';
+
+export interface PlayerStreaks {
+  /** Consecutive wins counting back from the most recent game. A draw breaks it. */
+  current: number;
+  /** Longest consecutive-win run anywhere in the player's history. */
+  best: number;
+}
+
+export interface PlayerOpponentHeroStat {
+  heroId: string | null;
+  heroName: string | null;
+  games: number;
+  wins: number;
+}
+
+export interface PlayerMapStat {
+  map: string;
+  games: number;
+  wins: number;
+}
+
+/** games/wins for one slice of the player's history. */
+export interface PlayerSplitStat {
+  games: number;
+  wins: number;
+}
+
+export interface PlayerBotStat extends PlayerSplitStat {
+  difficulty: string;
+}
+
+export interface PlayerOpponentKindStats {
+  human: PlayerSplitStat;
+  bots: PlayerBotStat[];
+}
+
+export interface PlayerFirstPlayerStats {
+  first: PlayerSplitStat;
+  second: PlayerSplitStat;
+}
+
 export interface PlayerStats {
   totalGames: number;
   wins: number;
@@ -72,6 +115,16 @@ export interface PlayerStats {
   byHero: PlayerHeroStat[];
   firstGameAt: string | null;
   lastGameAt: string | null;
+  /** Mean over the games that report one; null when the player has no games. */
+  avgDurationSeconds: number | null;
+  avgTurns: number | null;
+  streaks: PlayerStreaks;
+  /** Last 10 results, newest first. */
+  recentForm: PlayerResult[];
+  byOpponentHero: PlayerOpponentHeroStat[];
+  byMap: PlayerMapStat[];
+  byOpponentKind: PlayerOpponentKindStats;
+  firstPlayer: PlayerFirstPlayerStats;
 }
 
 /** Decoded pagination cursor: the sort key of the last row of the previous page. */
@@ -128,10 +181,39 @@ const ENDED_AT = 'COALESCE(g.ended_at, g.received_at)';
  */
 const PLAYER_SEATS_CTE = `
   SELECT DISTINCT ON (s.game_id)
-         s.game_id, s.team_index, s.seat_index, s.hero_id, s.hero_name, s.won, s.final_health
+         s.game_id, s.team_index, s.seat_index, s.hero_id, s.hero_name, s.won, s.final_health,
+         s.first_player
   FROM game_seats s
   WHERE s.player_id = $1
   ORDER BY s.game_id, s.team_index, s.seat_index
+`;
+
+/**
+ * The player's own seat joined to its game, one row per non-sim game — the base
+ * relation every stats aggregate below is built on. Carries only what those
+ * aggregates need; `won` is always the *player's* seat, never a team roll-up.
+ */
+const PLAYER_GAMES_CTE = `
+  SELECT mine.game_id, mine.team_index, mine.won, mine.first_player,
+         g.draw, g.map, g.turns, g.duration_seconds, g.first_player_team,
+         ${ENDED_AT} AS ended_at
+  FROM mine
+  JOIN games g ON g.id = mine.game_id
+  WHERE g.campaign_id IS NULL
+`;
+
+/**
+ * Seats on a team other than the player's, for every game they played.
+ *
+ * Note this is *narrower* than the `opponents` array of the games feed, which
+ * lists every other seat including teammates: a matchup row is about who the
+ * player played *against*, so a 2v2 contributes two opposing seats and a
+ * teammate contributes none.
+ */
+const OPPOSING_SEATS_CTE = `
+  SELECT p.game_id, p.won, o.hero_id, o.hero_name, o.pilot_kind, o.bot_difficulty
+  FROM played p
+  JOIN game_seats o ON o.game_id = p.game_id AND o.team_index <> p.team_index
 `;
 
 /** One page of a player's game history, newest first. Sim games excluded. */
@@ -245,8 +327,50 @@ export async function playerGames(
   };
 }
 
-/** Lifetime aggregates for one player. Sim games excluded. */
+/** Postgres hands `count(*)` back as a string; every count here is small. */
+function count(value: string | null): number {
+  return value === null ? 0 : Number(value);
+}
+
+/** `avg()` comes back as a numeric string, or null when there is nothing to average. */
+function mean(value: string | null): number | null {
+  return value === null ? null : Number(value);
+}
+
+/**
+ * Lifetime aggregates for one player. Sim games excluded.
+ *
+ * Six independent grouped queries rather than one mega-query: they share the
+ * same two CTEs but group differently, and this endpoint sits behind
+ * unbrewed-api's 60s per-user cache, so the round trips are cheap relative to
+ * the readability. Nothing is aggregated in JS — the queries return one row per
+ * output row.
+ */
 export async function playerStats(pool: Pool, playerId: string): Promise<PlayerStats> {
+  const [totals, overview, streaks, byOpponentHero, byMap, byOpponentKind] = await Promise.all([
+    playerTotals(pool, playerId),
+    playerOverview(pool, playerId),
+    playerStreaks(pool, playerId),
+    playerByOpponentHero(pool, playerId),
+    playerByMap(pool, playerId),
+    playerByOpponentKind(pool, playerId),
+  ]);
+
+  return {
+    ...totals,
+    ...overview,
+    ...streaks,
+    byOpponentHero,
+    byMap,
+    byOpponentKind,
+  };
+}
+
+/** The #52 payload: totals, per-hero rows, and the history's endpoints. */
+async function playerTotals(
+  pool: Pool,
+  playerId: string,
+): Promise<Pick<PlayerStats, 'totalGames' | 'wins' | 'losses' | 'draws' | 'byHero' | 'firstGameAt' | 'lastGameAt'>> {
   // Grouped by the player's *own* seat hero, so a hero row means "games I
   // played as this hero", not "games this hero appeared in".
   //
@@ -286,14 +410,14 @@ export async function playerStats(pool: Pool, playerId: string): Promise<PlayerS
     [playerId],
   );
 
-  const stats: PlayerStats = {
+  const stats = {
     totalGames: 0,
     wins: 0,
     losses: 0,
     draws: 0,
-    byHero: [],
-    firstGameAt: null,
-    lastGameAt: null,
+    byHero: [] as PlayerHeroStat[],
+    firstGameAt: null as string | null,
+    lastGameAt: null as string | null,
   };
 
   for (const row of result.rows) {
@@ -310,5 +434,237 @@ export async function playerStats(pool: Pool, playerId: string): Promise<PlayerS
     if (last && (stats.lastGameAt === null || last > stats.lastGameAt)) stats.lastGameAt = last;
   }
 
+  return stats;
+}
+
+/**
+ * Means and the first/second-player split — one row, always.
+ *
+ * The split is keyed on the player's seat `first_player` flag, which the
+ * normalizer derives from the game's `first_player_team`. When a producer omits
+ * that field every seat flag defaults to false, which would silently pile those
+ * games into `second`; games with no recorded first player are therefore left
+ * out of the split entirely, so `first.games + second.games` can be less than
+ * `totalGames`.
+ */
+async function playerOverview(
+  pool: Pool,
+  playerId: string,
+): Promise<Pick<PlayerStats, 'avgDurationSeconds' | 'avgTurns' | 'firstPlayer'>> {
+  const result = await pool.query<{
+    avg_duration_seconds: string | null;
+    avg_turns: string | null;
+    first_games: string;
+    first_wins: string;
+    second_games: string;
+    second_wins: string;
+  }>(
+    `
+      WITH mine AS (${PLAYER_SEATS_CTE}),
+      played AS (${PLAYER_GAMES_CTE})
+      SELECT round(avg(duration_seconds)::numeric, 1) AS avg_duration_seconds,
+             round(avg(turns)::numeric, 1) AS avg_turns,
+             count(*) FILTER (WHERE first_player_team IS NOT NULL AND first_player) AS first_games,
+             count(*) FILTER (WHERE first_player_team IS NOT NULL AND first_player AND won) AS first_wins,
+             count(*) FILTER (WHERE first_player_team IS NOT NULL AND NOT first_player) AS second_games,
+             count(*) FILTER (WHERE first_player_team IS NOT NULL AND NOT first_player AND won) AS second_wins
+      FROM played
+    `,
+    [playerId],
+  );
+
+  const row = result.rows[0];
+  if (!row) {
+    return {
+      avgDurationSeconds: null,
+      avgTurns: null,
+      firstPlayer: { first: { games: 0, wins: 0 }, second: { games: 0, wins: 0 } },
+    };
+  }
+  return {
+    avgDurationSeconds: mean(row.avg_duration_seconds),
+    avgTurns: mean(row.avg_turns),
+    firstPlayer: {
+      first: { games: count(row.first_games), wins: count(row.first_wins) },
+      second: { games: count(row.second_games), wins: count(row.second_wins) },
+    },
+  };
+}
+
+/**
+ * Win streaks and recent form, both ordered by the same `(ended_at, id)` key the
+ * games feed sorts on so the client's "last 10" matches the first page it shows.
+ *
+ * A win is `won AND NOT draw` — a draw breaks a streak rather than extending it,
+ * and the belt-and-braces `NOT draw` keeps a producer that marked both from
+ * inflating a run. Streaks come out of a gaps-and-islands pass: number the games
+ * in play order, subtract a per-outcome row number to label each consecutive run,
+ * then take the longest run (`best`) and the run that ends on the newest game
+ * (`current`, zero when the newest game was not a win).
+ */
+async function playerStreaks(
+  pool: Pool,
+  playerId: string,
+): Promise<Pick<PlayerStats, 'streaks' | 'recentForm'>> {
+  const result = await pool.query<{
+    current: string;
+    best: string;
+    recent_form: PlayerResult[] | null;
+  }>(
+    `
+      WITH mine AS (${PLAYER_SEATS_CTE}),
+      played AS (${PLAYER_GAMES_CTE}),
+      ordered AS (
+        SELECT (won AND NOT draw) AS is_win,
+               (CASE WHEN draw THEN 'D' WHEN won THEN 'W' ELSE 'L' END)::text AS result,
+               row_number() OVER (ORDER BY ended_at, game_id) AS rn
+        FROM played
+      ),
+      islands AS (
+        SELECT is_win, rn,
+               rn - row_number() OVER (PARTITION BY is_win ORDER BY rn) AS run_id
+        FROM ordered
+      ),
+      runs AS (
+        SELECT run_id, count(*) AS len, max(rn) AS last_rn
+        FROM islands
+        WHERE is_win
+        GROUP BY run_id
+      )
+      SELECT
+        COALESCE((SELECT max(len) FROM runs), 0) AS best,
+        COALESCE(
+          (SELECT max(len) FROM runs WHERE last_rn = (SELECT max(rn) FROM ordered)),
+          0
+        ) AS current,
+        (SELECT array_agg(result ORDER BY rn DESC)
+         FROM (SELECT result, rn FROM ordered ORDER BY rn DESC LIMIT 10) AS recent) AS recent_form
+    `,
+    [playerId],
+  );
+
+  const row = result.rows[0];
+  return {
+    streaks: { current: count(row?.current ?? null), best: count(row?.best ?? null) },
+    recentForm: row?.recent_form ?? [],
+  };
+}
+
+/**
+ * The player's record against each opposing hero, games desc.
+ *
+ * Multi-seat semantics: one row-entry per *opposing seat*, so a 2v2 credits both
+ * enemy heroes with a game (and a win, if the player's seat won). A player's
+ * `byOpponentHero` games therefore sum to more than `totalGames` once they play
+ * team formats — these are matchup counts, not game counts.
+ */
+async function playerByOpponentHero(pool: Pool, playerId: string): Promise<PlayerOpponentHeroStat[]> {
+  const result = await pool.query<{
+    hero_id: string | null;
+    hero_name: string | null;
+    games: string;
+    wins: string;
+  }>(
+    `
+      WITH mine AS (${PLAYER_SEATS_CTE}),
+      played AS (${PLAYER_GAMES_CTE}),
+      opposing AS (${OPPOSING_SEATS_CTE})
+      SELECT hero_id, hero_name,
+             count(*) AS games,
+             count(*) FILTER (WHERE won) AS wins
+      FROM opposing
+      GROUP BY hero_id, hero_name
+      ORDER BY count(*) DESC, hero_id ASC NULLS LAST
+    `,
+    [playerId],
+  );
+
+  return result.rows.map((row) => ({
+    heroId: row.hero_id,
+    heroName: row.hero_name,
+    games: Number(row.games),
+    wins: Number(row.wins),
+  }));
+}
+
+/** Record per map, games desc. `map` is NOT NULL but may be blank; that buckets as "unknown". */
+async function playerByMap(pool: Pool, playerId: string): Promise<PlayerMapStat[]> {
+  const result = await pool.query<{ map: string; games: string; wins: string }>(
+    `
+      WITH mine AS (${PLAYER_SEATS_CTE}),
+      played AS (${PLAYER_GAMES_CTE})
+      SELECT COALESCE(NULLIF(map, ''), 'unknown') AS map,
+             count(*) AS games,
+             count(*) FILTER (WHERE won) AS wins
+      FROM played
+      GROUP BY 1
+      ORDER BY count(*) DESC, 1 ASC
+    `,
+    [playerId],
+  );
+
+  return result.rows.map((row) => ({
+    map: row.map,
+    games: Number(row.games),
+    wins: Number(row.wins),
+  }));
+}
+
+/**
+ * Human vs bot opposition, and per-difficulty rows for the bot side.
+ *
+ * A game counts as a bot game if **any** opposing seat is a bot. Mixed human/bot
+ * opposition only happens when a human drops and a bot takes over, or in a
+ * hand-assembled lobby; classifying such a game as "vs bots" keeps the human
+ * bucket meaning "I beat only people", which is the claim a player cares about.
+ * For the same reason a mixed-difficulty bot side reports its alphabetically
+ * first difficulty — one row per game, deterministically chosen.
+ *
+ * Games with no opposing seat at all (a producer bug: every seat on one team)
+ * appear in neither bucket.
+ */
+async function playerByOpponentKind(pool: Pool, playerId: string): Promise<PlayerOpponentKindStats> {
+  const result = await pool.query<{
+    kind: 'bot' | 'human';
+    difficulty: string | null;
+    games: string;
+    wins: string;
+  }>(
+    `
+      WITH mine AS (${PLAYER_SEATS_CTE}),
+      played AS (${PLAYER_GAMES_CTE}),
+      opposing AS (${OPPOSING_SEATS_CTE}),
+      per_game AS (
+        SELECT game_id,
+               bool_and(won) AS won,
+               bool_or(pilot_kind = 'bot') AS any_bot,
+               min(COALESCE(NULLIF(bot_difficulty, ''), 'unknown'))
+                 FILTER (WHERE pilot_kind = 'bot') AS difficulty
+        FROM opposing
+        GROUP BY game_id
+      )
+      SELECT CASE WHEN any_bot THEN 'bot' ELSE 'human' END AS kind,
+             CASE WHEN any_bot THEN difficulty END AS difficulty,
+             count(*) AS games,
+             count(*) FILTER (WHERE won) AS wins
+      FROM per_game
+      GROUP BY 1, 2
+      ORDER BY count(*) DESC, 2 ASC NULLS LAST
+    `,
+    [playerId],
+  );
+
+  const stats: PlayerOpponentKindStats = { human: { games: 0, wins: 0 }, bots: [] };
+  for (const row of result.rows) {
+    const games = Number(row.games);
+    const wins = Number(row.wins);
+    if (row.kind === 'bot') {
+      stats.bots.push({ difficulty: row.difficulty ?? 'unknown', games, wins });
+    } else {
+      // 'unknown' pilot kinds land here too — not a bot, so not a bot row.
+      stats.human.games += games;
+      stats.human.wins += wins;
+    }
+  }
   return stats;
 }
