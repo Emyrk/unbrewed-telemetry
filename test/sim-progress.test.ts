@@ -27,6 +27,7 @@ const appConfig = (now: Date) => ({
   discordRedirectUri: '',
   adminDiscordIds: [],
   secureCookies: false,
+  accountsReadToken: '',
 });
 
 describeDb('campaign progress view', () => {

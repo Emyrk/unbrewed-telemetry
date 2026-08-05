@@ -19,6 +19,7 @@ const describeDb = databaseUrl ? describe : describe.skip;
 const appConfig = (now: Date) => ({
   telemetrySecret: 'unused', allowUnauthenticatedIngest: true, bodyLimitBytes: 1024 * 1024, now: () => now,
   discordClientId: '', discordClientSecret: '', discordRedirectUri: '', adminDiscordIds: [], secureCookies: false,
+  accountsReadToken: '',
 });
 
 describeDb('public journey', () => {

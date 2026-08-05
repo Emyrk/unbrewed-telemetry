@@ -7,6 +7,8 @@ import type { PgTelemetryRepository } from '../db/repository.js';
 import type { CampaignItemBucket, ControlPlaneRepository, SimJobCheckpoint } from '../db/control-plane-repository.js';
 import type { DeckDefinitionSubmission, GameSubmission, RecentHourlyResponse } from '../types.js';
 import { verifyIngestAuth } from './auth.js';
+import { verifyAccountsReadAuth } from './accounts-auth.js';
+import { clampPlayerGamesLimit, decodePlayerGamesCursor } from '../db/accounts.js';
 import { parseBearer, verifySecret, hasScope, type Scope } from './bearer-auth.js';
 import { serveDashboardAsset } from './static.js';
 
@@ -30,6 +32,8 @@ export interface AppConfig {
   discordRedirectUri: string;
   adminDiscordIds: string[];
   secureCookies: boolean;
+  /** Shared secret for the server-to-server accounts read API (#52). */
+  accountsReadToken: string;
 }
 
 export interface AppDeps {
@@ -145,6 +149,12 @@ async function handleRequest(
 
   if (req.method === 'DELETE' && url.pathname === '/v1/admin/deck') {
     await handleAdminDeleteDeck(req, url, res, repo, cpRepo, config);
+    return;
+  }
+
+  // ---- Accounts read API (server-to-server, ACCOUNTS_READ_TOKEN) ----
+  if (req.method === 'GET' && url.pathname.startsWith('/accounts/players/')) {
+    await handleAccountsPlayerRead(req, url, res, repo, config);
     return;
   }
 
@@ -681,6 +691,68 @@ async function verifyAdminAuth(
  * undefined if bearer was present but invalid/revoked/wrong scope,
  * null if no bearer token was present at all.
  */
+/**
+ * Accounts read API (#52): `/accounts/players/:playerId/{games,stats}`.
+ *
+ * Server-to-server only — unbrewed-api proxies these for a signed-in player and
+ * never lets a browser reach them. Read-only, sim/campaign games excluded, and
+ * an unknown player id is an empty result rather than a 404 (telemetry does not
+ * know the accounts service's user directory, so absence is not an error).
+ */
+async function handleAccountsPlayerRead(
+  req: IncomingMessage,
+  url: URL,
+  res: ServerResponse,
+  repo: PgTelemetryRepository,
+  config: AppConfig,
+): Promise<void> {
+  const auth = verifyAccountsReadAuth(req.headers, config.accountsReadToken);
+  if (!auth.ok) {
+    sendJson(res, auth.status, { ok: false, code: auth.code, message: auth.message });
+    return;
+  }
+
+  // /accounts/players/:playerId/:resource — nothing else lives under this prefix.
+  const segments = url.pathname.split('/').filter(Boolean);
+  if (segments.length !== 4 || segments[0] !== 'accounts' || segments[1] !== 'players') {
+    sendJson(res, 404, { ok: false, code: 'NOT_FOUND', message: 'Not found' });
+    return;
+  }
+  let playerId: string;
+  try {
+    playerId = decodeURIComponent(segments[2]!);
+  } catch {
+    sendJson(res, 400, { ok: false, code: 'BAD_PLAYER_ID', message: 'playerId is not valid percent-encoding' });
+    return;
+  }
+  if (playerId === '') {
+    sendJson(res, 400, { ok: false, code: 'BAD_PLAYER_ID', message: 'playerId is required' });
+    return;
+  }
+
+  const resource = segments[3];
+  if (resource === 'stats') {
+    sendJson(res, 200, { ok: true, ...(await repo.playerStats(playerId)) });
+    return;
+  }
+  if (resource !== 'games') {
+    sendJson(res, 404, { ok: false, code: 'NOT_FOUND', message: 'Not found' });
+    return;
+  }
+
+  const limitParam = url.searchParams.get('limit');
+  const limit = clampPlayerGamesLimit(limitParam === null || limitParam === '' ? null : Number(limitParam));
+
+  const beforeParam = blankToNull(url.searchParams.get('before'));
+  const before = beforeParam === null ? null : decodePlayerGamesCursor(beforeParam);
+  if (beforeParam !== null && before === null) {
+    sendJson(res, 400, { ok: false, code: 'BAD_CURSOR', message: 'before is not a cursor this API issued' });
+    return;
+  }
+
+  sendJson(res, 200, { ok: true, ...(await repo.playerGames(playerId, { limit, before })) });
+}
+
 async function verifyBearerAuth(
   req: IncomingMessage,
   cpRepo: ControlPlaneRepository,
