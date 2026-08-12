@@ -123,6 +123,8 @@ interface StatsBody {
     first: { games: number; wins: number; draws: number };
     second: { games: number; wins: number; draws: number };
   };
+  clutchWins: number;
+  fastestBotWinTurns: number | null;
 }
 
 /** The leaderboard payload unbrewed-api ranks by XP (#56). */
@@ -264,6 +266,8 @@ describeDb('accounts read api', () => {
         first: { games: 0, wins: 0, draws: 0 },
         second: { games: 0, wins: 0, draws: 0 },
       },
+      clutchWins: 0,
+      fastestBotWinTurns: null,
     });
   });
 
@@ -741,6 +745,10 @@ describeDb('accounts read api', () => {
           first: { games: 7, wins: 4, draws: 1 },
           second: { games: 0, wins: 0, draws: 0 },
         },
+        // The bot side is a stamped `hard`, so the four wins are all
+        // qualifying kills — none of them at 1 HP, all of them 10 turns long.
+        clutchWins: 0,
+        fastestBotWinTurns: 10,
       });
     });
   });
@@ -811,6 +819,85 @@ describeDb('accounts read api', () => {
       const board = (await (await read('/accounts/leaderboard')).json()) as LeaderboardBody;
       const row = board.players.find((player) => player.playerId === ALICE);
       expect(row?.byOpponentKind).toEqual((await stats(ALICE)).byOpponentKind);
+    });
+  });
+
+  describe('clutch and speedrun records (unbrewed-api#26)', () => {
+    // One history holding every way a win can and cannot qualify. Every
+    // *excluded* game is deliberately faster than every included one, so a
+    // predicate that leaks shows up as a smaller `fastestBotWinTurns` rather
+    // than as a passing test.
+    const finishes = [
+      // Counts twice over: a 1 HP kill against a stamped expert bot.
+      { id: 'g-brink', pilot: 'bot:ismcts(512,10000ms)', difficulty: 'expert', winner: 0, health: 1, turns: 11 },
+      // Counts for the speed record only — won with health to spare.
+      { id: 'g-quick', pilot: 'bot:mc(64,10000ms)', difficulty: 'hard', winner: 0, health: 9, turns: 7 },
+      // A forfeit is a win in the data; turn-1 forfeits are real rows in prod.
+      { id: 'g-forfeit', pilot: 'bot:ismcts(512,10000ms)', difficulty: 'expert', winner: 0, health: 1, turns: 1, endCondition: 'forfeit' },
+      // The starved-hard era: the label decodes to `hard`, the column is unset.
+      { id: 'g-legacy', pilot: 'bot:mc(64, 400ms)', difficulty: undefined, winner: 0, health: 1, turns: 3 },
+      // Tiers below the bar, stamped or not.
+      { id: 'g-easy', pilot: 'bot:easy', difficulty: 'easy', winner: 0, health: 1, turns: 2 },
+      // A loss and a draw at 1 HP against exactly the right opponent.
+      { id: 'g-loss', pilot: 'bot:ismcts(512,10000ms)', difficulty: 'expert', winner: 1, health: 1, turns: 4 },
+      { id: 'g-draw', pilot: 'bot:ismcts(512,10000ms)', difficulty: 'expert', winner: null, health: 1, turns: 2, draw: true },
+      // A human opponent is not a bot, however close the finish.
+      { id: 'g-human', pilot: 'human', difficulty: undefined, winner: 0, health: 1, turns: 5, humanOpponent: true },
+    ] as const;
+
+    beforeEach(async () => {
+      let day = 1;
+      for (const entry of finishes) {
+        await ingest(game({
+          id: entry.id,
+          endedAt: `2026-10-0${day++}T10:00:00.000Z`,
+          teams: [
+            [{ deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'human', playerId: ALICE, finalHealth: entry.health }],
+            [{
+              deck: 'the-mandalorian@1.0.0',
+              heroId: 'the-mandalorian',
+              pilot: entry.pilot,
+              finalHealth: entry.winner === 1 ? 4 : 0,
+              ...('humanOpponent' in entry && entry.humanOpponent ? { playerId: BOB } : {}),
+              ...(entry.difficulty === undefined ? {} : { botDifficulty: entry.difficulty }),
+            }],
+          ],
+          winner: entry.winner,
+          draw: 'draw' in entry ? entry.draw : false,
+          turns: entry.turns,
+          endCondition: 'endCondition' in entry ? entry.endCondition : 'hero_defeated',
+        }));
+      }
+    });
+
+    it('counts only 1 HP kills against a stamped hard or expert bot', async () => {
+      const body = await stats(ALICE);
+      expect(body.clutchWins).toBe(1);
+      // 7 is the quick win; every disqualified game finished faster than that.
+      expect(body.fastestBotWinTurns).toBe(7);
+    });
+
+    it('starts counting a legacy game the moment the backfill stamps it', async () => {
+      // Emyrk/unbrewed-telemetry#60 fills the column in for current-era labels;
+      // nothing here needs to change when it does.
+      await pool.query(
+        `UPDATE game_seats SET bot_difficulty = 'hard' WHERE game_id = 'g-legacy' AND pilot_kind = 'bot'`,
+      );
+      const body = await stats(ALICE);
+      expect(body.clutchWins).toBe(2);
+      expect(body.fastestBotWinTurns).toBe(3);
+    });
+
+    it('reads a 0-turn producer bug as no record rather than the fastest win ever', async () => {
+      await pool.query(`UPDATE games SET turns = 0 WHERE id = 'g-quick'`);
+      const body = await stats(ALICE);
+      expect(body.fastestBotWinTurns).toBe(11);
+    });
+
+    it('reports no record at all for a player who has never won one', async () => {
+      const body = await stats(BOB);
+      expect(body.clutchWins).toBe(0);
+      expect(body.fastestBotWinTurns).toBeNull();
     });
   });
 

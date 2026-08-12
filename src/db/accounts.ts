@@ -141,6 +141,13 @@ export interface PlayerStats {
   byMap: PlayerMapStat[];
   byOpponentKind: PlayerOpponentKindStats;
   firstPlayer: PlayerFirstPlayerStats;
+  /**
+   * Wins at exactly 1 HP over a hard or expert bot — see
+   * {@link playerBotChallenges} for what "over a hard or expert bot" excludes.
+   */
+  clutchWins: number;
+  /** Fewest `games.turns` in any such win; null when the player has never had one. */
+  fastestBotWinTurns: number | null;
 }
 
 /** Decoded pagination cursor: the sort key of the last row of the previous page. */
@@ -210,8 +217,8 @@ const PLAYER_SEATS_CTE = `
  * aggregates need; `won` is always the *player's* seat, never a team roll-up.
  */
 const PLAYER_GAMES_CTE = `
-  SELECT mine.game_id, mine.team_index, mine.won, mine.first_player,
-         g.draw, g.map, g.turns, g.duration_seconds, g.first_player_team,
+  SELECT mine.game_id, mine.team_index, mine.won, mine.first_player, mine.final_health,
+         g.draw, g.map, g.turns, g.duration_seconds, g.first_player_team, g.end_condition,
          ${ENDED_AT} AS ended_at
   FROM mine
   JOIN games g ON g.id = mine.game_id
@@ -228,7 +235,8 @@ const PLAYER_GAMES_CTE = `
  */
 const OPPOSING_SEATS_CTE = `
   SELECT p.game_id, p.won, p.draw, o.hero_id, o.hero_name, o.pilot_kind,
-         ${botTierSql('o.pilot', 'o.bot_difficulty')} AS bot_tier
+         ${botTierSql('o.pilot', 'o.bot_difficulty')} AS bot_tier,
+         NULLIF(lower(btrim(o.bot_difficulty)), '') AS stamped_difficulty
   FROM played p
   JOIN game_seats o ON o.game_id = p.game_id AND o.team_index <> p.team_index
 `;
@@ -357,26 +365,29 @@ function mean(value: string | null): number | null {
 /**
  * Lifetime aggregates for one player. Sim games excluded.
  *
- * Six independent grouped queries rather than one mega-query: they share the
+ * Seven independent grouped queries rather than one mega-query: they share the
  * same two CTEs but group differently, and this endpoint sits behind
  * unbrewed-api's 60s per-user cache, so the round trips are cheap relative to
  * the readability. Nothing is aggregated in JS — the queries return one row per
  * output row.
  */
 export async function playerStats(pool: Pool, playerId: string): Promise<PlayerStats> {
-  const [totals, overview, streaks, byOpponentHero, byMap, byOpponentKind] = await Promise.all([
-    playerTotals(pool, playerId),
-    playerOverview(pool, playerId),
-    playerStreaks(pool, playerId),
-    playerByOpponentHero(pool, playerId),
-    playerByMap(pool, playerId),
-    playerByOpponentKind(pool, playerId),
-  ]);
+  const [totals, overview, streaks, byOpponentHero, byMap, byOpponentKind, botChallenges] =
+    await Promise.all([
+      playerTotals(pool, playerId),
+      playerOverview(pool, playerId),
+      playerStreaks(pool, playerId),
+      playerByOpponentHero(pool, playerId),
+      playerByMap(pool, playerId),
+      playerByOpponentKind(pool, playerId),
+      playerBotChallenges(pool, playerId),
+    ]);
 
   return {
     ...totals,
     ...overview,
     ...streaks,
+    ...botChallenges,
     byOpponentHero,
     byMap,
     byOpponentKind,
@@ -900,4 +911,69 @@ async function leaderboardOpponentKinds(
     }
   }
   return stats;
+}
+
+/** Bot difficulties a win has to be against to count as a challenge badge. */
+const CHALLENGE_DIFFICULTIES = ['hard', 'expert'];
+
+/**
+ * The two "how did you win it" records the accounts service's `clutch` and
+ * `speedrunner` badges are thresholds over (JollyGrin/unbrewed-api#26).
+ *
+ * A qualifying game is a win by the player's own seat, not a draw, that ended
+ * in a `hero_defeated` kill against a side with at least one `hard` or `expert`
+ * bot. Every clause there is load-bearing:
+ *
+ *  - **`hero_defeated` only.** A forfeit is recorded as a win too, and the data
+ *    already holds turn-1 forfeits — without this, "win in 5 turns" is a badge
+ *    for having an opponent who quit.
+ *  - **`stamped_difficulty` only** — the one predicate in this file that reads
+ *    the raw column instead of `bot_tier`. The label decoder (#58) maps the
+ *    starved-hard era (`bot:mc(64, 400ms)`, 400ms of search) onto `hard`, which
+ *    is right for weighting a tier's win rate and wrong for "you beat a hard bot
+ *    in five turns". A legacy row therefore does not count however hard the bot
+ *    behind it looks; the backfill (#60) is what makes an old game count, by
+ *    stamping the column, not a looser predicate here.
+ *  - **`final_health = 1` exactly**, not `<= 1`: the badge is "on the brink",
+ *    and a 0-HP winner is a producer bug rather than a tighter finish.
+ *
+ * `fastestBotWinTurns` is a MIN over the same set and is null for a player who
+ * has never won one — the accounts service must not read "no record" as fast.
+ * `turns` counts player activations rather than rounds; the guard against
+ * non-positive values keeps a producer that reported 0 out of the record.
+ */
+async function playerBotChallenges(
+  pool: Pool,
+  playerId: string,
+): Promise<Pick<PlayerStats, 'clutchWins' | 'fastestBotWinTurns'>> {
+  // `min(turns)` is an int4 today, but pg hands larger numerics back as strings;
+  // read it either way rather than letting a driver detail become a null record.
+  const result = await pool.query<{ clutch_wins: string; fastest_turns: number | string | null }>(
+    `
+      WITH mine AS (${PLAYER_SEATS_CTE}),
+      played AS (${PLAYER_GAMES_CTE}),
+      opposing AS (${OPPOSING_SEATS_CTE}),
+      qualifying AS (
+        SELECT p.final_health, p.turns
+        FROM played p
+        WHERE p.won AND NOT p.draw AND p.end_condition = 'hero_defeated'
+          AND EXISTS (
+            SELECT 1 FROM opposing o
+            WHERE o.game_id = p.game_id
+              AND o.pilot_kind = 'bot'
+              AND o.stamped_difficulty = ANY($2::text[])
+          )
+      )
+      SELECT count(*) FILTER (WHERE final_health = 1) AS clutch_wins,
+             min(turns) FILTER (WHERE turns > 0) AS fastest_turns
+      FROM qualifying
+    `,
+    [playerId, CHALLENGE_DIFFICULTIES],
+  );
+
+  const fastest = result.rows[0]?.fastest_turns ?? null;
+  return {
+    clutchWins: count(result.rows[0]?.clutch_wins ?? null),
+    fastestBotWinTurns: fastest === null ? null : Number(fastest),
+  };
 }
