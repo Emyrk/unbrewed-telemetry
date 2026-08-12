@@ -23,6 +23,7 @@
  */
 
 import type { Pool } from 'pg';
+import { botTierSql, UNKNOWN_BOT_TIER } from './bot-tier.js';
 
 /** Default page size for the games feed when the caller does not ask. */
 export const PLAYER_GAMES_DEFAULT_LIMIT = 20;
@@ -91,13 +92,24 @@ export interface PlayerMapStat {
   wins: number;
 }
 
-/** games/wins for one slice of the player's history. */
+/**
+ * games/wins/draws for one slice of the player's history.
+ *
+ * `draws` is carried (#58) so a client can compute `losses = games - wins -
+ * draws` per slice — the accounts page needs a headline record that excludes
+ * the easy and medium bot tiers, which it cannot derive from games/wins alone.
+ * `wins` counts the seat's `won` flag and `draws` counts `games.draw`, exactly
+ * as `PlayerStats` does at the top level; they are independent counts, so a
+ * producer that marked both on one game would make that subtraction go low.
+ */
 export interface PlayerSplitStat {
   games: number;
   wins: number;
+  draws: number;
 }
 
 export interface PlayerBotStat extends PlayerSplitStat {
+  /** A tier from `bot-tier.ts` — `easy`/`medium`/`hard`/`expert`, or `unknown`. */
   difficulty: string;
 }
 
@@ -215,7 +227,8 @@ const PLAYER_GAMES_CTE = `
  * teammate contributes none.
  */
 const OPPOSING_SEATS_CTE = `
-  SELECT p.game_id, p.won, o.hero_id, o.hero_name, o.pilot_kind, o.bot_difficulty
+  SELECT p.game_id, p.won, p.draw, o.hero_id, o.hero_name, o.pilot_kind,
+         ${botTierSql('o.pilot', 'o.bot_difficulty')} AS bot_tier
   FROM played p
   JOIN game_seats o ON o.game_id = p.game_id AND o.team_index <> p.team_index
 `;
@@ -460,8 +473,10 @@ async function playerOverview(
     avg_turns: string | null;
     first_games: string;
     first_wins: string;
+    first_draws: string;
     second_games: string;
     second_wins: string;
+    second_draws: string;
   }>(
     `
       WITH mine AS (${PLAYER_SEATS_CTE}),
@@ -470,8 +485,10 @@ async function playerOverview(
              round(avg(turns)::numeric, 1) AS avg_turns,
              count(*) FILTER (WHERE first_player_team IS NOT NULL AND first_player) AS first_games,
              count(*) FILTER (WHERE first_player_team IS NOT NULL AND first_player AND won) AS first_wins,
+             count(*) FILTER (WHERE first_player_team IS NOT NULL AND first_player AND draw) AS first_draws,
              count(*) FILTER (WHERE first_player_team IS NOT NULL AND NOT first_player) AS second_games,
-             count(*) FILTER (WHERE first_player_team IS NOT NULL AND NOT first_player AND won) AS second_wins
+             count(*) FILTER (WHERE first_player_team IS NOT NULL AND NOT first_player AND won) AS second_wins,
+             count(*) FILTER (WHERE first_player_team IS NOT NULL AND NOT first_player AND draw) AS second_draws
       FROM played
     `,
     [playerId],
@@ -482,15 +499,22 @@ async function playerOverview(
     return {
       avgDurationSeconds: null,
       avgTurns: null,
-      firstPlayer: { first: { games: 0, wins: 0 }, second: { games: 0, wins: 0 } },
+      firstPlayer: {
+        first: { games: 0, wins: 0, draws: 0 },
+        second: { games: 0, wins: 0, draws: 0 },
+      },
     };
   }
   return {
     avgDurationSeconds: mean(row.avg_duration_seconds),
     avgTurns: mean(row.avg_turns),
     firstPlayer: {
-      first: { games: count(row.first_games), wins: count(row.first_wins) },
-      second: { games: count(row.second_games), wins: count(row.second_wins) },
+      first: { games: count(row.first_games), wins: count(row.first_wins), draws: count(row.first_draws) },
+      second: {
+        games: count(row.second_games),
+        wins: count(row.second_wins),
+        draws: count(row.second_draws),
+      },
     },
   };
 }
@@ -615,14 +639,19 @@ async function playerByMap(pool: Pool, playerId: string): Promise<PlayerMapStat[
 }
 
 /**
- * Human vs bot opposition, and per-difficulty rows for the bot side.
+ * Human vs bot opposition, and per-tier rows for the bot side.
  *
  * A game counts as a bot game if **any** opposing seat is a bot. Mixed human/bot
  * opposition only happens when a human drops and a bot takes over, or in a
  * hand-assembled lobby; classifying such a game as "vs bots" keeps the human
  * bucket meaning "I beat only people", which is the claim a player cares about.
- * For the same reason a mixed-difficulty bot side reports its alphabetically
- * first difficulty — one row per game, deterministically chosen.
+ * For the same reason a mixed-tier bot side reports its alphabetically first
+ * tier — one row per game, deterministically chosen.
+ *
+ * The tier itself comes from `bot-tier.ts` (#58): `bot_difficulty` when the
+ * producer stamped one, else decoded from the seat's pilot label, which is what
+ * every live bot seat actually has. Keying on `bot_difficulty` alone put 100%
+ * of live bot games in one `unknown` row.
  *
  * Games with no opposing seat at all (a producer bug: every seat on one team)
  * appear in neither bucket.
@@ -633,6 +662,7 @@ async function playerByOpponentKind(pool: Pool, playerId: string): Promise<Playe
     difficulty: string | null;
     games: string;
     wins: string;
+    draws: string;
   }>(
     `
       WITH mine AS (${PLAYER_SEATS_CTE}),
@@ -641,16 +671,17 @@ async function playerByOpponentKind(pool: Pool, playerId: string): Promise<Playe
       per_game AS (
         SELECT game_id,
                bool_and(won) AS won,
+               bool_or(draw) AS draw,
                bool_or(pilot_kind = 'bot') AS any_bot,
-               min(COALESCE(NULLIF(bot_difficulty, ''), 'unknown'))
-                 FILTER (WHERE pilot_kind = 'bot') AS difficulty
+               min(bot_tier) FILTER (WHERE pilot_kind = 'bot') AS difficulty
         FROM opposing
         GROUP BY game_id
       )
       SELECT CASE WHEN any_bot THEN 'bot' ELSE 'human' END AS kind,
              CASE WHEN any_bot THEN difficulty END AS difficulty,
              count(*) AS games,
-             count(*) FILTER (WHERE won) AS wins
+             count(*) FILTER (WHERE won) AS wins,
+             count(*) FILTER (WHERE draw) AS draws
       FROM per_game
       GROUP BY 1, 2
       ORDER BY count(*) DESC, 2 ASC NULLS LAST
@@ -658,16 +689,18 @@ async function playerByOpponentKind(pool: Pool, playerId: string): Promise<Playe
     [playerId],
   );
 
-  const stats: PlayerOpponentKindStats = { human: { games: 0, wins: 0 }, bots: [] };
+  const stats: PlayerOpponentKindStats = { human: { games: 0, wins: 0, draws: 0 }, bots: [] };
   for (const row of result.rows) {
     const games = Number(row.games);
     const wins = Number(row.wins);
+    const draws = Number(row.draws);
     if (row.kind === 'bot') {
-      stats.bots.push({ difficulty: row.difficulty ?? 'unknown', games, wins });
+      stats.bots.push({ difficulty: row.difficulty ?? UNKNOWN_BOT_TIER, games, wins, draws });
     } else {
       // 'unknown' pilot kinds land here too — not a bot, so not a bot row.
       stats.human.games += games;
       stats.human.wins += wins;
+      stats.human.draws += draws;
     }
   }
   return stats;
@@ -724,7 +757,7 @@ const ALL_PLAYER_SEATS_CTE = `
 
 /** The cross-player twin of `PLAYER_GAMES_CTE`: same completed-game filter. */
 const ALL_PLAYER_GAMES_CTE = `
-  SELECT seats.player_id, seats.game_id, seats.team_index, seats.won
+  SELECT seats.player_id, seats.game_id, seats.team_index, seats.won, g.draw
   FROM seats
   JOIN games g ON g.id = seats.game_id
   WHERE g.campaign_id IS NULL
@@ -775,7 +808,7 @@ export async function leaderboard(
     playerId: row.player_id,
     gamesPlayed: Number(row.games_played),
     wins: Number(row.wins),
-    byOpponentKind: { human: { games: 0, wins: 0 }, bots: [] } as PlayerOpponentKindStats,
+    byOpponentKind: { human: { games: 0, wins: 0, draws: 0 }, bots: [] } as PlayerOpponentKindStats,
   }));
 
   // Second round trip rather than one wide query: the split needs a different
@@ -795,9 +828,10 @@ export async function leaderboard(
  *
  * Every classification rule is `playerByOpponentKind`'s, unchanged: opposing
  * seats only (teammates excluded), a game counts as a bot game if *any*
- * opposing seat is a bot, a mixed-difficulty bot side reports its
- * alphabetically first difficulty, and a game with no opposing seat at all
- * lands in neither bucket. Bot rows come back games desc then difficulty asc,
+ * opposing seat is a bot, a mixed-tier bot side reports its alphabetically
+ * first tier, the tier itself comes from `bot-tier.ts` (`bot_difficulty` when
+ * stamped, else decoded from the pilot label), and a game with no opposing seat
+ * at all lands in neither bucket. Bot rows come back games desc then difficulty asc,
  * the same order the per-player query emits, so the two payloads compare equal.
  */
 async function leaderboardOpponentKinds(
@@ -813,12 +847,14 @@ async function leaderboardOpponentKinds(
     difficulty: string | null;
     games: string;
     wins: string;
+    draws: string;
   }>(
     `
       WITH seats AS (${ALL_PLAYER_SEATS_CTE}),
       played AS (${ALL_PLAYER_GAMES_CTE}),
       opposing AS (
-        SELECT p.player_id, p.game_id, p.won, o.pilot_kind, o.bot_difficulty
+        SELECT p.player_id, p.game_id, p.won, p.draw, o.pilot_kind,
+               ${botTierSql('o.pilot', 'o.bot_difficulty')} AS bot_tier
         FROM played p
         JOIN game_seats o ON o.game_id = p.game_id AND o.team_index <> p.team_index
         WHERE p.player_id = ANY($1::text[])
@@ -826,9 +862,9 @@ async function leaderboardOpponentKinds(
       per_game AS (
         SELECT player_id, game_id,
                bool_and(won) AS won,
+               bool_or(draw) AS draw,
                bool_or(pilot_kind = 'bot') AS any_bot,
-               min(COALESCE(NULLIF(bot_difficulty, ''), 'unknown'))
-                 FILTER (WHERE pilot_kind = 'bot') AS difficulty
+               min(bot_tier) FILTER (WHERE pilot_kind = 'bot') AS difficulty
         FROM opposing
         GROUP BY player_id, game_id
       )
@@ -836,7 +872,8 @@ async function leaderboardOpponentKinds(
              CASE WHEN any_bot THEN 'bot' ELSE 'human' END AS kind,
              CASE WHEN any_bot THEN difficulty END AS difficulty,
              count(*) AS games,
-             count(*) FILTER (WHERE won) AS wins
+             count(*) FILTER (WHERE won) AS wins,
+             count(*) FILTER (WHERE draw) AS draws
       FROM per_game
       GROUP BY 1, 2, 3
       ORDER BY player_id ASC, count(*) DESC, 3 ASC NULLS LAST
@@ -847,17 +884,19 @@ async function leaderboardOpponentKinds(
   for (const row of result.rows) {
     let entry = stats.get(row.player_id);
     if (!entry) {
-      entry = { human: { games: 0, wins: 0 }, bots: [] };
+      entry = { human: { games: 0, wins: 0, draws: 0 }, bots: [] };
       stats.set(row.player_id, entry);
     }
     const games = Number(row.games);
     const wins = Number(row.wins);
+    const draws = Number(row.draws);
     if (row.kind === 'bot') {
-      entry.bots.push({ difficulty: row.difficulty ?? 'unknown', games, wins });
+      entry.bots.push({ difficulty: row.difficulty ?? UNKNOWN_BOT_TIER, games, wins, draws });
     } else {
       // 'unknown' pilot kinds land here too — not a bot, so not a bot row.
       entry.human.games += games;
       entry.human.wins += wins;
+      entry.human.draws += draws;
     }
   }
   return stats;
