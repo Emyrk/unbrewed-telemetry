@@ -2,9 +2,15 @@
  * Bot difficulty tier, derived from the seat's pilot label (#58).
  *
  * `game_seats.bot_difficulty` is the field this *should* come from, but the
- * engine has never stamped it on the live serving path: it is NULL on 100% of
+ * engine has never stamped it on the live serving path: it was NULL on 100% of
  * live bot seats (~84k rows, verified against prod 2026-08-12). Everything
  * keyed on it therefore collapsed into a single `unknown` bucket.
+ *
+ * Migration `014_backfill_bot_difficulty.sql` (#60) has since stamped the five
+ * current-era serving presets, but only those: legacy budget labels
+ * (`bot:mc(64, 400ms)` and friends, the bulk of live history) are still NULL
+ * and still get their tier from the rules below, so this module remains the
+ * primary path rather than a fallback.
  *
  * `game_seats.pilot` is the ground truth instead — the engine builds it from
  * the running preset at seat creation (`ai/registry.ts liveTelemetryPilot`), so
