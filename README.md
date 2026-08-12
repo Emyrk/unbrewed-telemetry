@@ -261,17 +261,19 @@ Server-to-server only, authenticated with `Authorization: Bearer $ACCOUNTS_READ_
     "firstGameAt": "…", "lastGameAt": "…" }
   ```
 
-  `wins` comes from the player's own seat's `won`, `draws` from `games.draw`, and a loss is exactly "my seat did not win and the game was not a draw". `byHero` groups by the player's own seat hero, ordered by games descending.
+  `wins` comes from the player's own seat's `won`, `draws` from `games.draw`, and a loss is exactly "my seat did not win and the game was not a draw". `byHero` groups by the player's own seat hero, ordered by games descending. The payload also carries the #54 aggregates — `avgDurationSeconds`/`avgTurns`, `streaks`, `recentForm`, `byOpponentHero`, `byMap`, `byOpponentKind`, `firstPlayer`.
+
+  `byOpponentKind` splits the bot side **by real tier** (#58): the engine has never stamped `game_seats.bot_difficulty` on the live serving path (NULL on 100% of live bot seats), so the tier is decoded from the seat's `pilot` label, which the engine writes from its running preset — `bot:easy` → easy, `bot:mc(16,…)` → medium, `bot:mc(64,…)`/`bot:mc` → hard, `bot:ismcts(…)`/`bot:expert(…)` → expert. A stamped `bot_difficulty` still wins when present. Labels no rule claims (the `bot:mc(sims-…/eps-…/depth-…)` sim knob-grid sweeps) bucket as `unknown` rather than being guessed at; the mapping lives in `src/db/bot-tier.ts` and is unit-tested. Every split row — `byOpponentKind.human`, each bot tier, and both sides of `firstPlayer` — carries `games`, `wins` and `draws`, so a client can read `losses = games - wins - draws` per slice.
 
 - `GET /accounts/leaderboard?limit=<n>` returns the XP inputs for **every** player with at least one completed game — the only cross-player read on this surface:
 
   ```json
   { "players": [{ "playerId": "…", "gamesPlayed": 123, "wins": 45,
-                  "byOpponentKind": { "human": { "games": 80, "wins": 30 },
-                                      "bots": [{ "difficulty": "hard", "games": 43, "wins": 15 }] } }] }
+                  "byOpponentKind": { "human": { "games": 80, "wins": 30, "draws": 2 },
+                                      "bots": [{ "difficulty": "hard", "games": 43, "wins": 15, "draws": 1 }] } }] }
   ```
 
-  XP is computed api-side from tiered weights telemetry does not know, so rows cannot be pre-sorted by it; they come back `gamesPlayed` descending (`playerId` breaks ties) and the caller sorts. `byOpponentKind` is the same block, with the same semantics, that `/stats` returns — a game with *any* bot opponent is a bot game, opposing seats only — and it is what lets the caller price a human win differently from an easy-bot win instead of weighting everything as human. `limit` is an optional safety cap, not a page size: omit it — or send a blank, unparseable, or non-positive value — and every player is returned. A row is by construction identical to what that player's own `/stats` reports as `totalGames`/`wins`/`byOpponentKind`.
+  XP is computed api-side from tiered weights telemetry does not know, so rows cannot be pre-sorted by it; they come back `gamesPlayed` descending (`playerId` breaks ties) and the caller sorts. `byOpponentKind` is the same block, with the same semantics, that `/stats` returns — a game with *any* bot opponent is a bot game, opposing seats only, bot rows keyed on the tier decoded from the pilot label — and it is what lets the caller price a human win differently from an easy-bot win instead of weighting everything as human. `limit` is an optional safety cap, not a page size: omit it — or send a blank, unparseable, or non-positive value — and every player is returned. A row is by construction identical to what that player's own `/stats` reports as `totalGames`/`wins`/`byOpponentKind`.
 
 ```sh
 curl -H "Authorization: Bearer $ACCOUNTS_READ_TOKEN" \

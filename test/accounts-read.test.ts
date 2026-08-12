@@ -116,10 +116,13 @@ interface StatsBody {
   byOpponentHero: Array<{ heroId: string; heroName: string; games: number; wins: number }>;
   byMap: Array<{ map: string; games: number; wins: number }>;
   byOpponentKind: {
-    human: { games: number; wins: number };
-    bots: Array<{ difficulty: string; games: number; wins: number }>;
+    human: { games: number; wins: number; draws: number };
+    bots: Array<{ difficulty: string; games: number; wins: number; draws: number }>;
   };
-  firstPlayer: { first: { games: number; wins: number }; second: { games: number; wins: number } };
+  firstPlayer: {
+    first: { games: number; wins: number; draws: number };
+    second: { games: number; wins: number; draws: number };
+  };
 }
 
 /** The leaderboard payload unbrewed-api ranks by XP (#56). */
@@ -256,8 +259,11 @@ describeDb('accounts read api', () => {
       recentForm: [],
       byOpponentHero: [],
       byMap: [],
-      byOpponentKind: { human: { games: 0, wins: 0 }, bots: [] },
-      firstPlayer: { first: { games: 0, wins: 0 }, second: { games: 0, wins: 0 } },
+      byOpponentKind: { human: { games: 0, wins: 0, draws: 0 }, bots: [] },
+      firstPlayer: {
+        first: { games: 0, wins: 0, draws: 0 },
+        second: { games: 0, wins: 0, draws: 0 },
+      },
     });
   });
 
@@ -315,8 +321,14 @@ describeDb('accounts read api', () => {
         { heroId: 'the-mandalorian', heroName: 'The Mandalorian', games: 1, wins: 1 },
       ],
       byMap: [{ map: 'mended-drum', games: 1, wins: 1 }],
-      byOpponentKind: { human: { games: 0, wins: 0 }, bots: [{ difficulty: 'hard', games: 1, wins: 1 }] },
-      firstPlayer: { first: { games: 1, wins: 1 }, second: { games: 0, wins: 0 } },
+      byOpponentKind: {
+        human: { games: 0, wins: 0, draws: 0 },
+        bots: [{ difficulty: 'hard', games: 1, wins: 1, draws: 0 }],
+      },
+      firstPlayer: {
+        first: { games: 1, wins: 1, draws: 0 },
+        second: { games: 0, wins: 0, draws: 0 },
+      },
     });
   });
 
@@ -410,8 +422,8 @@ describeDb('accounts read api', () => {
     // Both opposing seats are bots at different difficulties: one bot row, and
     // the alphabetically first difficulty represents the game.
     expect(body.byOpponentKind).toEqual({
-      human: { games: 0, wins: 0 },
-      bots: [{ difficulty: 'easy', games: 1, wins: 1 }],
+      human: { games: 0, wins: 0, draws: 0 },
+      bots: [{ difficulty: 'easy', games: 1, wins: 1, draws: 0 }],
     });
 
     // Bob shares Alice's team, so he sees the same two opposing heroes.
@@ -546,7 +558,9 @@ describeDb('accounts read api', () => {
         firstPlayerTeam: 1,
       }));
 
-      // m3: a bot with no reported difficulty, and no reported first player.
+      // m3: a bot whose label decodes to no tier at all (a sim knob-grid sweep
+      // label, the one shape #58 deliberately refuses to guess a tier for), and
+      // no reported first player.
       await ingest(game({
         id: 'g-bot-unknown',
         endedAt: '2026-07-03T10:00:00.000Z',
@@ -555,7 +569,7 @@ describeDb('accounts read api', () => {
         durationSeconds: 600,
         teams: [
           [{ deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'human', playerId: ALICE }],
-          [{ deck: 'bigfoot@1.0.0', heroId: 'bigfoot', pilot: 'bot:mc' }],
+          [{ deck: 'bigfoot@1.0.0', heroId: 'bigfoot', pilot: 'bot:mc(sims-256/eps-0.30/depth-4)' }],
         ],
         winner: 0,
         firstPlayerTeam: null,
@@ -566,11 +580,12 @@ describeDb('accounts read api', () => {
       const body = await stats(ALICE);
       expect(body.byOpponentKind).toEqual({
         // Only g-human has an all-human opposition, and Alice lost it.
-        human: { games: 1, wins: 0 },
-        // g-mixed carries its bot seat's difficulty; g-bot-unknown reports none.
+        human: { games: 1, wins: 0, draws: 0 },
+        // g-mixed carries a stamped `hard`; g-bot-unknown's label decodes to
+        // nothing, which is the only way an `unknown` row is produced.
         bots: [
-          { difficulty: 'hard', games: 1, wins: 1 },
-          { difficulty: 'unknown', games: 1, wins: 1 },
+          { difficulty: 'hard', games: 1, wins: 1, draws: 0 },
+          { difficulty: 'unknown', games: 1, wins: 1, draws: 0 },
         ],
       });
     });
@@ -580,8 +595,8 @@ describeDb('accounts read api', () => {
       // g-mixed first (won), g-human second (lost); g-bot-unknown has no
       // first_player_team so it is in neither bucket.
       expect(body.firstPlayer).toEqual({
-        first: { games: 1, wins: 1 },
-        second: { games: 1, wins: 0 },
+        first: { games: 1, wins: 1, draws: 0 },
+        second: { games: 1, wins: 0, draws: 0 },
       });
       expect(body.totalGames).toBe(3);
     });
@@ -717,13 +732,88 @@ describeDb('accounts read api', () => {
         ],
         byMap: [{ map: 'mended-drum', games: 7, wins: 4 }],
         byOpponentKind: {
-          human: { games: 0, wins: 0 },
-          bots: [{ difficulty: 'hard', games: 7, wins: 4 }],
+          human: { games: 0, wins: 0, draws: 0 },
+          // The day-4 draw is a bot game, so the tier row carries it too: the
+          // client reads losses off `games - wins - draws` per row (#58).
+          bots: [{ difficulty: 'hard', games: 7, wins: 4, draws: 1 }],
         },
-        firstPlayer: { first: { games: 7, wins: 4 }, second: { games: 0, wins: 0 } },
+        firstPlayer: {
+          first: { games: 7, wins: 4, draws: 1 },
+          second: { games: 0, wins: 0, draws: 0 },
+        },
       });
     });
   });
+  describe('bot tier from the pilot label (#58)', () => {
+    // The live path stamps no `bot_difficulty` at all — every seat below leaves
+    // it unset, exactly as production does, so the tier can only come from the
+    // pilot label the engine writes from its running preset.
+    const opposition = [
+      { id: 'g-tier-easy', pilot: 'bot:easy', winner: 0, draw: false },
+      { id: 'g-tier-medium', pilot: 'bot:mc(16,10000ms)', winner: 1, draw: false },
+      { id: 'g-tier-hard-legacy', pilot: 'bot:mc(64, 400ms)', winner: 0, draw: false },
+      { id: 'g-tier-hard-draw', pilot: 'bot:mc(64,10000ms)', winner: null, draw: true },
+      { id: 'g-tier-expert', pilot: 'bot:ismcts(512,10000ms)', winner: 1, draw: false },
+      { id: 'g-tier-sweep', pilot: 'bot:mc(sims-32/eps-0.10/depth-2)', winner: 0, draw: false },
+    ] as const;
+
+    beforeEach(async () => {
+      let day = 1;
+      for (const entry of opposition) {
+        await ingest(game({
+          id: entry.id,
+          endedAt: `2026-09-0${day++}T10:00:00.000Z`,
+          teams: [
+            [{ deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'human', playerId: ALICE }],
+            [{ deck: 'the-mandalorian@1.0.0', heroId: 'the-mandalorian', pilot: entry.pilot }],
+          ],
+          winner: entry.winner,
+          draw: entry.draw,
+        }));
+      }
+    });
+
+    it('splits live bot seats by real tier instead of one blended unknown row', async () => {
+      const body = await stats(ALICE);
+      expect(body.totalGames).toBe(6);
+      // Rows are games desc then tier asc: hard has two games, the rest one.
+      expect(body.byOpponentKind).toEqual({
+        human: { games: 0, wins: 0, draws: 0 },
+        bots: [
+          { difficulty: 'hard', games: 2, wins: 1, draws: 1 },
+          { difficulty: 'easy', games: 1, wins: 1, draws: 0 },
+          { difficulty: 'expert', games: 1, wins: 0, draws: 0 },
+          { difficulty: 'medium', games: 1, wins: 0, draws: 0 },
+          // Only the knob-grid sweep label stays unknown — it is a point in a
+          // parameter search, not a serving preset, so no tier is invented.
+          { difficulty: 'unknown', games: 1, wins: 1, draws: 0 },
+        ],
+      });
+    });
+
+    it('lets a stamped bot_difficulty override the label', async () => {
+      // The engine-side stamp is filed separately; when it lands it must win
+      // over the label archaeology rather than be ignored.
+      await pool.query(
+        `UPDATE game_seats SET bot_difficulty = 'expert' WHERE game_id = 'g-tier-easy' AND pilot = 'bot:easy'`,
+      );
+      const body = await stats(ALICE);
+      expect(body.byOpponentKind.bots).toContainEqual({
+        difficulty: 'expert',
+        games: 2,
+        wins: 1,
+        draws: 0,
+      });
+      expect(body.byOpponentKind.bots.map((row) => row.difficulty)).not.toContain('easy');
+    });
+
+    it('reports the same tiers on the leaderboard as on the player stats', async () => {
+      const board = (await (await read('/accounts/leaderboard')).json()) as LeaderboardBody;
+      const row = board.players.find((player) => player.playerId === ALICE);
+      expect(row?.byOpponentKind).toEqual((await stats(ALICE)).byOpponentKind);
+    });
+  });
+
   describe('leaderboard (#56)', () => {
     // Three players sharing games, plus the rows that must never count: a
     // campaign game with a player id on it, and an all-bot game with none.
@@ -865,8 +955,8 @@ describeDb('accounts read api', () => {
             gamesPlayed: 4,
             wins: 3,
             byOpponentKind: {
-              human: { games: 2, wins: 1 },
-              bots: [{ difficulty: 'hard', games: 2, wins: 2 }],
+              human: { games: 2, wins: 1, draws: 0 },
+              bots: [{ difficulty: 'hard', games: 2, wins: 2, draws: 0 }],
             },
           },
           // Bob: the two games against Alice, plus an easy-bot win.
@@ -875,8 +965,8 @@ describeDb('accounts read api', () => {
             gamesPlayed: 3,
             wins: 2,
             byOpponentKind: {
-              human: { games: 2, wins: 1 },
-              bots: [{ difficulty: 'easy', games: 1, wins: 1 }],
+              human: { games: 2, wins: 1, draws: 0 },
+              bots: [{ difficulty: 'easy', games: 1, wins: 1, draws: 0 }],
             },
           },
           // Carol: never faced a human — the mixed bot side files under 'easy'.
@@ -885,10 +975,10 @@ describeDb('accounts read api', () => {
             gamesPlayed: 2,
             wins: 1,
             byOpponentKind: {
-              human: { games: 0, wins: 0 },
+              human: { games: 0, wins: 0, draws: 0 },
               bots: [
-                { difficulty: 'easy', games: 1, wins: 1 },
-                { difficulty: 'hard', games: 1, wins: 0 },
+                { difficulty: 'easy', games: 1, wins: 1, draws: 0 },
+                { difficulty: 'hard', games: 1, wins: 0, draws: 0 },
               ],
             },
           },
@@ -919,8 +1009,8 @@ describeDb('accounts read api', () => {
           gamesPlayed: 4,
           wins: 3,
           byOpponentKind: {
-            human: { games: 2, wins: 1 },
-            bots: [{ difficulty: 'hard', games: 2, wins: 2 }],
+            human: { games: 2, wins: 1, draws: 0 },
+            bots: [{ difficulty: 'hard', games: 2, wins: 2, draws: 0 }],
           },
         },
       ]);
