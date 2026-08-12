@@ -266,10 +266,12 @@ Server-to-server only, authenticated with `Authorization: Bearer $ACCOUNTS_READ_
 - `GET /accounts/leaderboard?limit=<n>` returns the XP inputs for **every** player with at least one completed game — the only cross-player read on this surface:
 
   ```json
-  { "players": [{ "playerId": "…", "gamesPlayed": 123, "wins": 45 }] }
+  { "players": [{ "playerId": "…", "gamesPlayed": 123, "wins": 45,
+                  "byOpponentKind": { "human": { "games": 80, "wins": 30 },
+                                      "bots": [{ "difficulty": "hard", "games": 43, "wins": 15 }] } }] }
   ```
 
-  XP is computed api-side from tiered weights telemetry does not know, so rows cannot be pre-sorted by it; they come back `gamesPlayed` descending (`playerId` breaks ties) and the caller sorts. `limit` is an optional safety cap, not a page size: omit it — or send a blank, unparseable, or non-positive value — and every player is returned. A row is by construction identical to what that player's own `/stats` reports as `totalGames`/`wins`.
+  XP is computed api-side from tiered weights telemetry does not know, so rows cannot be pre-sorted by it; they come back `gamesPlayed` descending (`playerId` breaks ties) and the caller sorts. `byOpponentKind` is the same block, with the same semantics, that `/stats` returns — a game with *any* bot opponent is a bot game, opposing seats only — and it is what lets the caller price a human win differently from an easy-bot win instead of weighting everything as human. `limit` is an optional safety cap, not a page size: omit it — or send a blank, unparseable, or non-positive value — and every player is returned. A row is by construction identical to what that player's own `/stats` reports as `totalGames`/`wins`/`byOpponentKind`.
 
 ```sh
 curl -H "Authorization: Bearer $ACCOUNTS_READ_TOKEN" \

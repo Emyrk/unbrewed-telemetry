@@ -125,7 +125,12 @@ interface StatsBody {
 /** The leaderboard payload unbrewed-api ranks by XP (#56). */
 interface LeaderboardBody {
   ok: true;
-  players: Array<{ playerId: string; gamesPlayed: number; wins: number }>;
+  players: Array<{
+    playerId: string;
+    gamesPlayed: number;
+    wins: number;
+    byOpponentKind: StatsBody['byOpponentKind'];
+  }>;
 }
 
 function heroName(heroId: string): string {
@@ -779,6 +784,34 @@ describeDb('accounts read api', () => {
         ],
         winner: 1,
       }));
+      // Bob against an easy bot — a different tier from Alice's hard-bot wins,
+      // which is exactly what the api needs to price the two differently.
+      await ingest(game({
+        id: 'g-lb-6',
+        endedAt: '2026-08-06T09:00:00.000Z',
+        teams: [
+          [{ deck: 'medusa@1.0.0', heroId: 'medusa', pilot: 'human', playerId: BOB }],
+          [{ deck: 'the-mandalorian@1.0.0', heroId: 'the-mandalorian', pilot: 'bot:easy', botDifficulty: 'easy' }],
+        ],
+        winner: 0,
+      }));
+      // Carol teamed with an anonymous human against a mixed-difficulty bot
+      // side: one game, filed under the alphabetically first difficulty.
+      await ingest(game({
+        id: 'g-lb-7',
+        endedAt: '2026-08-06T11:00:00.000Z',
+        teams: [
+          [
+            { deck: 'bigfoot@1.0.0', heroId: 'bigfoot', pilot: 'human', playerId: CAROL },
+            { deck: 'medusa@1.0.0', heroId: 'medusa', pilot: 'human' },
+          ],
+          [
+            { deck: 'the-mandalorian@1.0.0', heroId: 'the-mandalorian', pilot: 'bot:hard', botDifficulty: 'hard' },
+            { deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'bot:easy', botDifficulty: 'easy' },
+          ],
+        ],
+        winner: 0,
+      }));
       // Nobody signed in: no player id, so no leaderboard row at all.
       await ingest(game({
         id: 'g-lb-bots',
@@ -825,9 +858,40 @@ describeDb('accounts read api', () => {
       expect(await leaderboard()).toEqual({
         ok: true,
         players: [
-          { playerId: ALICE, gamesPlayed: 4, wins: 3 },
-          { playerId: BOB, gamesPlayed: 2, wins: 1 },
-          { playerId: CAROL, gamesPlayed: 1, wins: 0 },
+          // Alice: beat Bob, lost to Bob, beat a hard bot twice (the 2v2 she
+          // double-seated counts once, on the hard-bot side).
+          {
+            playerId: ALICE,
+            gamesPlayed: 4,
+            wins: 3,
+            byOpponentKind: {
+              human: { games: 2, wins: 1 },
+              bots: [{ difficulty: 'hard', games: 2, wins: 2 }],
+            },
+          },
+          // Bob: the two games against Alice, plus an easy-bot win.
+          {
+            playerId: BOB,
+            gamesPlayed: 3,
+            wins: 2,
+            byOpponentKind: {
+              human: { games: 2, wins: 1 },
+              bots: [{ difficulty: 'easy', games: 1, wins: 1 }],
+            },
+          },
+          // Carol: never faced a human — the mixed bot side files under 'easy'.
+          {
+            playerId: CAROL,
+            gamesPlayed: 2,
+            wins: 1,
+            byOpponentKind: {
+              human: { games: 0, wins: 0 },
+              bots: [
+                { difficulty: 'easy', games: 1, wins: 1 },
+                { difficulty: 'hard', games: 1, wins: 0 },
+              ],
+            },
+          },
         ],
       });
     });
@@ -841,13 +905,24 @@ describeDb('accounts read api', () => {
           gamesPlayed: row.gamesPlayed,
           wins: row.wins,
         });
+        // The split the api prices XP with must be the same object, rows and
+        // order included — otherwise leaderboard XP drifts from /me/stats XP.
+        expect(row.byOpponentKind).toEqual(own.byOpponentKind);
       }
     });
 
     it('respects ?limit= and defaults to unlimited', async () => {
       expect((await leaderboard('?limit=2')).players.map((p) => p.playerId)).toEqual([ALICE, BOB]);
       expect((await leaderboard('?limit=1')).players).toEqual([
-        { playerId: ALICE, gamesPlayed: 4, wins: 3 },
+        {
+          playerId: ALICE,
+          gamesPlayed: 4,
+          wins: 3,
+          byOpponentKind: {
+            human: { games: 2, wins: 1 },
+            bots: [{ difficulty: 'hard', games: 2, wins: 2 }],
+          },
+        },
       ]);
       // A blank, unparseable, or non-positive limit is "no cap", not zero rows.
       for (const query of ['', '?limit=', '?limit=abc', '?limit=0', '?limit=-5']) {
