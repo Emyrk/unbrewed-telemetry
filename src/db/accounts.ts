@@ -16,6 +16,10 @@
  *
  * A player id that has never played is not an error: it yields empty results,
  * because the accounts service knows its own user ids and telemetry does not.
+ *
+ * Everything here is single-player (`WHERE s.player_id = $1`) except the
+ * leaderboard aggregate at the bottom (#56), which groups the same predicates
+ * across players so a leaderboard row equals that player's own stats row.
  */
 
 import type { Pool } from 'pg';
@@ -664,6 +668,196 @@ async function playerByOpponentKind(pool: Pool, playerId: string): Promise<Playe
       // 'unknown' pilot kinds land here too — not a bot, so not a bot row.
       stats.human.games += games;
       stats.human.wins += wins;
+    }
+  }
+  return stats;
+}
+
+// ---------------------------------------------------------------------------
+// Leaderboard (#56) — the one cross-player aggregate in this file.
+// ---------------------------------------------------------------------------
+
+/**
+ * One player's XP inputs. XP itself is computed api-side from tiered weights.
+ *
+ * `byOpponentKind` is what makes those weights exact: unbrewed-api pays a human
+ * win and an easy-bot win very differently (`src/progression/xp.ts`), so a row
+ * carrying only games/wins forces it to weight everything as human and
+ * over-state bot-heavy players. Same shape and same semantics as
+ * `PlayerStats.byOpponentKind`, so the two roll up to the same XP.
+ */
+export interface LeaderboardPlayer {
+  playerId: string;
+  gamesPlayed: number;
+  wins: number;
+  byOpponentKind: PlayerOpponentKindStats;
+}
+
+/**
+ * `?limit=` is a safety cap the caller may set, not a page size: absent, blank,
+ * unparseable, or non-positive all mean "every player", which is the default
+ * because unbrewed-api has to sort the whole set by XP itself (telemetry cannot
+ * pre-sort by a weighting it does not know). There is no hard maximum — the
+ * user base is small and one row per player is a few dozen bytes.
+ */
+export function clampLeaderboardLimit(requested: number | null): number | null {
+  if (requested === null || !Number.isFinite(requested)) return null;
+  const truncated = Math.trunc(requested);
+  return truncated <= 0 ? null : truncated;
+}
+
+/**
+ * Every player's own seat in each of their games, one row per (player, game).
+ *
+ * The cross-player twin of `PLAYER_SEATS_CTE`: same DISTINCT ON collapse of one
+ * player id occupying two seats of a game (lowest seat wins), now partitioned
+ * per player instead of filtered to one. Blank player ids are dropped — the
+ * per-player routes reject an empty playerId, so no such row is anybody's.
+ */
+const ALL_PLAYER_SEATS_CTE = `
+  SELECT DISTINCT ON (s.player_id, s.game_id)
+         s.player_id, s.game_id, s.team_index, s.won
+  FROM game_seats s
+  WHERE s.player_id IS NOT NULL AND s.player_id <> ''
+  ORDER BY s.player_id, s.game_id, s.team_index, s.seat_index
+`;
+
+/** The cross-player twin of `PLAYER_GAMES_CTE`: same completed-game filter. */
+const ALL_PLAYER_GAMES_CTE = `
+  SELECT seats.player_id, seats.game_id, seats.team_index, seats.won
+  FROM seats
+  JOIN games g ON g.id = seats.game_id
+  WHERE g.campaign_id IS NULL
+`;
+
+/**
+ * Games played and won per player, for every player with at least one
+ * completed game, plus the opponent-kind split those games break down into.
+ * Sim/campaign games excluded, like everything else here.
+ *
+ * This is `playerTotals` and `playerByOpponentKind` with the
+ * `WHERE s.player_id = $1` predicate lifted into the GROUP BY, and it
+ * deliberately keeps every other predicate identical so a leaderboard row
+ * equals what that player's own `/me/stats` reports:
+ *
+ * - the same DISTINCT ON collapse of a player occupying two seats of one game,
+ *   now partitioned per `(player_id, game_id)` and applied *before* the join to
+ *   `games`, exactly as `PLAYER_SEATS_CTE` does;
+ * - the same "completed game" definition — a `games` row with no `campaign_id`;
+ * - the same win predicate — the player's own seat `won`, matching
+ *   `playerStats.wins` (which counts `won` alone, not `won AND NOT draw`).
+ *
+ * Ordered by games desc as a stable default; the real ordering is XP, applied
+ * by the caller. `player_id` breaks ties so pagination-free clients still see a
+ * deterministic list.
+ */
+export async function leaderboard(
+  pool: Pool,
+  options: { limit: number | null } = { limit: null },
+): Promise<LeaderboardPlayer[]> {
+  const limit = clampLeaderboardLimit(options.limit);
+  const result = await pool.query<{ player_id: string; games_played: string; wins: string }>(
+    `
+      WITH seats AS (${ALL_PLAYER_SEATS_CTE}),
+      played AS (${ALL_PLAYER_GAMES_CTE})
+      SELECT player_id,
+             count(*) AS games_played,
+             count(*) FILTER (WHERE won) AS wins
+      FROM played
+      GROUP BY player_id
+      ORDER BY count(*) DESC, player_id ASC
+      LIMIT $1::bigint
+    `,
+    [limit],
+  );
+
+  const players = result.rows.map((row) => ({
+    playerId: row.player_id,
+    gamesPlayed: Number(row.games_played),
+    wins: Number(row.wins),
+    byOpponentKind: { human: { games: 0, wins: 0 }, bots: [] } as PlayerOpponentKindStats,
+  }));
+
+  // Second round trip rather than one wide query: the split needs a different
+  // grain (opposing seats folded per game) and only the players that survived
+  // `limit` are worth folding. A player with no opposing seat in any game — a
+  // producer bug — keeps the zeroed block, exactly as `playerStats` reports.
+  const splits = await leaderboardOpponentKinds(pool, players.map((player) => player.playerId));
+  for (const player of players) {
+    const split = splits.get(player.playerId);
+    if (split) player.byOpponentKind = split;
+  }
+  return players;
+}
+
+/**
+ * Human vs bot opposition per player, for the given players.
+ *
+ * Every classification rule is `playerByOpponentKind`'s, unchanged: opposing
+ * seats only (teammates excluded), a game counts as a bot game if *any*
+ * opposing seat is a bot, a mixed-difficulty bot side reports its
+ * alphabetically first difficulty, and a game with no opposing seat at all
+ * lands in neither bucket. Bot rows come back games desc then difficulty asc,
+ * the same order the per-player query emits, so the two payloads compare equal.
+ */
+async function leaderboardOpponentKinds(
+  pool: Pool,
+  playerIds: string[],
+): Promise<Map<string, PlayerOpponentKindStats>> {
+  const stats = new Map<string, PlayerOpponentKindStats>();
+  if (playerIds.length === 0) return stats;
+
+  const result = await pool.query<{
+    player_id: string;
+    kind: 'bot' | 'human';
+    difficulty: string | null;
+    games: string;
+    wins: string;
+  }>(
+    `
+      WITH seats AS (${ALL_PLAYER_SEATS_CTE}),
+      played AS (${ALL_PLAYER_GAMES_CTE}),
+      opposing AS (
+        SELECT p.player_id, p.game_id, p.won, o.pilot_kind, o.bot_difficulty
+        FROM played p
+        JOIN game_seats o ON o.game_id = p.game_id AND o.team_index <> p.team_index
+        WHERE p.player_id = ANY($1::text[])
+      ),
+      per_game AS (
+        SELECT player_id, game_id,
+               bool_and(won) AS won,
+               bool_or(pilot_kind = 'bot') AS any_bot,
+               min(COALESCE(NULLIF(bot_difficulty, ''), 'unknown'))
+                 FILTER (WHERE pilot_kind = 'bot') AS difficulty
+        FROM opposing
+        GROUP BY player_id, game_id
+      )
+      SELECT player_id,
+             CASE WHEN any_bot THEN 'bot' ELSE 'human' END AS kind,
+             CASE WHEN any_bot THEN difficulty END AS difficulty,
+             count(*) AS games,
+             count(*) FILTER (WHERE won) AS wins
+      FROM per_game
+      GROUP BY 1, 2, 3
+      ORDER BY player_id ASC, count(*) DESC, 3 ASC NULLS LAST
+    `,
+    [playerIds],
+  );
+
+  for (const row of result.rows) {
+    let entry = stats.get(row.player_id);
+    if (!entry) {
+      entry = { human: { games: 0, wins: 0 }, bots: [] };
+      stats.set(row.player_id, entry);
+    }
+    const games = Number(row.games);
+    const wins = Number(row.wins);
+    if (row.kind === 'bot') {
+      entry.bots.push({ difficulty: row.difficulty ?? 'unknown', games, wins });
+    } else {
+      // 'unknown' pilot kinds land here too — not a bot, so not a bot row.
+      entry.human.games += games;
+      entry.human.wins += wins;
     }
   }
   return stats;

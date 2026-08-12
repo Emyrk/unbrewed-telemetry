@@ -48,7 +48,7 @@ Discord OAuth protects `/admin`. `ADMIN_DISCORD_IDS` is a comma-separated allowl
 
 Named bearer credentials created by an admin are the primary machine authentication. A credential belongs to a named telemetry source, has explicit scopes, is displayed only once, and is stored as a salted scrypt hash. The service derives submission `source` from the credential rather than trusting the payload. `TELEMETRY_SECRET` remains only for legacy HMAC producer compatibility and may be unset once all producers use bearer keys.
 
-`ACCOUNTS_READ_TOKEN` is a third, deliberately separate credential for the read-only accounts API (`/accounts/players/*`). It is held by exactly one consumer — the unbrewed accounts service — so its blast radius is read-only and it can be rotated without touching any producer or sim worker. Leave it unset and those endpoints refuse every request with `503 AUTH_NOT_CONFIGURED`; they never fail open.
+`ACCOUNTS_READ_TOKEN` is a third, deliberately separate credential for the read-only accounts API (`/accounts/*`). It is held by exactly one consumer — the unbrewed accounts service — so its blast radius is read-only and it can be rotated without touching any producer or sim worker. Leave it unset and those endpoints refuse every request with `503 AUTH_NOT_CONFIGURED`; they never fail open.
 
 `TELEMETRY_SOURCE` is used only by direct local seed tooling; authenticated HTTP submissions ignore payload-provided source names.
 
@@ -237,7 +237,7 @@ Leases are bound to the credential that claimed them. Expired leases are reaped 
 
 ### Accounts read API
 
-Server-to-server only, authenticated with `Authorization: Bearer $ACCOUNTS_READ_TOKEN`. The unbrewed accounts service (`unbrewed-api`) proxies these for a signed-in player; **never expose them to a browser**. Both endpoints are read-only, exclude sim/campaign games (`games.campaign_id IS NOT NULL` rows never appear), and treat an unknown player id as an empty result rather than a 404 — telemetry does not know the accounts service's user directory, so absence is not an error.
+Server-to-server only, authenticated with `Authorization: Bearer $ACCOUNTS_READ_TOKEN`. The unbrewed accounts service (`unbrewed-api`) proxies these for a signed-in player; **never expose them to a browser**. Every endpoint here is read-only, excludes sim/campaign games (`games.campaign_id IS NOT NULL` rows never appear), and treat an unknown player id as an empty result rather than a 404 — telemetry does not know the accounts service's user directory, so absence is not an error.
 
 `playerId` is the pseudonymous account uuid the engine stamps on a signed-in player's seat (`game_seats.player_id`).
 
@@ -263,9 +263,20 @@ Server-to-server only, authenticated with `Authorization: Bearer $ACCOUNTS_READ_
 
   `wins` comes from the player's own seat's `won`, `draws` from `games.draw`, and a loss is exactly "my seat did not win and the game was not a draw". `byHero` groups by the player's own seat hero, ordered by games descending.
 
+- `GET /accounts/leaderboard?limit=<n>` returns the XP inputs for **every** player with at least one completed game — the only cross-player read on this surface:
+
+  ```json
+  { "players": [{ "playerId": "…", "gamesPlayed": 123, "wins": 45,
+                  "byOpponentKind": { "human": { "games": 80, "wins": 30 },
+                                      "bots": [{ "difficulty": "hard", "games": 43, "wins": 15 }] } }] }
+  ```
+
+  XP is computed api-side from tiered weights telemetry does not know, so rows cannot be pre-sorted by it; they come back `gamesPlayed` descending (`playerId` breaks ties) and the caller sorts. `byOpponentKind` is the same block, with the same semantics, that `/stats` returns — a game with *any* bot opponent is a bot game, opposing seats only — and it is what lets the caller price a human win differently from an easy-bot win instead of weighting everything as human. `limit` is an optional safety cap, not a page size: omit it — or send a blank, unparseable, or non-positive value — and every player is returned. A row is by construction identical to what that player's own `/stats` reports as `totalGames`/`wins`/`byOpponentKind`.
+
 ```sh
 curl -H "Authorization: Bearer $ACCOUNTS_READ_TOKEN" \
   'http://localhost:8788/accounts/players/11111111-1111-4111-8111-111111111111/games?limit=20'
+curl -H "Authorization: Bearer $ACCOUNTS_READ_TOKEN" 'http://localhost:8788/accounts/leaderboard'
 ```
 
 ### `GET /v1/stats/bot-execution`

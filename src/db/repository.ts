@@ -6,8 +6,10 @@ import { wilson } from '../stats/wilson.js';
 import { buildDeckProfile, type CardBucketCounts } from '../stats/profile.js';
 import { countCards, leanFrom } from '../stats/composition.js';
 import {
+  leaderboard,
   playerGames,
   playerStats,
+  type LeaderboardPlayer,
   type PlayerGamesCursor,
   type PlayerGamesPage,
   type PlayerStats,
@@ -130,6 +132,11 @@ export class PgTelemetryRepository {
   /** Accounts read API (#52): lifetime aggregates for one player. */
   async playerStats(playerId: string): Promise<PlayerStats> {
     return playerStats(this.pool, playerId);
+  }
+
+  /** Accounts read API (#56): games/wins for every player with a completed game. */
+  async leaderboard(options: { limit: number | null }): Promise<LeaderboardPlayer[]> {
+    return leaderboard(this.pool, options);
   }
 
   async ingestValid(args: IngestArgs): Promise<IngestCreated | IngestDuplicate> {

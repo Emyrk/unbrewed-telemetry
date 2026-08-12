@@ -25,6 +25,7 @@ const describeDb = databaseUrl ? describe : describe.skip;
 const READ_TOKEN = 'accounts-read-token-for-tests';
 const ALICE = '11111111-1111-4111-8111-111111111111';
 const BOB = '22222222-2222-4222-8222-222222222222';
+const CAROL = '33333333-3333-4333-8333-333333333333';
 
 const appConfig = (now: Date, accountsReadToken: string) => ({
   telemetrySecret: 'unused',
@@ -119,6 +120,17 @@ interface StatsBody {
     bots: Array<{ difficulty: string; games: number; wins: number }>;
   };
   firstPlayer: { first: { games: number; wins: number }; second: { games: number; wins: number } };
+}
+
+/** The leaderboard payload unbrewed-api ranks by XP (#56). */
+interface LeaderboardBody {
+  ok: true;
+  players: Array<{
+    playerId: string;
+    gamesPlayed: number;
+    wins: number;
+    byOpponentKind: StatsBody['byOpponentKind'];
+  }>;
 }
 
 function heroName(heroId: string): string {
@@ -710,6 +722,212 @@ describeDb('accounts read api', () => {
         },
         firstPlayer: { first: { games: 7, wins: 4 }, second: { games: 0, wins: 0 } },
       });
+    });
+  });
+  describe('leaderboard (#56)', () => {
+    // Three players sharing games, plus the rows that must never count: a
+    // campaign game with a player id on it, and an all-bot game with none.
+    beforeEach(async () => {
+      // Alice beats Bob, then Bob beats Alice — one game, two leaderboard rows.
+      await ingest(game({
+        id: 'g-lb-1',
+        endedAt: '2026-08-01T10:00:00.000Z',
+        teams: [
+          [{ deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'human', playerId: ALICE }],
+          [{ deck: 'medusa@1.0.0', heroId: 'medusa', pilot: 'human', playerId: BOB }],
+        ],
+        winner: 0,
+      }));
+      await ingest(game({
+        id: 'g-lb-2',
+        endedAt: '2026-08-02T10:00:00.000Z',
+        teams: [
+          [{ deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'human', playerId: ALICE }],
+          [{ deck: 'medusa@1.0.0', heroId: 'medusa', pilot: 'human', playerId: BOB }],
+        ],
+        winner: 1,
+      }));
+      // Alice alone against a bot.
+      await ingest(game({
+        id: 'g-lb-3',
+        endedAt: '2026-08-03T10:00:00.000Z',
+        teams: [
+          [{ deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'human', playerId: ALICE }],
+          [{ deck: 'the-mandalorian@1.0.0', heroId: 'the-mandalorian', pilot: 'bot:hard', botDifficulty: 'hard' }],
+        ],
+        winner: 0,
+      }));
+      // Alice on both seats of a 2v2 team — a producer bug, and it must count
+      // as one game here exactly as it does in her own stats.
+      await ingest(game({
+        id: 'g-lb-4',
+        endedAt: '2026-08-04T10:00:00.000Z',
+        teams: [
+          [
+            { deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'human', playerId: ALICE },
+            { deck: 'medusa@1.0.0', heroId: 'medusa', pilot: 'human', playerId: ALICE },
+          ],
+          [
+            { deck: 'the-mandalorian@1.0.0', heroId: 'the-mandalorian', pilot: 'bot:hard', botDifficulty: 'hard' },
+            { deck: 'bigfoot@1.0.0', heroId: 'bigfoot', pilot: 'bot:hard', botDifficulty: 'hard' },
+          ],
+        ],
+        winner: 0,
+      }));
+      // Carol's single game, a loss.
+      await ingest(game({
+        id: 'g-lb-5',
+        endedAt: '2026-08-05T10:00:00.000Z',
+        teams: [
+          [{ deck: 'bigfoot@1.0.0', heroId: 'bigfoot', pilot: 'human', playerId: CAROL }],
+          [{ deck: 'the-mandalorian@1.0.0', heroId: 'the-mandalorian', pilot: 'bot:hard', botDifficulty: 'hard' }],
+        ],
+        winner: 1,
+      }));
+      // Bob against an easy bot — a different tier from Alice's hard-bot wins,
+      // which is exactly what the api needs to price the two differently.
+      await ingest(game({
+        id: 'g-lb-6',
+        endedAt: '2026-08-06T09:00:00.000Z',
+        teams: [
+          [{ deck: 'medusa@1.0.0', heroId: 'medusa', pilot: 'human', playerId: BOB }],
+          [{ deck: 'the-mandalorian@1.0.0', heroId: 'the-mandalorian', pilot: 'bot:easy', botDifficulty: 'easy' }],
+        ],
+        winner: 0,
+      }));
+      // Carol teamed with an anonymous human against a mixed-difficulty bot
+      // side: one game, filed under the alphabetically first difficulty.
+      await ingest(game({
+        id: 'g-lb-7',
+        endedAt: '2026-08-06T11:00:00.000Z',
+        teams: [
+          [
+            { deck: 'bigfoot@1.0.0', heroId: 'bigfoot', pilot: 'human', playerId: CAROL },
+            { deck: 'medusa@1.0.0', heroId: 'medusa', pilot: 'human' },
+          ],
+          [
+            { deck: 'the-mandalorian@1.0.0', heroId: 'the-mandalorian', pilot: 'bot:hard', botDifficulty: 'hard' },
+            { deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'bot:easy', botDifficulty: 'easy' },
+          ],
+        ],
+        winner: 0,
+      }));
+      // Nobody signed in: no player id, so no leaderboard row at all.
+      await ingest(game({
+        id: 'g-lb-bots',
+        endedAt: '2026-08-06T10:00:00.000Z',
+        teams: [
+          [{ deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'bot:hard', botDifficulty: 'hard' }],
+          [{ deck: 'the-mandalorian@1.0.0', heroId: 'the-mandalorian', pilot: 'bot:hard', botDifficulty: 'hard' }],
+        ],
+        winner: 0,
+      }));
+      // A campaign seat carrying Carol's id: experiment data, never anybody's.
+      const campaign = await cpRepo.createCampaign({
+        name: 'leaderboard-exclusion-test',
+        spec: { note: 'test' },
+        baseSeed: 99,
+        games: [{ spec: { step: 'test' } }],
+        createdBy: 'test',
+      });
+      await ingest(game({
+        id: 'g-lb-campaign',
+        endedAt: '2026-08-07T10:00:00.000Z',
+        teams: [
+          [{ deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'bot:ismcts', playerId: CAROL }],
+          [{ deck: 'the-mandalorian@1.0.0', heroId: 'the-mandalorian', pilot: 'bot:mc' }],
+        ],
+        winner: 0,
+      }), campaign.id);
+    });
+
+    async function leaderboard(query = ''): Promise<LeaderboardBody> {
+      return (await (await read(`/accounts/leaderboard${query}`)).json()) as LeaderboardBody;
+    }
+
+    it('401s without the accounts read bearer', async () => {
+      const missing = await read('/accounts/leaderboard', null);
+      expect(missing.status).toBe(401);
+      expect(await errorCode(missing)).toBe('UNAUTHORIZED');
+
+      const wrong = await read('/accounts/leaderboard', 'not-the-token');
+      expect(wrong.status).toBe(401);
+    });
+
+    it('returns one row per player with a completed game, games desc', async () => {
+      expect(await leaderboard()).toEqual({
+        ok: true,
+        players: [
+          // Alice: beat Bob, lost to Bob, beat a hard bot twice (the 2v2 she
+          // double-seated counts once, on the hard-bot side).
+          {
+            playerId: ALICE,
+            gamesPlayed: 4,
+            wins: 3,
+            byOpponentKind: {
+              human: { games: 2, wins: 1 },
+              bots: [{ difficulty: 'hard', games: 2, wins: 2 }],
+            },
+          },
+          // Bob: the two games against Alice, plus an easy-bot win.
+          {
+            playerId: BOB,
+            gamesPlayed: 3,
+            wins: 2,
+            byOpponentKind: {
+              human: { games: 2, wins: 1 },
+              bots: [{ difficulty: 'easy', games: 1, wins: 1 }],
+            },
+          },
+          // Carol: never faced a human — the mixed bot side files under 'easy'.
+          {
+            playerId: CAROL,
+            gamesPlayed: 2,
+            wins: 1,
+            byOpponentKind: {
+              human: { games: 0, wins: 0 },
+              bots: [
+                { difficulty: 'easy', games: 1, wins: 1 },
+                { difficulty: 'hard', games: 1, wins: 0 },
+              ],
+            },
+          },
+        ],
+      });
+    });
+
+    it('matches what each player\'s own stats report', async () => {
+      const body = await leaderboard();
+      expect(body.players.length).toBe(3);
+      for (const row of body.players) {
+        const own = await stats(row.playerId);
+        expect({ gamesPlayed: own.totalGames, wins: own.wins }).toEqual({
+          gamesPlayed: row.gamesPlayed,
+          wins: row.wins,
+        });
+        // The split the api prices XP with must be the same object, rows and
+        // order included — otherwise leaderboard XP drifts from /me/stats XP.
+        expect(row.byOpponentKind).toEqual(own.byOpponentKind);
+      }
+    });
+
+    it('respects ?limit= and defaults to unlimited', async () => {
+      expect((await leaderboard('?limit=2')).players.map((p) => p.playerId)).toEqual([ALICE, BOB]);
+      expect((await leaderboard('?limit=1')).players).toEqual([
+        {
+          playerId: ALICE,
+          gamesPlayed: 4,
+          wins: 3,
+          byOpponentKind: {
+            human: { games: 2, wins: 1 },
+            bots: [{ difficulty: 'hard', games: 2, wins: 2 }],
+          },
+        },
+      ]);
+      // A blank, unparseable, or non-positive limit is "no cap", not zero rows.
+      for (const query of ['', '?limit=', '?limit=abc', '?limit=0', '?limit=-5']) {
+        expect((await leaderboard(query)).players.length).toBe(3);
+      }
     });
   });
 });
