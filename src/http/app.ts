@@ -8,7 +8,7 @@ import type { CampaignItemBucket, ControlPlaneRepository, SimJobCheckpoint } fro
 import type { DeckDefinitionSubmission, GameSubmission, RecentHourlyResponse } from '../types.js';
 import { verifyIngestAuth } from './auth.js';
 import { verifyAccountsReadAuth } from './accounts-auth.js';
-import { clampPlayerGamesLimit, decodePlayerGamesCursor } from '../db/accounts.js';
+import { clampLeaderboardLimit, clampPlayerGamesLimit, decodePlayerGamesCursor } from '../db/accounts.js';
 import { parseBearer, verifySecret, hasScope, type Scope } from './bearer-auth.js';
 import { serveDashboardAsset } from './static.js';
 
@@ -153,6 +153,11 @@ async function handleRequest(
   }
 
   // ---- Accounts read API (server-to-server, ACCOUNTS_READ_TOKEN) ----
+  if (req.method === 'GET' && url.pathname === '/accounts/leaderboard') {
+    await handleAccountsLeaderboard(req, url, res, repo, config);
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname.startsWith('/accounts/players/')) {
     await handleAccountsPlayerRead(req, url, res, repo, config);
     return;
@@ -751,6 +756,35 @@ async function handleAccountsPlayerRead(
   }
 
   sendJson(res, 200, { ok: true, ...(await repo.playerGames(playerId, { limit, before })) });
+}
+
+/**
+ * Accounts read API (#56): `/accounts/leaderboard`.
+ *
+ * The one cross-player read on this surface — games/wins per player, the inputs
+ * unbrewed-api needs to compute XP and rank the web leaderboard. Same bearer,
+ * same server-to-server-only rule as the per-player routes; telemetry cannot
+ * sort by XP itself (the tiered weights live api-side), so this returns every
+ * player with a completed game, games desc, and `?limit=` is a safety cap the
+ * caller may set rather than a page size.
+ */
+async function handleAccountsLeaderboard(
+  req: IncomingMessage,
+  url: URL,
+  res: ServerResponse,
+  repo: PgTelemetryRepository,
+  config: AppConfig,
+): Promise<void> {
+  const auth = verifyAccountsReadAuth(req.headers, config.accountsReadToken);
+  if (!auth.ok) {
+    sendJson(res, auth.status, { ok: false, code: auth.code, message: auth.message });
+    return;
+  }
+
+  const limitParam = blankToNull(url.searchParams.get('limit'));
+  const limit = clampLeaderboardLimit(limitParam === null ? null : Number(limitParam));
+
+  sendJson(res, 200, { ok: true, players: await repo.leaderboard({ limit }) });
 }
 
 async function verifyBearerAuth(

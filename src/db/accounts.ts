@@ -16,6 +16,10 @@
  *
  * A player id that has never played is not an error: it yields empty results,
  * because the accounts service knows its own user ids and telemetry does not.
+ *
+ * Everything here is single-player (`WHERE s.player_id = $1`) except the
+ * leaderboard aggregate at the bottom (#56), which groups the same predicates
+ * across players so a leaderboard row equals that player's own stats row.
  */
 
 import type { Pool } from 'pg';
@@ -667,4 +671,81 @@ async function playerByOpponentKind(pool: Pool, playerId: string): Promise<Playe
     }
   }
   return stats;
+}
+
+// ---------------------------------------------------------------------------
+// Leaderboard (#56) — the one cross-player aggregate in this file.
+// ---------------------------------------------------------------------------
+
+/** One player's XP inputs. XP itself is computed api-side from tiered weights. */
+export interface LeaderboardPlayer {
+  playerId: string;
+  gamesPlayed: number;
+  wins: number;
+}
+
+/**
+ * `?limit=` is a safety cap the caller may set, not a page size: absent, blank,
+ * unparseable, or non-positive all mean "every player", which is the default
+ * because unbrewed-api has to sort the whole set by XP itself (telemetry cannot
+ * pre-sort by a weighting it does not know). There is no hard maximum — the
+ * user base is small and one row per player is a few dozen bytes.
+ */
+export function clampLeaderboardLimit(requested: number | null): number | null {
+  if (requested === null || !Number.isFinite(requested)) return null;
+  const truncated = Math.trunc(requested);
+  return truncated <= 0 ? null : truncated;
+}
+
+/**
+ * Games played and won per player, for every player with at least one
+ * completed game. Sim/campaign games excluded, like everything else here.
+ *
+ * This is `playerTotals` with the `WHERE s.player_id = $1` predicate lifted
+ * into the GROUP BY, and it deliberately keeps every other predicate identical
+ * so a leaderboard row equals what that player's own `/me/stats` reports:
+ *
+ * - the same DISTINCT ON collapse of a player occupying two seats of one game,
+ *   now partitioned per `(player_id, game_id)` and applied *before* the join to
+ *   `games`, exactly as `PLAYER_SEATS_CTE` does;
+ * - the same "completed game" definition — a `games` row with no `campaign_id`;
+ * - the same win predicate — the player's own seat `won`, matching
+ *   `playerStats.wins` (which counts `won` alone, not `won AND NOT draw`).
+ *
+ * Ordered by games desc as a stable default; the real ordering is XP, applied
+ * by the caller. `player_id` breaks ties so pagination-free clients still see a
+ * deterministic list.
+ */
+export async function leaderboard(
+  pool: Pool,
+  options: { limit: number | null } = { limit: null },
+): Promise<LeaderboardPlayer[]> {
+  const limit = clampLeaderboardLimit(options.limit);
+  const result = await pool.query<{ player_id: string; games_played: string; wins: string }>(
+    `
+      WITH seats AS (
+        SELECT DISTINCT ON (s.player_id, s.game_id)
+               s.player_id, s.game_id, s.won
+        FROM game_seats s
+        WHERE s.player_id IS NOT NULL AND s.player_id <> ''
+        ORDER BY s.player_id, s.game_id, s.team_index, s.seat_index
+      )
+      SELECT seats.player_id,
+             count(*) AS games_played,
+             count(*) FILTER (WHERE seats.won) AS wins
+      FROM seats
+      JOIN games g ON g.id = seats.game_id
+      WHERE g.campaign_id IS NULL
+      GROUP BY seats.player_id
+      ORDER BY count(*) DESC, seats.player_id ASC
+      LIMIT $1::bigint
+    `,
+    [limit],
+  );
+
+  return result.rows.map((row) => ({
+    playerId: row.player_id,
+    gamesPlayed: Number(row.games_played),
+    wins: Number(row.wins),
+  }));
 }
