@@ -99,6 +99,28 @@ async function errorCode(response: Response): Promise<string | undefined> {
   return ((await response.json()) as { code?: string }).code;
 }
 
+/** The per-hero opponent-kind cross (#63) — five fixed buckets, always present. */
+interface HeroOpponents {
+  human: { games: number; wins: number };
+  easy: { games: number; wins: number };
+  medium: { games: number; wins: number };
+  hard: { games: number; wins: number };
+  expert: { games: number; wins: number };
+}
+
+const NO_HERO_OPPONENTS: HeroOpponents = {
+  human: { games: 0, wins: 0 },
+  easy: { games: 0, wins: 0 },
+  medium: { games: 0, wins: 0 },
+  hard: { games: 0, wins: 0 },
+  expert: { games: 0, wins: 0 },
+};
+
+/** The zeroed block with the named buckets filled in — every assertion is whole. */
+function heroOpponents(filled: Partial<HeroOpponents>): HeroOpponents {
+  return { ...NO_HERO_OPPONENTS, ...filled };
+}
+
 /** The stats payload, exactly as unbrewed-api proxies it (#54 fields included). */
 interface StatsBody {
   ok: true;
@@ -106,7 +128,13 @@ interface StatsBody {
   wins: number;
   losses: number;
   draws: number;
-  byHero: Array<{ heroId: string; heroName: string; games: number; wins: number }>;
+  byHero: Array<{
+    heroId: string;
+    heroName: string;
+    games: number;
+    wins: number;
+    byOpponent: HeroOpponents;
+  }>;
   firstGameAt: string | null;
   lastGameAt: string | null;
   avgDurationSeconds: number | null;
@@ -701,10 +729,21 @@ describeDb('accounts read api', () => {
       expect(body.firstGameAt).toBe('2026-08-01T10:00:00.000Z');
       expect(body.lastGameAt).toBe('2026-08-07T10:00:00.000Z');
       // king-kong 4 games / 3 wins, medusa 2 / 1, bigfoot 1 / 0 — games desc.
+      // Every game here is against the same stamped `hard` bot, so each hero's
+      // whole record shows up in the `hard` bucket of its #63 breakdown.
       expect(body.byHero).toEqual([
-        { heroId: 'king-kong', heroName: 'King Kong', games: 4, wins: 3 },
-        { heroId: 'medusa', heroName: 'Medusa', games: 2, wins: 1 },
-        { heroId: 'bigfoot', heroName: 'Bigfoot', games: 1, wins: 0 },
+        {
+          heroId: 'king-kong', heroName: 'King Kong', games: 4, wins: 3,
+          byOpponent: heroOpponents({ hard: { games: 4, wins: 3 } }),
+        },
+        {
+          heroId: 'medusa', heroName: 'Medusa', games: 2, wins: 1,
+          byOpponent: heroOpponents({ hard: { games: 2, wins: 1 } }),
+        },
+        {
+          heroId: 'bigfoot', heroName: 'Bigfoot', games: 1, wins: 0,
+          byOpponent: heroOpponents({ hard: { games: 1, wins: 0 } }),
+        },
       ]);
     });
 
@@ -719,9 +758,18 @@ describeDb('accounts read api', () => {
         losses: 2,
         draws: 1,
         byHero: [
-          { heroId: 'king-kong', heroName: 'King Kong', games: 4, wins: 3 },
-          { heroId: 'medusa', heroName: 'Medusa', games: 2, wins: 1 },
-          { heroId: 'bigfoot', heroName: 'Bigfoot', games: 1, wins: 0 },
+          {
+            heroId: 'king-kong', heroName: 'King Kong', games: 4, wins: 3,
+            byOpponent: heroOpponents({ hard: { games: 4, wins: 3 } }),
+          },
+          {
+            heroId: 'medusa', heroName: 'Medusa', games: 2, wins: 1,
+            byOpponent: heroOpponents({ hard: { games: 2, wins: 1 } }),
+          },
+          {
+            heroId: 'bigfoot', heroName: 'Bigfoot', games: 1, wins: 0,
+            byOpponent: heroOpponents({ hard: { games: 1, wins: 0 } }),
+          },
         ],
         firstGameAt: '2026-08-01T10:00:00.000Z',
         lastGameAt: '2026-08-07T10:00:00.000Z',
@@ -819,6 +867,220 @@ describeDb('accounts read api', () => {
       const board = (await (await read('/accounts/leaderboard')).json()) as LeaderboardBody;
       const row = board.players.find((player) => player.playerId === ALICE);
       expect(row?.byOpponentKind).toEqual((await stats(ALICE)).byOpponentKind);
+    });
+  });
+
+  describe('per-hero opponent-kind breakdown (#63)', () => {
+    // One hero played against every opponent kind there is, so the cross of
+    // byHero and byOpponentKind can be hand-counted, plus a second hero that
+    // must not absorb any of it. The `easy` game is the short one — it is the
+    // farming shape `minSeconds` exists to exclude.
+    const opposition = [
+      { day: 1, hero: 'king-kong', pilot: 'human', playerId: BOB, winner: 0, seconds: 600 },
+      { day: 2, hero: 'king-kong', pilot: 'human', playerId: BOB, winner: 1, seconds: 600 },
+      { day: 3, hero: 'king-kong', pilot: 'bot:easy', winner: 0, seconds: 30 },
+      { day: 4, hero: 'king-kong', pilot: 'bot:mc(16,10000ms)', winner: 0, seconds: 600 },
+      { day: 5, hero: 'king-kong', pilot: 'bot:mc(64, 400ms)', winner: 1, seconds: 600 },
+      { day: 6, hero: 'king-kong', pilot: 'bot:ismcts(512,10000ms)', winner: 0, seconds: 600 },
+      // A knob-grid sweep label: a bot, but no tier any rule claims.
+      { day: 7, hero: 'king-kong', pilot: 'bot:mc(sims-32/eps-0.10/depth-2)', winner: 0, seconds: 600 },
+      { day: 8, hero: 'medusa', pilot: 'bot:easy', winner: 0, seconds: 600 },
+    ] as const;
+
+    beforeEach(async () => {
+      for (const entry of opposition) {
+        await ingest(game({
+          id: `g-cross-${entry.day}`,
+          endedAt: `2026-10-0${entry.day}T10:00:00.000Z`,
+          durationSeconds: entry.seconds,
+          teams: [
+            [{ deck: `${entry.hero}@1.0.0`, heroId: entry.hero, pilot: 'human', playerId: ALICE }],
+            [{
+              deck: 'the-mandalorian@1.0.0',
+              heroId: 'the-mandalorian',
+              pilot: entry.pilot,
+              // A human opponent needs an account id; a bot seat carries none.
+              ...('playerId' in entry ? { playerId: entry.playerId } : {}),
+            }],
+          ],
+          winner: entry.winner,
+        }));
+      }
+    });
+
+    /** The breakdown for one hero of the player's `byHero` rows. */
+    async function byOpponent(playerId: string, heroId: string): Promise<HeroOpponents | undefined> {
+      const body = await stats(playerId);
+      return body.byHero.find((row) => row.heroId === heroId)?.byOpponent;
+    }
+
+    it('crosses each hero with every opponent kind', async () => {
+      const body = await stats(ALICE);
+      expect(body.byHero).toEqual([
+        {
+          heroId: 'king-kong', heroName: 'King Kong', games: 7, wins: 5,
+          // Two human games (one won), then one game per tier. Day 7's bot
+          // decodes to no tier, so it is counted in `games` above but in no
+          // bucket here — 6 bucketed games against 7 played.
+          byOpponent: heroOpponents({
+            human: { games: 2, wins: 1 },
+            easy: { games: 1, wins: 1 },
+            medium: { games: 1, wins: 1 },
+            hard: { games: 1, wins: 0 },
+            expert: { games: 1, wins: 1 },
+          }),
+        },
+        {
+          heroId: 'medusa', heroName: 'Medusa', games: 1, wins: 1,
+          byOpponent: heroOpponents({ easy: { games: 1, wins: 1 } }),
+        },
+      ]);
+    });
+
+    it('reuses the top-level classification: the buckets roll up to byOpponentKind', async () => {
+      const body = await stats(ALICE);
+      const rolled = body.byHero.reduce(
+        (totals, row) => {
+          for (const kind of ['human', 'easy', 'medium', 'hard', 'expert'] as const) {
+            totals[kind].games += row.byOpponent[kind].games;
+            totals[kind].wins += row.byOpponent[kind].wins;
+          }
+          return totals;
+        },
+        structuredClone(NO_HERO_OPPONENTS),
+      );
+
+      // The same numbers the global split reports, tier for tier — the two are
+      // the same classification grouped differently, not two definitions.
+      expect(rolled.human).toEqual({
+        games: body.byOpponentKind.human.games,
+        wins: body.byOpponentKind.human.wins,
+      });
+      for (const bot of body.byOpponentKind.bots) {
+        if (bot.difficulty === 'unknown') continue; // no key to roll it into
+        const bucket = rolled[bot.difficulty as 'easy' | 'medium' | 'hard' | 'expert'];
+        expect(bucket).toEqual({ games: bot.games, wins: bot.wins });
+      }
+      // Day 7 is the only unbucketed game, so the buckets are one short of the total.
+      const bucketed = Object.values(rolled).reduce((sum, split) => sum + split.games, 0);
+      expect(bucketed).toBe(body.totalGames - 1);
+    });
+
+    it('counts a mixed-tier bot side once, under its alphabetically first tier', async () => {
+      await pool.query('TRUNCATE game_submissions, sim_campaigns, telemetry_sources CASCADE');
+      await ingest(game({
+        id: 'g-cross-2v2',
+        endedAt: '2026-10-09T10:00:00.000Z',
+        teams: [
+          [
+            { deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'human', playerId: ALICE },
+            { deck: 'medusa@1.0.0', heroId: 'medusa', pilot: 'human', playerId: BOB },
+          ],
+          [
+            { deck: 'the-mandalorian@1.0.0', heroId: 'the-mandalorian', pilot: 'bot:hard' },
+            { deck: 'bigfoot@1.0.0', heroId: 'bigfoot', pilot: 'bot:easy' },
+          ],
+        ],
+        winner: 0,
+      }));
+
+      // One game, one bucket — exactly as byOpponentKind reports it, and on
+      // Alice's own hero rather than her teammate's.
+      expect(await byOpponent(ALICE, 'king-kong')).toEqual(
+        heroOpponents({ easy: { games: 1, wins: 1 } }),
+      );
+      expect(await byOpponent(BOB, 'king-kong')).toBeUndefined();
+      expect(await byOpponent(BOB, 'medusa')).toEqual(
+        heroOpponents({ easy: { games: 1, wins: 1 } }),
+      );
+    });
+
+    it('leaves the buckets empty for a hero whose only game had no opposing seat', async () => {
+      await pool.query('TRUNCATE game_submissions, sim_campaigns, telemetry_sources CASCADE');
+      await ingest(game({
+        id: 'g-cross-solo',
+        endedAt: '2026-10-10T10:00:00.000Z',
+        teams: [[{ deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'human', playerId: ALICE }]],
+        winner: 0,
+      }));
+
+      const body = await stats(ALICE);
+      // The game is the player's history and counts in `games`; it classifies
+      // into neither bucket, the same producer-bug handling byOpponentKind has.
+      expect(body.byHero).toEqual([
+        { heroId: 'king-kong', heroName: 'King Kong', games: 1, wins: 1, byOpponent: NO_HERO_OPPONENTS },
+      ]);
+      expect(body.byOpponentKind).toEqual({ human: { games: 0, wins: 0, draws: 0 }, bots: [] });
+    });
+
+    describe('?minSeconds=', () => {
+      /** The stats payload with a duration floor applied. */
+      async function filtered(seconds: string): Promise<StatsBody> {
+        const response = await read(`/accounts/players/${ALICE}/stats?minSeconds=${seconds}`);
+        return (await response.json()) as StatsBody;
+      }
+
+      it('filters only the breakdown, never the rest of the payload', async () => {
+        const unfiltered = await stats(ALICE);
+        const body = await filtered('120');
+
+        // The 30-second easy game is the only one under the floor; it leaves
+        // king-kong's easy bucket and nothing else in the payload.
+        expect(body.byHero).toEqual([
+          {
+            heroId: 'king-kong', heroName: 'King Kong', games: 7, wins: 5,
+            byOpponent: heroOpponents({
+              human: { games: 2, wins: 1 },
+              medium: { games: 1, wins: 1 },
+              hard: { games: 1, wins: 0 },
+              expert: { games: 1, wins: 1 },
+            }),
+          },
+          {
+            heroId: 'medusa', heroName: 'Medusa', games: 1, wins: 1,
+            byOpponent: heroOpponents({ easy: { games: 1, wins: 1 } }),
+          },
+        ]);
+        // Everything outside the breakdown is byte-identical to the unfiltered
+        // payload — including the global split, which keeps the easy game.
+        expect({ ...body, byHero: null }).toEqual({ ...unfiltered, byHero: null });
+        expect(body.byOpponentKind.bots).toContainEqual({
+          difficulty: 'easy', games: 2, wins: 2, draws: 0,
+        });
+      });
+
+      it('drops a game with no reported duration rather than letting it pass the floor', async () => {
+        // A producer that omits `durationSeconds` must not be a way around an
+        // anti-farm floor: unknown does not read as long enough.
+        await pool.query(`UPDATE games SET duration_seconds = NULL WHERE id = 'g-cross-6'`);
+
+        expect(await byOpponent(ALICE, 'king-kong')).toEqual(
+          heroOpponents({
+            human: { games: 2, wins: 1 },
+            easy: { games: 1, wins: 1 },
+            medium: { games: 1, wins: 1 },
+            hard: { games: 1, wins: 0 },
+            expert: { games: 1, wins: 1 },
+          }),
+        );
+
+        // The expert game is the one with no duration; every floor above zero
+        // excludes it, while the default floor keeps it (asserted just above).
+        const body = await filtered('1');
+        expect(body.byHero[0]!.byOpponent.expert).toEqual({ games: 0, wins: 0 });
+        expect(body.byHero[0]!.games).toBe(7);
+      });
+
+      it('treats a blank, negative or unparseable floor as no floor at all', async () => {
+        const unfiltered = await stats(ALICE);
+        for (const value of ['', '0', '-90', 'soon', 'NaN']) {
+          expect(await filtered(value)).toEqual(unfiltered);
+        }
+        // A fractional floor truncates rather than 400ing; 30.9 still admits
+        // the 30-second game, 31.2 does not.
+        expect((await filtered('30.9')).byHero[0]!.byOpponent.easy).toEqual({ games: 1, wins: 1 });
+        expect((await filtered('31.2')).byHero[0]!.byOpponent.easy).toEqual({ games: 0, wins: 0 });
+      });
     });
   });
 

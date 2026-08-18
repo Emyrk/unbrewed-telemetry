@@ -129,9 +129,12 @@ export class PgTelemetryRepository {
     return playerGames(this.pool, playerId, options);
   }
 
-  /** Accounts read API (#52): lifetime aggregates for one player. */
-  async playerStats(playerId: string): Promise<PlayerStats> {
-    return playerStats(this.pool, playerId);
+  /**
+   * Accounts read API (#52): lifetime aggregates for one player. `minSeconds`
+   * (#63) floors only the per-hero opponent breakdown.
+   */
+  async playerStats(playerId: string, options: { minSeconds?: number } = {}): Promise<PlayerStats> {
+    return playerStats(this.pool, playerId, options);
   }
 
   /** Accounts read API (#56): games/wins for every player with a completed game. */
