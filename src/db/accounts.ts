@@ -30,6 +30,9 @@ export const PLAYER_GAMES_DEFAULT_LIMIT = 20;
 /** Hard cap on page size, whatever the caller asks for. */
 export const PLAYER_GAMES_MAX_LIMIT = 50;
 
+/** No duration floor: `byHero[].byOpponent` counts every game, however short. */
+export const PLAYER_STATS_DEFAULT_MIN_SECONDS = 0;
+
 export interface PlayerGameSeat {
   heroId: string | null;
   heroName: string | null;
@@ -62,11 +65,53 @@ export interface PlayerGamesPage {
   nextBefore: string | null;
 }
 
+/**
+ * games/wins for one hero against one kind of opposition (#63).
+ *
+ * No `draws`: the cosmetics point system this feeds (unbrewed-p2p#610) pays per
+ * *win* against a tier, and the top-level `byOpponentKind` already carries the
+ * draw counts for anyone deriving a record.
+ */
+export interface PlayerHeroOpponentSplit {
+  games: number;
+  wins: number;
+}
+
+/**
+ * The player's record on one hero, split by who they played against.
+ *
+ * Fixed keys, always present and zeroed when unplayed, so the caller can index
+ * a tier without a lookup. Two kinds of game are deliberately in *no* bucket,
+ * which is why these can sum to less than the row's `games`:
+ *
+ * - a bot game whose tier decodes to `unknown` (a label no rule in
+ *   `bot-tier.ts` claims) — the tier is not guessed at here any more than it is
+ *   in `byOpponentKind`, and there is no key to invent one into;
+ * - a game with no opposing seat at all (a producer bug), exactly as
+ *   `byOpponentKind` drops it.
+ *
+ * A non-zero `minSeconds` filter takes more games out of the buckets on top of
+ * that — see {@link playerStats}.
+ */
+export interface PlayerHeroOpponentStats {
+  human: PlayerHeroOpponentSplit;
+  easy: PlayerHeroOpponentSplit;
+  medium: PlayerHeroOpponentSplit;
+  hard: PlayerHeroOpponentSplit;
+  expert: PlayerHeroOpponentSplit;
+}
+
 export interface PlayerHeroStat {
   heroId: string | null;
   heroName: string | null;
   games: number;
   wins: number;
+  /**
+   * The same games, crossed with opponent kind (#63). `games`/`wins` above are
+   * never filtered; this block is the only part of the payload `minSeconds`
+   * touches.
+   */
+  byOpponent: PlayerHeroOpponentStats;
 }
 
 /** A win/loss/draw from the player's point of view. */
@@ -188,6 +233,19 @@ export function clampPlayerGamesLimit(requested: number | null): number {
 }
 
 /**
+ * A duration floor is a lenient knob, like `limit`: absent, blank, unparseable,
+ * negative or fractional all fall back to "no floor" rather than 400ing, because
+ * the caller (unbrewed-api) sets it from its own config and a typo there must not
+ * take a player's stats page down. Truncated to whole seconds — `duration_seconds`
+ * is an integer column.
+ */
+export function clampPlayerStatsMinSeconds(requested: number | null): number {
+  if (requested === null || !Number.isFinite(requested)) return PLAYER_STATS_DEFAULT_MIN_SECONDS;
+  const truncated = Math.trunc(requested);
+  return truncated <= 0 ? PLAYER_STATS_DEFAULT_MIN_SECONDS : truncated;
+}
+
+/**
  * `ended_at` is nullable on `games` (a producer may omit it), but a history feed
  * has to sort on *something* total, and a keyset cursor cannot straddle NULLs.
  * Fall back to the server-stamped `received_at`, which is NOT NULL and within
@@ -218,6 +276,7 @@ const PLAYER_SEATS_CTE = `
  */
 const PLAYER_GAMES_CTE = `
   SELECT mine.game_id, mine.team_index, mine.won, mine.first_player, mine.final_health,
+         mine.hero_id, mine.hero_name,
          g.draw, g.map, g.turns, g.duration_seconds, g.first_player_team, g.end_condition,
          ${ENDED_AT} AS ended_at
   FROM mine
@@ -365,14 +424,26 @@ function mean(value: string | null): number | null {
 /**
  * Lifetime aggregates for one player. Sim games excluded.
  *
- * Seven independent grouped queries rather than one mega-query: they share the
+ * Eight independent grouped queries rather than one mega-query: they share the
  * same two CTEs but group differently, and this endpoint sits behind
  * unbrewed-api's 60s per-user cache, so the round trips are cheap relative to
  * the readability. Nothing is aggregated in JS — the queries return one row per
- * output row.
+ * output row, and the only JS fold is stitching the per-hero opponent
+ * breakdown onto the `byHero` rows it belongs to.
+ *
+ * `minSeconds` is an anti-farm floor (#63) and is **deliberately narrow**: it
+ * filters `byHero[].byOpponent` and nothing else. Every other number in the
+ * payload — `totalGames`, `byHero[].games`/`wins`, `byOpponentKind`, the
+ * records — counts the player's whole history, so a client can show "you played
+ * 300 games" beside "280 of them count for points" without two calls.
  */
-export async function playerStats(pool: Pool, playerId: string): Promise<PlayerStats> {
-  const [totals, overview, streaks, byOpponentHero, byMap, byOpponentKind, botChallenges] =
+export async function playerStats(
+  pool: Pool,
+  playerId: string,
+  options: { minSeconds?: number } = {},
+): Promise<PlayerStats> {
+  const minSeconds = clampPlayerStatsMinSeconds(options.minSeconds ?? null);
+  const [totals, overview, streaks, byOpponentHero, byMap, byOpponentKind, botChallenges, heroOpponents] =
     await Promise.all([
       playerTotals(pool, playerId),
       playerOverview(pool, playerId),
@@ -381,7 +452,12 @@ export async function playerStats(pool: Pool, playerId: string): Promise<PlayerS
       playerByMap(pool, playerId),
       playerByOpponentKind(pool, playerId),
       playerBotChallenges(pool, playerId),
+      playerByHeroOpponent(pool, playerId, minSeconds),
     ]);
+
+  for (const hero of totals.byHero) {
+    hero.byOpponent = heroOpponents.get(heroKey(hero.heroId, hero.heroName)) ?? emptyHeroOpponents();
+  }
 
   return {
     ...totals,
@@ -392,6 +468,37 @@ export async function playerStats(pool: Pool, playerId: string): Promise<PlayerS
     byMap,
     byOpponentKind,
   };
+}
+
+/** The five buckets, all zero — the shape a hero with no qualifying game reports. */
+function emptyHeroOpponents(): PlayerHeroOpponentStats {
+  return {
+    human: { games: 0, wins: 0 },
+    easy: { games: 0, wins: 0 },
+    medium: { games: 0, wins: 0 },
+    hard: { games: 0, wins: 0 },
+    expert: { games: 0, wins: 0 },
+  };
+}
+
+/** The bucket names that exist; anything else (today only `unknown`) is dropped. */
+const HERO_OPPONENT_BUCKETS = new Set<keyof PlayerHeroOpponentStats>([
+  'human',
+  'easy',
+  'medium',
+  'hard',
+  'expert',
+]);
+
+/**
+ * `byHero` and the breakdown group on the same `(hero_id, hero_name)` pair, so
+ * they are joined on it in JS. Both parts are nullable and a hero name may
+ * legitimately contain any character, so they are joined on NUL — a byte no
+ * hero id or display name can carry — rather than a printable separator that
+ * could collide across the pair boundary.
+ */
+function heroKey(heroId: string | null, heroName: string | null): string {
+  return `${heroId ?? ''}\u0000${heroName ?? ''}`;
 }
 
 /** The #52 payload: totals, per-hero rows, and the history's endpoints. */
@@ -455,7 +562,15 @@ async function playerTotals(
     stats.wins += wins;
     stats.draws += Number(row.draws);
     stats.losses += Number(row.losses);
-    stats.byHero.push({ heroId: row.hero_id, heroName: row.hero_name, games, wins });
+    // Zeroed until `playerStats` stitches the #63 breakdown on; `playerTotals`
+    // is the un-filtered half and never learns about `minSeconds`.
+    stats.byHero.push({
+      heroId: row.hero_id,
+      heroName: row.hero_name,
+      games,
+      wins,
+      byOpponent: emptyHeroOpponents(),
+    });
     const first = row.first_game_at ? row.first_game_at.toISOString() : null;
     const last = row.last_game_at ? row.last_game_at.toISOString() : null;
     if (first && (stats.firstGameAt === null || first < stats.firstGameAt)) stats.firstGameAt = first;
@@ -715,6 +830,84 @@ async function playerByOpponentKind(pool: Pool, playerId: string): Promise<Playe
     }
   }
   return stats;
+}
+
+/**
+ * The cross of `byHero` and `byOpponentKind` (#63): per hero the player piloted,
+ * their record against humans and against each bot tier.
+ *
+ * The classification is `playerByOpponentKind`'s, unchanged and for the same
+ * reasons — opposing seats only (a teammate is not opposition), a game counts
+ * as a bot game if *any* opposing seat is a bot, a mixed-tier bot side is
+ * represented by its alphabetically first tier so a game lands in exactly one
+ * bucket, and the tier comes from `bot-tier.ts` (`bot_difficulty` when stamped,
+ * else decoded from the pilot label). The only differences are the extra
+ * `GROUP BY` on the player's own seat hero and the `minSeconds` floor.
+ *
+ * A game whose bot side decodes to `unknown` produces a row here too; the caller
+ * drops it, because {@link PlayerHeroOpponentStats} has no key to put it in.
+ *
+ * **The `minSeconds` floor.** `games.duration_seconds` is a nullable integer the
+ * producer reports (migration 001), which is the only per-game duration the
+ * schema has — `turns` is the other anti-farm signal and is left to the caller,
+ * which can already read it as `avgTurns`. A floor of 0 (the default) is *no*
+ * filter at all, null durations included; any positive floor requires a game to
+ * have actually reported a duration that meets it, so a game with no recorded
+ * duration cannot be farmed past the bar by omission. That asymmetry is the
+ * point: unknown must not read as long enough.
+ */
+async function playerByHeroOpponent(
+  pool: Pool,
+  playerId: string,
+  minSeconds: number,
+): Promise<Map<string, PlayerHeroOpponentStats>> {
+  const result = await pool.query<{
+    hero_id: string | null;
+    hero_name: string | null;
+    bucket: string;
+    games: string;
+    wins: string;
+  }>(
+    `
+      WITH mine AS (${PLAYER_SEATS_CTE}),
+      played AS (${PLAYER_GAMES_CTE}),
+      opposing AS (${OPPOSING_SEATS_CTE}),
+      per_game AS (
+        SELECT game_id,
+               bool_or(pilot_kind = 'bot') AS any_bot,
+               min(bot_tier) FILTER (WHERE pilot_kind = 'bot') AS difficulty
+        FROM opposing
+        GROUP BY game_id
+      )
+      SELECT p.hero_id, p.hero_name,
+             CASE WHEN o.any_bot THEN o.difficulty ELSE 'human' END AS bucket,
+             count(*) AS games,
+             count(*) FILTER (WHERE p.won) AS wins
+      FROM played p
+      JOIN per_game o ON o.game_id = p.game_id
+      WHERE $2::int = 0
+         OR (p.duration_seconds IS NOT NULL AND p.duration_seconds >= $2::int)
+      GROUP BY 1, 2, 3
+    `,
+    [playerId, minSeconds],
+  );
+
+  const byHero = new Map<string, PlayerHeroOpponentStats>();
+  for (const row of result.rows) {
+    const bucket = row.bucket as keyof PlayerHeroOpponentStats;
+    // `unknown` tiers (and any tier a future rule adds before this shape does)
+    // are counted in no bucket rather than folded into a neighbouring one.
+    if (!HERO_OPPONENT_BUCKETS.has(bucket)) continue;
+    const key = heroKey(row.hero_id, row.hero_name);
+    let entry = byHero.get(key);
+    if (!entry) {
+      entry = emptyHeroOpponents();
+      byHero.set(key, entry);
+    }
+    entry[bucket].games += Number(row.games);
+    entry[bucket].wins += Number(row.wins);
+  }
+  return byHero;
 }
 
 // ---------------------------------------------------------------------------

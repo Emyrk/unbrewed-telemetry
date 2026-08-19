@@ -257,7 +257,12 @@ Server-to-server only, authenticated with `Authorization: Bearer $ACCOUNTS_READ_
 
   ```json
   { "totalGames": 7, "wins": 4, "losses": 2, "draws": 1,
-    "byHero": [{ "heroId": "king-kong", "heroName": "King Kong", "games": 4, "wins": 3 }],
+    "byHero": [{ "heroId": "king-kong", "heroName": "King Kong", "games": 4, "wins": 3,
+                 "byOpponent": { "human": { "games": 1, "wins": 1 },
+                                 "easy":  { "games": 0, "wins": 0 },
+                                 "medium":{ "games": 0, "wins": 0 },
+                                 "hard":  { "games": 3, "wins": 2 },
+                                 "expert":{ "games": 0, "wins": 0 } } }],
     "firstGameAt": "…", "lastGameAt": "…" }
   ```
 
@@ -266,6 +271,10 @@ Server-to-server only, authenticated with `Authorization: Bearer $ACCOUNTS_READ_
   `clutchWins` and `fastestBotWinTurns` are the two records the accounts service's `clutch` / `speedrunner` badges are thresholds over (JollyGrin/unbrewed-api#26): wins by the player's own seat, not a draw, that ended in a `hero_defeated` kill against a side holding a **hard or expert** bot — `clutchWins` counts the ones finished at exactly 1 HP, `fastestBotWinTurns` is the smallest `turns` among them (null when there are none). Alone in this file they read `game_seats.bot_difficulty` raw rather than the pilot-label tier of #58: the label maps the starved-hard era (`bot:mc(64, 400ms)`) onto `hard`, which is the right call for win rates and the wrong one for "beat a hard bot in five turns". Stamping the column — live since JollyGrin/unbrewed-engine#366, retroactively via #60 — is what makes a game count. The payload also carries the #54 aggregates — `avgDurationSeconds`/`avgTurns`, `streaks`, `recentForm`, `byOpponentHero`, `byMap`, `byOpponentKind`, `firstPlayer`.
 
   `byOpponentKind` splits the bot side **by real tier** (#58): the engine has never stamped `game_seats.bot_difficulty` on the live serving path (NULL on 100% of live bot seats), so the tier is decoded from the seat's `pilot` label, which the engine writes from its running preset — `bot:easy` → easy, `bot:mc(16,…)` → medium, `bot:mc(64,…)`/`bot:mc` → hard, `bot:ismcts(…)`/`bot:expert(…)` → expert. A stamped `bot_difficulty` still wins when present. Labels no rule claims (the `bot:mc(sims-…/eps-…/depth-…)` sim knob-grid sweeps) bucket as `unknown` rather than being guessed at; the mapping lives in `src/db/bot-tier.ts` and is unit-tested. Every split row — `byOpponentKind.human`, each bot tier, and both sides of `firstPlayer` — carries `games`, `wins` and `draws`, so a client can read `losses = games - wins - draws` per slice.
+
+  `byHero[].byOpponent` (#63) is the cross of `byHero` and `byOpponentKind` — the per-hero, per-opponent-kind wins the cosmetics point system (unbrewed-p2p#610) is priced off. Five fixed keys, always present and zeroed when unplayed, each `{ games, wins }`. The classification is `byOpponentKind`'s, unchanged: opposing seats only, a game with *any* bot opponent is a bot game, a mixed-tier bot side counts once under its alphabetically first tier, and the tier is the stamped `bot_difficulty` or the decoded pilot label. Two kinds of game land in no bucket and so make the buckets sum to less than the row's `games` — a bot side whose label decodes to `unknown` (there is no key to invent one into), and a game with no opposing seat at all (a producer bug, dropped by `byOpponentKind` too).
+
+  `?minSeconds=<n>` is an optional anti-farm floor over `byHero[].byOpponent` **and nothing else** — `totalGames`, `byHero[].games`/`wins`, `byOpponentKind` and the records always count the full history, so one call serves both "you played 300 games" and "280 of them count for points". It floors `games.duration_seconds`, the only per-game duration the schema carries (nullable integer, migration `001`; `turns` is the other anti-farm signal and is left to the caller, which already gets `avgTurns`). The default of `0` is *no* filter, null durations included; any positive floor requires a game to have actually reported a duration meeting it, so omitting the field is not a way past the bar. Lenient like `limit`: blank, negative, or unparseable means no floor, and a fractional value truncates rather than 400ing.
 
 - `GET /accounts/leaderboard?limit=<n>` returns the XP inputs for **every** player with at least one completed game — the only cross-player read on this surface:
 

@@ -8,7 +8,12 @@ import type { CampaignItemBucket, ControlPlaneRepository, SimJobCheckpoint } fro
 import type { DeckDefinitionSubmission, GameSubmission, RecentHourlyResponse } from '../types.js';
 import { verifyIngestAuth } from './auth.js';
 import { verifyAccountsReadAuth } from './accounts-auth.js';
-import { clampLeaderboardLimit, clampPlayerGamesLimit, decodePlayerGamesCursor } from '../db/accounts.js';
+import {
+  clampLeaderboardLimit,
+  clampPlayerGamesLimit,
+  clampPlayerStatsMinSeconds,
+  decodePlayerGamesCursor,
+} from '../db/accounts.js';
 import { parseBearer, verifySecret, hasScope, type Scope } from './bearer-auth.js';
 import { serveDashboardAsset } from './static.js';
 
@@ -737,7 +742,13 @@ async function handleAccountsPlayerRead(
 
   const resource = segments[3];
   if (resource === 'stats') {
-    sendJson(res, 200, { ok: true, ...(await repo.playerStats(playerId)) });
+    // `?minSeconds=` is the anti-farm floor (#63) and touches `byHero[].byOpponent`
+    // alone. Lenient like `limit`: blank, unparseable or non-positive means no floor.
+    const minSecondsParam = blankToNull(url.searchParams.get('minSeconds'));
+    const minSeconds = clampPlayerStatsMinSeconds(
+      minSecondsParam === null ? null : Number(minSecondsParam),
+    );
+    sendJson(res, 200, { ok: true, ...(await repo.playerStats(playerId, { minSeconds })) });
     return;
   }
   if (resource !== 'games') {
