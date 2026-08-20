@@ -1084,6 +1084,200 @@ describeDb('accounts read api', () => {
     });
   });
 
+  describe('cosmetic-point anti-farm rules (#66)', () => {
+    // The rules shape `byHero[].byOpponent` only, so every test here reads that
+    // block for one hero and then checks the raw record beside it: a rule that
+    // leaked into `byHero[].games`/`wins` or `byOpponentKind` would show up as
+    // the player's history shrinking, which is not what any of this is for.
+
+    /** Alice on king-kong against one other seat; humans carry an account id. */
+    async function duel(options: {
+      id: string;
+      day: number;
+      opponent: { pilot: string; playerId?: string };
+      winner: number | null;
+      draw?: boolean;
+      turns?: number;
+      endCondition?: string;
+    }): Promise<void> {
+      await ingest(game({
+        id: options.id,
+        endedAt: `2026-11-${String(options.day).padStart(2, '0')}T10:00:00.000Z`,
+        teams: [
+          [{ deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'human', playerId: ALICE }],
+          [{
+            deck: 'the-mandalorian@1.0.0',
+            heroId: 'the-mandalorian',
+            pilot: options.opponent.pilot,
+            ...(options.opponent.playerId ? { playerId: options.opponent.playerId } : {}),
+          }],
+        ],
+        winner: options.winner,
+        // Spread rather than pass `undefined`: the helper's defaults are what
+        // "not specified" means, and exactOptionalPropertyTypes is on.
+        ...(options.draw === undefined ? {} : { draw: options.draw }),
+        ...(options.turns === undefined ? {} : { turns: options.turns }),
+        ...(options.endCondition === undefined ? {} : { endCondition: options.endCondition }),
+      }));
+    }
+
+    /** A human-vs-human duel; `winner` 0 is Alice, 1 is Bob. */
+    function humanDuel(options: {
+      id: string;
+      day: number;
+      winner: number | null;
+      draw?: boolean;
+      turns?: number;
+      endCondition?: string;
+    }): Promise<void> {
+      return duel({ ...options, opponent: { pilot: 'human', playerId: BOB } });
+    }
+
+    /** The breakdown for one hero of the player's `byHero` rows. */
+    async function byOpponent(playerId: string, heroId: string): Promise<HeroOpponents | undefined> {
+      const body = await stats(playerId);
+      return body.byHero.find((row) => row.heroId === heroId)?.byOpponent;
+    }
+
+    describe('forfeits', () => {
+      beforeEach(async () => {
+        // One conceded game and one honest one, so "the conceder earns nothing"
+        // is visible as a difference rather than as an empty payload.
+        await humanDuel({ id: 'g-66-forfeit', day: 1, winner: 1, endCondition: 'forfeit' });
+        await humanDuel({ id: 'g-66-honest', day: 2, winner: 0 });
+      });
+
+      it('pays the conceding seat nothing at all — not even the played credit', async () => {
+        // Alice conceded day 1: only the honest win she played out is countable.
+        expect(await byOpponent(ALICE, 'king-kong')).toEqual(
+          heroOpponents({ human: { games: 1, wins: 1 } }),
+        );
+      });
+
+      it('pays the seat conceded to the played credit but no win bonus', async () => {
+        // Bob won day 1 by forfeit and lost day 2: two games, no countable win.
+        expect(await byOpponent(BOB, 'the-mandalorian')).toEqual(
+          heroOpponents({ human: { games: 2, wins: 0 } }),
+        );
+      });
+
+      it('treats every concession-shaped end condition alike, however cased', async () => {
+        await humanDuel({ id: 'g-66-timeout', day: 3, winner: 1, endCondition: 'timeout' });
+        await humanDuel({ id: 'g-66-disconnect', day: 4, winner: 1, endCondition: 'DISCONNECT' });
+
+        // Still just the honest win — neither concession added anything for Alice.
+        expect(await byOpponent(ALICE, 'king-kong')).toEqual(
+          heroOpponents({ human: { games: 1, wins: 1 } }),
+        );
+        // ...and Bob's three concession wins are three played games, no wins.
+        expect(await byOpponent(BOB, 'the-mandalorian')).toEqual(
+          heroOpponents({ human: { games: 4, wins: 0 } }),
+        );
+      });
+
+      it('leaves a draw alone', async () => {
+        await humanDuel({
+          id: 'g-66-draw', day: 5, winner: null, draw: true, endCondition: 'simultaneous',
+        });
+
+        // The draw is a game both seats played to the end: countable, unwon.
+        expect(await byOpponent(ALICE, 'king-kong')).toEqual(
+          heroOpponents({ human: { games: 2, wins: 1 } }),
+        );
+        expect(await byOpponent(BOB, 'the-mandalorian')).toEqual(
+          heroOpponents({ human: { games: 3, wins: 0 } }),
+        );
+      });
+
+      it('leaves the raw record untouched for both seats', async () => {
+        const alice = await stats(ALICE);
+        expect(alice.byHero).toEqual([
+          {
+            heroId: 'king-kong', heroName: 'King Kong', games: 2, wins: 1,
+            byOpponent: heroOpponents({ human: { games: 1, wins: 1 } }),
+          },
+        ]);
+        expect(alice.byOpponentKind).toEqual({
+          human: { games: 2, wins: 1, draws: 0 }, bots: [],
+        });
+        expect(alice.totalGames).toBe(2);
+
+        const bob = await stats(BOB);
+        expect(bob.byHero[0]).toMatchObject({ heroId: 'the-mandalorian', games: 2, wins: 1 });
+        expect(bob.byOpponentKind).toEqual({
+          human: { games: 2, wins: 1, draws: 0 }, bots: [],
+        });
+      });
+    });
+
+    describe('short human wins', () => {
+      it('pays the played credit but no win bonus under five turns', async () => {
+        await humanDuel({ id: 'g-66-t2', day: 1, winner: 0, turns: 2 });
+        await humanDuel({ id: 'g-66-t4', day: 2, winner: 0, turns: 4 });
+
+        expect(await byOpponent(ALICE, 'king-kong')).toEqual(
+          heroOpponents({ human: { games: 2, wins: 0 } }),
+        );
+      });
+
+      it('pays the win bonus at exactly five turns', async () => {
+        await humanDuel({ id: 'g-66-t5', day: 3, winner: 0, turns: 5 });
+
+        expect(await byOpponent(ALICE, 'king-kong')).toEqual(
+          heroOpponents({ human: { games: 1, wins: 1 } }),
+        );
+      });
+
+      it('counts a win whose turn count was never reported', async () => {
+        // The opposite asymmetry to the `minSeconds` floor, on purpose: a
+        // missing `turns` is a producer gap on ordinary games, so unknown
+        // passes rather than being read as a two-turn concede.
+        await humanDuel({ id: 'g-66-null', day: 4, winner: 0, turns: 12 });
+        await pool.query(`UPDATE games SET turns = NULL WHERE id = 'g-66-null'`);
+
+        expect(await byOpponent(ALICE, 'king-kong')).toEqual(
+          heroOpponents({ human: { games: 1, wins: 1 } }),
+        );
+      });
+
+      it('exempts bot buckets — a two-turn expert kill is a real win', async () => {
+        await duel({
+          id: 'g-66-bot', day: 5, opponent: { pilot: 'bot:ismcts(512,10000ms)' },
+          winner: 0, turns: 2,
+        });
+
+        expect(await byOpponent(ALICE, 'king-kong')).toEqual(
+          heroOpponents({ expert: { games: 1, wins: 1 } }),
+        );
+      });
+
+      it('leaves the raw record untouched', async () => {
+        await humanDuel({ id: 'g-66-t2', day: 1, winner: 0, turns: 2 });
+        await duel({
+          id: 'g-66-bot', day: 5, opponent: { pilot: 'bot:ismcts(512,10000ms)' },
+          winner: 0, turns: 2,
+        });
+
+        const body = await stats(ALICE);
+        // Two wins in the history; only the bot one is countable for points.
+        expect(body.byHero).toEqual([
+          {
+            heroId: 'king-kong', heroName: 'King Kong', games: 2, wins: 2,
+            byOpponent: heroOpponents({
+              human: { games: 1, wins: 0 },
+              expert: { games: 1, wins: 1 },
+            }),
+          },
+        ]);
+        expect(body.byOpponentKind).toEqual({
+          human: { games: 1, wins: 1, draws: 0 },
+          bots: [{ difficulty: 'expert', games: 1, wins: 1, draws: 0 }],
+        });
+        expect(body.totalGames).toBe(2);
+      });
+    });
+  });
+
   describe('clutch and speedrun records (unbrewed-api#26)', () => {
     // One history holding every way a win can and cannot qualify. Every
     // *excluded* game is deliberately faster than every included one, so a
