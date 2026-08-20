@@ -33,6 +33,27 @@ export const PLAYER_GAMES_MAX_LIMIT = 50;
 /** No duration floor: `byHero[].byOpponent` counts every game, however short. */
 export const PLAYER_STATS_DEFAULT_MIN_SECONDS = 0;
 
+/**
+ * End conditions that mean a seat *gave the game away* rather than lost it (#66).
+ *
+ * A concession is worth nothing to either side of the cosmetics point ledger:
+ * two accounts trading instant concedes is the cheapest human-vs-human farm
+ * there is. Kept as a list rather than `<> 'hero_defeated'` because the engine
+ * also ends games in ways that are neither a kill nor a concession
+ * (`simultaneous` — a draw — and `objective`), and those stay countable.
+ * Compared case-insensitively: `endCondition` is a free-form producer string
+ * (schema `game-submission.v1`), stored exactly as it arrives.
+ */
+export const CONCESSION_END_CONDITIONS = ['forfeit', 'timeout', 'disconnect'];
+
+/**
+ * A win against a human in fewer than this many turns pays no win bonus (#66).
+ *
+ * Bot buckets are exempt: a 2-turn kill on an expert bot is a real result, and
+ * a bot cannot agree to lose. Only the human bucket is collusion-shaped.
+ */
+export const MIN_HUMAN_WIN_TURNS = 5;
+
 export interface PlayerGameSeat {
   heroId: string | null;
   heroName: string | null;
@@ -92,6 +113,21 @@ export interface PlayerHeroOpponentSplit {
  *
  * A non-zero `minSeconds` filter takes more games out of the buckets on top of
  * that — see {@link playerStats}.
+ *
+ * **These counts are what the cosmetics point system may pay for (#66)**, not
+ * the raw record: `byHero[].games`/`wins` and `byOpponentKind` stay unfiltered.
+ * Two per-game anti-farm rules apply here and nowhere else in the payload:
+ *
+ * - **Concessions** ({@link CONCESSION_END_CONDITIONS}). The seat that conceded
+ *   counts toward neither `games` nor `wins`; the seat that was conceded to
+ *   counts toward `games` but earns no `wins`. Nobody profits from a concede,
+ *   in either direction. Draws (`simultaneous`) are untouched.
+ * - **Short human wins** ({@link MIN_HUMAN_WIN_TURNS}). A win in the `human`
+ *   bucket that took fewer than 5 turns counts toward `games` but not `wins`.
+ *   Bot buckets are exempt. `turns` NULL passes — unlike the duration floor,
+ *   unknown reads as long enough here, because a missing `turns` is a producer
+ *   gap on real games and the concession rule already covers the farm shape a
+ *   colluding pair can actually reach.
  */
 export interface PlayerHeroOpponentStats {
   human: PlayerHeroOpponentSplit;
@@ -107,9 +143,9 @@ export interface PlayerHeroStat {
   games: number;
   wins: number;
   /**
-   * The same games, crossed with opponent kind (#63). `games`/`wins` above are
-   * never filtered; this block is the only part of the payload `minSeconds`
-   * touches.
+   * The same games, crossed with opponent kind (#63), less what the anti-farm
+   * rules of #66 disqualify. `games`/`wins` above are never filtered; this
+   * block is the only part of the payload `minSeconds` and those rules touch.
    */
   byOpponent: PlayerHeroOpponentStats;
 }
@@ -431,11 +467,12 @@ function mean(value: string | null): number | null {
  * output row, and the only JS fold is stitching the per-hero opponent
  * breakdown onto the `byHero` rows it belongs to.
  *
- * `minSeconds` is an anti-farm floor (#63) and is **deliberately narrow**: it
- * filters `byHero[].byOpponent` and nothing else. Every other number in the
- * payload — `totalGames`, `byHero[].games`/`wins`, `byOpponentKind`, the
- * records — counts the player's whole history, so a client can show "you played
- * 300 games" beside "280 of them count for points" without two calls.
+ * The anti-farm rules are **deliberately narrow**: `minSeconds` (#63) and the
+ * concession / short-human-win predicates (#66) shape `byHero[].byOpponent` and
+ * nothing else. Every other number in the payload — `totalGames`,
+ * `byHero[].games`/`wins`, `byOpponentKind`, the records — counts the player's
+ * whole history, so a client can show "you played 300 games" beside "280 of
+ * them count for points" without two calls. See {@link playerByHeroOpponent}.
  */
 export async function playerStats(
   pool: Pool,
@@ -854,7 +891,31 @@ async function playerByOpponentKind(pool: Pool, playerId: string): Promise<Playe
  * filter at all, null durations included; any positive floor requires a game to
  * have actually reported a duration that meets it, so a game with no recorded
  * duration cannot be farmed past the bar by omission. That asymmetry is the
- * point: unknown must not read as long enough.
+ * point: unknown must not read as long enough. It stays because it is upstream
+ * contract; unbrewed-api stopped sending it (unbrewed-api#35) once it turned out
+ * `duration_seconds` was NULL on every live game.
+ *
+ * **The anti-farm rules (#66).** What replaces it are two *per-game* predicates,
+ * which live here rather than in the caller because that is where the columns
+ * are — the caller sees only the folded counts:
+ *
+ * 1. A concession ({@link CONCESSION_END_CONDITIONS}) pays nobody. The
+ *    conceding seat (the player's own seat, `won = false`) is dropped from
+ *    `games` as well as `wins` — it is not a game they played, it is a game
+ *    they handed over — and the seat conceded to keeps the played credit but
+ *    gets no win bonus. So two accounts trading instant concedes earn the
+ *    "played" points of the games they actually sat through and nothing more.
+ * 2. A win in the `human` bucket under {@link MIN_HUMAN_WIN_TURNS} turns keeps
+ *    its played credit and loses its win bonus. Bot buckets are exempt: prod
+ *    has ten legitimate 2–4-turn wins and every one of them is against a bot,
+ *    which cannot collude. A NULL `turns` passes, deliberately the opposite of
+ *    the duration floor's asymmetry — `turns` is a producer gap on ordinary
+ *    long games, not the reachable farm shape, and treating unknown as short
+ *    is exactly the mistake that zeroed everyone in unbrewed-api#35.
+ *
+ * The rules bite only on the buckets. `playerTotals` and `playerByOpponentKind`
+ * run their own queries over the same games and are untouched, so the record,
+ * badges and XP still see every game the player played.
  */
 async function playerByHeroOpponent(
   pool: Pool,
@@ -878,18 +939,27 @@ async function playerByHeroOpponent(
                min(bot_tier) FILTER (WHERE pilot_kind = 'bot') AS difficulty
         FROM opposing
         GROUP BY game_id
+      ),
+      scored AS (
+        SELECT p.hero_id, p.hero_name,
+               CASE WHEN o.any_bot THEN o.difficulty ELSE 'human' END AS bucket,
+               p.won,
+               -- COALESCE, not a bare comparison: end_condition is nullable, and
+               -- a NULL flag would make the FILTERs below drop the row entirely.
+               COALESCE(lower(btrim(p.end_condition)) = ANY($3::text[]), false) AS conceded_game,
+               COALESCE(NOT o.any_bot AND p.turns < $4::int, false) AS short_human_game
+        FROM played p
+        JOIN per_game o ON o.game_id = p.game_id
+        WHERE $2::int = 0
+           OR (p.duration_seconds IS NOT NULL AND p.duration_seconds >= $2::int)
       )
-      SELECT p.hero_id, p.hero_name,
-             CASE WHEN o.any_bot THEN o.difficulty ELSE 'human' END AS bucket,
-             count(*) AS games,
-             count(*) FILTER (WHERE p.won) AS wins
-      FROM played p
-      JOIN per_game o ON o.game_id = p.game_id
-      WHERE $2::int = 0
-         OR (p.duration_seconds IS NOT NULL AND p.duration_seconds >= $2::int)
+      SELECT hero_id, hero_name, bucket,
+             count(*) FILTER (WHERE NOT (conceded_game AND NOT won)) AS games,
+             count(*) FILTER (WHERE won AND NOT conceded_game AND NOT short_human_game) AS wins
+      FROM scored
       GROUP BY 1, 2, 3
     `,
-    [playerId, minSeconds],
+    [playerId, minSeconds, CONCESSION_END_CONDITIONS, MIN_HUMAN_WIN_TURNS],
   );
 
   const byHero = new Map<string, PlayerHeroOpponentStats>();
