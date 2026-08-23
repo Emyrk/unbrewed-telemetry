@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { GameSubmission } from '../src/types.js';
+import type { GameSubmission, QueueEvent } from '../src/types.js';
 
 export interface CanonicalRulesOverrides {
   heroHealth?: number;
@@ -122,6 +122,19 @@ export function sampleGame(overrides: Partial<GameSubmission> = {}): GameSubmiss
         { seat: [1, 0], card: 'sudden-lunge', turn: 4, context: 'attack' },
       ],
     },
+    ...overrides,
+  };
+}
+
+/** One matchmaking queue lifecycle event (#68). Quick-match search by default. */
+export function sampleQueueEvent(overrides: Partial<QueueEvent> = {}): QueueEvent {
+  return {
+    type: 'search_started',
+    roomId: 'room-001',
+    heroId: 'king-kong',
+    formatId: 'duel',
+    quickMatch: true,
+    ts: '2026-08-23T11:59:00.000Z',
     ...overrides,
   };
 }

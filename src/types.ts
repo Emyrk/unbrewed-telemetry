@@ -663,3 +663,46 @@ export interface DeckDetailResponse {
   startingCards: DeckCardInfluence[];
   cards: DeckCardInfluence[];
 }
+
+/** Matchmaking queue lifecycle events (schemas/queue-events.v1.schema.json). */
+export type QueueEventType = 'search_started' | 'matched' | 'abandoned';
+
+export type QueueAbandonReason = 'expired' | 'host_left';
+
+export interface QueueEvent {
+  type: QueueEventType;
+  roomId: string;
+  heroId: string;
+  formatId: string;
+  quickMatch: boolean;
+  /** Milliseconds spent searching; matched/abandoned only. */
+  waitMs?: number;
+  /** Abandoned events only. */
+  reason?: QueueAbandonReason;
+  ts: string;
+}
+
+export interface QueueEventsSubmission {
+  schemaVersion?: 1;
+  events: QueueEvent[];
+}
+
+/** One `quick_match` bucket of the trailing-window queue wait aggregate. */
+export interface QueueWaitBucket {
+  quickMatch: boolean;
+  searchStarted: number;
+  matched: number;
+  abandoned: number;
+  /** matched / search_started, or null when nothing started in the window. */
+  matchRate: number | null;
+  /** Over matched events that reported a wait. */
+  waitSamples: number;
+  medianWaitMs: number | null;
+  p75WaitMs: number | null;
+}
+
+export interface QueueWaitStatsResponse {
+  windowHours: number;
+  generatedAt: string;
+  buckets: QueueWaitBucket[];
+}

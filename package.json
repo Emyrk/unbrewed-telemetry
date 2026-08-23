@@ -14,6 +14,7 @@
     "db:compose:up": "docker compose up -d postgres",
     "db:compose:down": "docker compose down -v",
     "submit:sample": "tsx scripts/submit-sample.mts",
+    "stats:queue-wait": "tsx scripts/queue-wait-stats.mts",
     "sim:seed-credentials": "tsx scripts/seed-sim-credentials.mts",
     "sim:seed-campaign": "tsx scripts/seed-sim-campaign.mts",
     "sim:seed-deck-tuning": "tsx scripts/seed-deck-tuning-campaign.mts"

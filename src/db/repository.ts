@@ -6,6 +6,12 @@ import { wilson } from '../stats/wilson.js';
 import { buildDeckProfile, type CardBucketCounts } from '../stats/profile.js';
 import { countCards, leanFrom } from '../stats/composition.js';
 import {
+  QUEUE_WAIT_STATS_SQL,
+  queueWaitBucket,
+  windowCutoff,
+  type QueueWaitStatsRow,
+} from '../stats/queue-wait.js';
+import {
   leaderboard,
   playerGames,
   playerStats,
@@ -33,6 +39,8 @@ import type {
   NormalizedStartingCard,
   NormalizedTeam,
   PilotComparisonResponse,
+  QueueEvent,
+  QueueWaitStatsResponse,
   RecentGame,
   RecentGamesResponse,
   RecentHourlyResponse,
@@ -140,6 +148,58 @@ export class PgTelemetryRepository {
   /** Accounts read API (#56): games/wins for every player with a completed game. */
   async leaderboard(options: { limit: number | null }): Promise<LeaderboardPlayer[]> {
     return leaderboard(this.pool, options);
+  }
+
+  /**
+   * Queue wait events (#68): append one batch of matchmaking lifecycle events
+   * exactly as received. No dedupe and no aggregation at write time — the
+   * estimate is a query over the raw stream (see `queueWaitStats`).
+   */
+  async insertQueueEvents(events: readonly QueueEvent[], receivedAt: Date): Promise<number> {
+    if (events.length === 0) return 0;
+    const columns = 9;
+    const values: unknown[] = [];
+    const tuples = events.map((event, index) => {
+      values.push(
+        receivedAt,
+        event.type,
+        event.roomId,
+        event.heroId,
+        event.formatId,
+        event.quickMatch,
+        event.waitMs ?? null,
+        event.reason ?? null,
+        event.ts,
+      );
+      const base = index * columns;
+      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9})`;
+    });
+    const result = await this.pool.query(
+      `INSERT INTO queue_events
+         (received_at, type, room_id, hero_id, format_id, quick_match, wait_ms, reason, ts)
+       VALUES ${tuples.join(', ')}`,
+      values,
+    );
+    return result.rowCount ?? 0;
+  }
+
+  /**
+   * Queue wait events (#68): median/p75 wait for matched searches and the
+   * match rate over a trailing window, split by quick match. The query itself
+   * lives in `src/stats/queue-wait.ts` so the script and any future read
+   * endpoint share one definition.
+   */
+  async queueWaitStats(
+    options: { windowHours: number },
+    generatedAt = new Date(),
+  ): Promise<QueueWaitStatsResponse> {
+    const cutoff = windowCutoff(generatedAt, options.windowHours);
+    const { rows } = await this.pool.query<QueueWaitStatsRow>(QUEUE_WAIT_STATS_SQL, [cutoff]);
+    return {
+      windowHours: options.windowHours,
+      generatedAt: generatedAt.toISOString(),
+      buckets: rows.map(queueWaitBucket),
+    };
   }
 
   async ingestValid(args: IngestArgs): Promise<IngestCreated | IngestDuplicate> {
