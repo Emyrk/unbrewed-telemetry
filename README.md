@@ -190,6 +190,83 @@ exactly as before, historical rows keep their lossy `cards` payload, and no
 backfill is performed. **Run `npm run db:migrate` before deploying this code**:
 the deck upsert references the new columns unconditionally.
 
+### `POST /v1/queue-events`
+
+Ingests a batch of matchmaking queue lifecycle events matching
+`schemas/queue-events.v1.schema.json`. This is the wait-time feed behind the
+future "typical wait" estimate on the matchmaking screen; it is ingest and
+storage only, and nothing in it joins to games.
+
+Auth is the **HMAC scheme only** — the same one `/v1/games` accepts from legacy
+producers, signing `<timestamp>.<raw request body>` with `TELEMETRY_SECRET`:
+
+```text
+X-Unbrewed-Timestamp: <ISO-8601 or unix seconds>
+X-Unbrewed-Signature: sha256=<hex>
+Content-Type: application/json
+```
+
+Bearer `ubk_` credentials are deliberately **not** accepted here: the producer is
+the game server itself, and a queue event carries no source attribution for a
+named credential to override.
+
+```json
+{
+  "events": [
+    { "type": "search_started", "roomId": "room-91", "heroId": "king-kong", "formatId": "duel", "quickMatch": true, "ts": "2026-08-23T11:59:00.000Z" },
+    { "type": "matched", "roomId": "room-91", "heroId": "king-kong", "formatId": "duel", "quickMatch": true, "waitMs": 8200, "ts": "2026-08-23T11:59:08.200Z" },
+    { "type": "abandoned", "roomId": "room-92", "heroId": "medusa", "formatId": "duel", "quickMatch": false, "waitMs": 120000, "reason": "expired", "ts": "2026-08-23T11:58:00.000Z" }
+  ]
+}
+```
+
+`waitMs` is optional and only valid on `matched`/`abandoned`; `reason`
+(`expired` | `host_left`) is optional and only valid on `abandoned`. Unknown
+properties are rejected at every level. A valid batch returns
+`201 {"ok": true, "inserted": <n>}`; a bad signature is `401` and a schema or
+field/type violation is `400`. The engine POSTs fire-and-forget, so it never
+reads the response — deploy order between the two services does not matter.
+
+Rows land in `queue_events` (migration `015`) exactly as received: one row per
+event, no dedupe, no aggregation at write time. **Run `npm run db:migrate`
+before deploying this code.**
+
+#### Queue wait aggregate
+
+The estimate is a query over the raw stream, not a stored rollup. It lives in
+`src/stats/queue-wait.ts` as `QUEUE_WAIT_STATS_SQL` — one definition shared by
+the repository (`repo.queueWaitStats({ windowHours })`), the script below, and
+whatever read endpoint the UI ticket adds:
+
+```sh
+npm run stats:queue-wait            # trailing 24h
+npm run stats:queue-wait -- 168     # trailing 7d
+```
+
+```json
+{
+  "windowHours": 24,
+  "generatedAt": "2026-08-23T21:37:05.129Z",
+  "buckets": [
+    { "quickMatch": true, "searchStarted": 4, "matched": 2, "abandoned": 1,
+      "matchRate": 0.5, "waitSamples": 2, "medianWaitMs": 9600, "p75WaitMs": 12300 }
+  ]
+}
+```
+
+Per `quick_match` bucket, over the trailing window: median and p75 `wait_ms` for
+`matched` searches, and the match rate (`matched / search_started`). Three
+choices worth knowing when reading the numbers:
+
+- The percentiles cover `matched` only. A wait on an `abandoned` search is how
+  long someone waited before giving up, which is a different question and would
+  drag the estimate away from "wait until a match".
+- The window is on `received_at` (server clock), not `ts` (producer clock): a
+  client with a skewed clock would otherwise fall outside every window or inside
+  all of them. `ts` is kept as the producer's own account of when it happened.
+- Match rate counts searches still open at the window edge as unmatched, so a
+  window much shorter than a typical search reads pessimistic.
+
 ### Admin control plane
 
 `GET /admin` uses Discord OAuth and the `ADMIN_DISCORD_IDS` allowlist. Admins can:

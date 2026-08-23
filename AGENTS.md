@@ -66,6 +66,7 @@ Recommended endpoints:
 - `GET /healthz` returns 200 with `{ ok: true }` for Railway health checks.
 - `POST /v1/games` ingests one completed game.
 - `POST /v1/decks` upserts a batch of deck definitions into the versioned registry (named bearer credential with `decks:submit` scope). Payload schema: `schemas/deck-definitions.v1.schema.json`.
+- `POST /v1/queue-events` ingests a batch of matchmaking queue lifecycle events (#68) — `search_started` / `matched` / `abandoned`, each with room, hero, format, quick-match flag, an optional `waitMs` (matched/abandoned) and an optional `reason` (abandoned). Payload schema: `schemas/queue-events.v1.schema.json`. **HMAC only** (`TELEMETRY_SECRET`, the same scheme legacy `/v1/games` producers use): the producer is the game server itself and a queue event carries no source attribution for a `ubk_` credential to override. Rows land in `queue_events` as received — no dedupe, no aggregation at write time — and the engine POSTs fire-and-forget, so deploy order between the services does not matter. The wait/match-rate estimate is a query over that stream (`src/stats/queue-wait.ts`, `npm run stats:queue-wait`), not a stored rollup; the on-screen estimate is a later follow-up.
 - `GET /v1/stats/dashboard?format=&pilots=` returns all aggregates the dashboard needs (decks with deck profiles, formats with boss-side win rate + by-boss breakdown, maps, pilots, matchups, synergy, first-player).
 - `GET /v1/stats/decks?format=&pilots=` returns just the deck table slice.
 - `GET /v1/stats/pilot-comparison?pilotA=&pilotB=&opponentPilot=&hero=&opponent=` compares two exact pilots in 1v1 while holding the opposing pilot constant. Without `hero`, rows summarize active heroes; with `hero`, rows list that hero against each opposing hero and always include its mirror matchup. Powers the Pilot Comparisons dashboard tab.
@@ -113,6 +114,7 @@ Suggested relational tables:
 - `game_seats`: one row per player seat. Include team index, seat index, runtime player id, deck id, deck version, hero id, pilot kind, bot id or difficulty, pseudonymous player id, first-player flag, winner flag, final health, final deck count, final hand count, and final discard count where available.
 - `deck_definitions`: versioned deck registry pushed via `POST /v1/decks` (migration `003_deck_definitions.sql`). One row per `(deck_id, version)` with precomputed per-type card counts + Σ values and the raw `cards` jsonb. Since migration `012` it also archives the deck's canonical rules: `rules_canonical` (the exact bytes the engine hashed into `rules_hash`, verified on ingest) and `rules` (the same content parsed, for SQL-queryable card values, effect programs, and hero stats).
 - `game_cards`: per-card-play facts derived from `telemetry.cardsPlayed` (migration `002_card_events.sql`). One row per play event, carrying the seat's deck, a normalized context bucket (attack/defense/scheme/boost/discard/other), and the seat's win flag. Powers deck play-mix profiles and card influence.
+- `queue_events`: raw matchmaking queue lifecycle events from `POST /v1/queue-events` (migration `015_queue_events.sql`). One row per event with `received_at` (server clock) and `ts` (producer clock); no foreign keys and no natural key, since a search never becomes a game row and fire-and-forget delivery leaves nothing stable to dedupe on. Trailing-window aggregates read it directly and window on `received_at`, so a producer with a skewed clock cannot fall outside every window.
 - `game_actions`: optional detailed action rows derived from replay logs. Use for card and turn analytics.
 - `game_events`: optional detailed event rows derived from engine events or replay expansion. Use for combat, damage, movement, and card influence analytics.
 - `game_cards`: optional per-card aggregate facts per game and seat, such as drawn, played, boosted, defended, discarded, damage attributed, and turn first played.
@@ -323,8 +325,11 @@ Other useful commands:
 ```sh
 npm run db:compose:down
 npm run submit:sample
+npm run stats:queue-wait
 TEST_DATABASE_URL=postgres://unbrewed:unbrewed@localhost:55432/unbrewed_telemetry npm test
 ```
+
+`npm run stats:queue-wait [hours]` prints the matchmaking wait aggregate (#68) for a trailing window — median/p75 wait for matched searches and the match rate, split by quick match — over the raw `queue_events` stream. Read-only.
 
 `npm run db:migrate` reads `.env` when present and defaults to the local compose database when `DATABASE_URL` is unset. The DB-backed tests truncate `game_submissions CASCADE`; run them only against a disposable database. If a command changes, update this section in the same change.
 

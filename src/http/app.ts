@@ -2,10 +2,16 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomUUID, createHmac } from 'node:crypto';
 import { validateGameSubmission } from '../ingest/schema.js';
 import { validateDeckDefinitions } from '../ingest/deck-schema.js';
+import { validateQueueEvents } from '../ingest/queue-events-schema.js';
 import { deckRulesNotices } from '../ingest/deck-rules.js';
 import type { PgTelemetryRepository } from '../db/repository.js';
 import type { CampaignItemBucket, ControlPlaneRepository, SimJobCheckpoint } from '../db/control-plane-repository.js';
-import type { DeckDefinitionSubmission, GameSubmission, RecentHourlyResponse } from '../types.js';
+import type {
+  DeckDefinitionSubmission,
+  GameSubmission,
+  QueueEventsSubmission,
+  RecentHourlyResponse,
+} from '../types.js';
 import { verifyIngestAuth } from './auth.js';
 import { verifyAccountsReadAuth } from './accounts-auth.js';
 import {
@@ -84,6 +90,11 @@ async function handleRequest(
 
   if (req.method === 'POST' && url.pathname === '/v1/games') {
     await handleGameIngest(req, res, repo, config, cpRepo);
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/v1/queue-events') {
+    await handleQueueEventIngest(req, res, repo, config);
     return;
   }
 
@@ -384,6 +395,62 @@ async function handleGameIngest(
     return;
   }
   sendJson(res, 201, { ok: true, duplicate: false, submissionId: result.submissionId, gameId: result.gameId });
+}
+
+/**
+ * Queue wait events (#68). HMAC only, exactly like the legacy `/v1/games`
+ * path: the producer is the game server itself, not a named fleet credential,
+ * and these events carry no source attribution to hang a bearer scope on.
+ *
+ * The engine POSTs fire-and-forget, so the response body is only ever read by
+ * tests and by hand — but the status codes still have to be honest.
+ */
+async function handleQueueEventIngest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  repo: PgTelemetryRepository,
+  config: AppConfig,
+): Promise<void> {
+  const contentType = req.headers['content-type'];
+  if (contentType && !String(contentType).toLowerCase().includes('application/json')) {
+    sendJson(res, 415, { ok: false, code: 'UNSUPPORTED_MEDIA_TYPE', message: 'Content-Type must be application/json' });
+    return;
+  }
+
+  const body = await readBody(req, config.bodyLimitBytes);
+  if (!body.ok) {
+    sendJson(res, body.status, { ok: false, code: body.code, message: body.message });
+    return;
+  }
+
+  const auth = verifyIngestAuth(req.headers, body.body, {
+    secret: config.telemetrySecret,
+    allowUnauthenticated: config.allowUnauthenticatedIngest,
+    toleranceMs: 5 * 60 * 1000,
+    nowMs: () => config.now().getTime(),
+  });
+  if (!auth.ok) {
+    sendJson(res, auth.status, { ok: false, code: auth.code, message: auth.message });
+    return;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body.body.toString('utf8'));
+  } catch {
+    sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Request body is not valid JSON' });
+    return;
+  }
+
+  const validation = validateQueueEvents(parsed);
+  if (!validation.ok) {
+    sendJson(res, 400, { ok: false, code: 'VALIDATION_FAILED', errors: validation.errors });
+    return;
+  }
+
+  const { events } = parsed as QueueEventsSubmission;
+  const inserted = await repo.insertQueueEvents(events, config.now());
+  sendJson(res, 201, { ok: true, inserted });
 }
 
 async function handleDeckIngest(

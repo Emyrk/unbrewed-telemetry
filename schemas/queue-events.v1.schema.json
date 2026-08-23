@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unbrewed.xyz/schemas/telemetry/queue-events.v1.schema.json",
+  "title": "Unbrewed Telemetry Queue Events v1",
+  "description": "A batch of matchmaking queue lifecycle events emitted by the engine so wait times and match rates can be estimated. Events are facts about a search, not about a game: nothing here joins to games/game_seats.",
+  "type": "object",
+  "required": ["events"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": 1,
+      "description": "Optional. The version of record is the request path (/v1/queue-events); producers may stamp it anyway so a stored payload is self-describing."
+    },
+    "events": {
+      "type": "array",
+      "minItems": 1,
+      "description": "At least one event. An empty batch is a producer bug, not a no-op.",
+      "items": { "$ref": "#/$defs/event" }
+    }
+  },
+  "$defs": {
+    "event": {
+      "type": "object",
+      "required": ["type", "roomId", "heroId", "formatId", "quickMatch", "ts"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": ["search_started", "matched", "abandoned"],
+          "description": "search_started opens a search; matched and abandoned close it."
+        },
+        "roomId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Search/room id. Ties the closing event back to its search_started."
+        },
+        "heroId": { "type": "string", "minLength": 1 },
+        "formatId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable format id, for example duel or team-2v2."
+        },
+        "quickMatch": {
+          "type": "boolean",
+          "description": "Whether the search was a quick match. Wait stats are reported split by this."
+        },
+        "waitMs": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Milliseconds spent searching. Optional, and only meaningful on matched/abandoned: a search_started has not waited yet."
+        },
+        "reason": {
+          "enum": ["expired", "host_left"],
+          "description": "Why the search ended. Optional, and only meaningful on abandoned."
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Producer clock at the moment of the event."
+        }
+      }
+    }
+  }
+}
