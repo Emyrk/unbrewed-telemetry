@@ -400,10 +400,20 @@ Server-to-server only, authenticated with `Authorization: Bearer $ACCOUNTS_READ_
 
   XP is computed api-side from tiered weights telemetry does not know, so rows cannot be pre-sorted by it; they come back `gamesPlayed` descending (`playerId` breaks ties) and the caller sorts. `byOpponentKind` is the same block, with the same semantics, that `/stats` returns — a game with *any* bot opponent is a bot game, opposing seats only, bot rows keyed on the tier decoded from the pilot label — and it is what lets the caller price a human win differently from an easy-bot win instead of weighting everything as human. `limit` is an optional safety cap, not a page size: omit it — or send a blank, unparseable, or non-positive value — and every player is returned. A row is by construction identical to what that player's own `/stats` reports as `totalGames`/`wins`/`byOpponentKind`.
 
+- `GET /accounts/community?window=all|month` and `GET /accounts/heroes/:heroId?window=all|month` (#72) are the community aggregates behind the stats dashboard's community and per-hero pages (field-by-field shapes: the stats dashboard contract §1a/§1b). Both read **qualifying community games only**: `campaign_id IS NULL AND format IN ('duel','1v1') AND` at least one human seat, so sim campaigns, bot-vs-bot games and team formats never count. Timestamps are `COALESCE(ended_at, received_at)`.
+
+  - `window` is `all` (default, also when blank) or `month` (the current UTC calendar month, echoed back as `windowStart`); anything else is `400 BAD_WINDOW`.
+  - **Opponent kind** is the opposing seat's: `human`, `casual` (easy/medium bot) or `hardExpert` (hard, expert, and any tier `bot-tier.ts` cannot decode). A game's kind is `human` when both seats are human, else its human seat's opponent kind.
+  - `community` returns `totals` (distinct games by kind, plus `humanVsExpert` human seat-games against an expert bot), `weekly` (always the last 12 Monday-UTC weeks including the current one, oldest first, zero-filled, **ignoring** `window`), `heroes` (human seat-games per hero, so a human-vs-human game counts both seats; games desc, heroId asc) each with its `crown`, and the `matchups` grid over every seat, human or bot, in both orientations (`A|B.games == B|A.games`, no mirrors, no null hero ids).
+  - `heroes/:heroId` returns that hero's human seat-games, `totalHumanSeatGames` (the denominator), `pilotCount`, up to 50 signed-in `pilots`, `crown`, its matchup row (`games` desc) and `byOpponentKind`. An unknown hero id is `200` with zeros and empty arrays, never a 404.
+  - **Crown**: the signed-in player with the most wins on the hero's human seats; ties go to fewer games, then whoever reached that win count first, then `playerId`. `null` when no signed-in player has a win. `pilots` are in the same order.
+
 ```sh
 curl -H "Authorization: Bearer $ACCOUNTS_READ_TOKEN" \
   'http://localhost:8788/accounts/players/11111111-1111-4111-8111-111111111111/games?limit=20'
 curl -H "Authorization: Bearer $ACCOUNTS_READ_TOKEN" 'http://localhost:8788/accounts/leaderboard'
+curl -H "Authorization: Bearer $ACCOUNTS_READ_TOKEN" 'http://localhost:8788/accounts/community?window=month'
+curl -H "Authorization: Bearer $ACCOUNTS_READ_TOKEN" 'http://localhost:8788/accounts/heroes/king-kong'
 ```
 
 ### `GET /v1/stats/bot-execution`

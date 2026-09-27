@@ -18,6 +18,7 @@ import { verifyIngestAuth } from './auth.js';
 import { verifyAccountsReadAuth } from './accounts-auth.js';
 import {
   clampLeaderboardLimit,
+  parseCommunityWindow,
   clampPlayerGamesLimit,
   clampPlayerStatsMinSeconds,
   decodePlayerGamesCursor,
@@ -180,6 +181,16 @@ async function handleRequest(
   // ---- Accounts read API (server-to-server, ACCOUNTS_READ_TOKEN) ----
   if (req.method === 'GET' && url.pathname === '/accounts/leaderboard') {
     await handleAccountsLeaderboard(req, url, res, repo, config);
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/accounts/community') {
+    await handleAccountsCommunity(req, url, res, repo, config);
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname.startsWith('/accounts/heroes/')) {
+    await handleAccountsHero(req, url, res, repo, config);
     return;
   }
 
@@ -931,6 +942,83 @@ async function handleAccountsLeaderboard(
   const limit = clampLeaderboardLimit(limitParam === null ? null : Number(limitParam));
 
   sendJson(res, 200, { ok: true, players: await repo.leaderboard({ limit }) });
+}
+
+/**
+ * Stats dashboard (#72): `/accounts/community?window=all|month`.
+ *
+ * Community aggregates over qualifying duels only (non-campaign, duel/1v1,
+ * at least one human seat) — totals and 12-week trend by game kind, hero usage
+ * with each hero's crown, and the hero-vs-hero matchup grid. Same bearer and
+ * server-to-server-only rule as the rest of `/accounts/*`.
+ */
+async function handleAccountsCommunity(
+  req: IncomingMessage,
+  url: URL,
+  res: ServerResponse,
+  repo: PgTelemetryRepository,
+  config: AppConfig,
+): Promise<void> {
+  const auth = verifyAccountsReadAuth(req.headers, config.accountsReadToken);
+  if (!auth.ok) {
+    sendJson(res, auth.status, { ok: false, code: auth.code, message: auth.message });
+    return;
+  }
+
+  const window = parseCommunityWindow(url.searchParams.get('window'));
+  if (window === null) {
+    sendJson(res, 400, { ok: false, code: 'BAD_WINDOW', message: 'window must be all or month' });
+    return;
+  }
+
+  sendJson(res, 200, { ok: true, ...(await repo.community({ window, now: config.now() })) });
+}
+
+/**
+ * Stats dashboard (#72): `/accounts/heroes/:heroId?window=all|month`.
+ *
+ * One hero's page over the same qualifying duels: usage, signed-in pilot
+ * ladder and crown, its row of the matchup grid, and opponent-kind split. An
+ * unknown hero id is zeros and empty arrays, never a 404.
+ */
+async function handleAccountsHero(
+  req: IncomingMessage,
+  url: URL,
+  res: ServerResponse,
+  repo: PgTelemetryRepository,
+  config: AppConfig,
+): Promise<void> {
+  const auth = verifyAccountsReadAuth(req.headers, config.accountsReadToken);
+  if (!auth.ok) {
+    sendJson(res, auth.status, { ok: false, code: auth.code, message: auth.message });
+    return;
+  }
+
+  // /accounts/heroes/:heroId — nothing else lives under this prefix.
+  const segments = url.pathname.split('/').filter(Boolean);
+  if (segments.length !== 3 || segments[0] !== 'accounts' || segments[1] !== 'heroes') {
+    sendJson(res, 404, { ok: false, code: 'NOT_FOUND', message: 'Not found' });
+    return;
+  }
+  let heroId: string;
+  try {
+    heroId = decodeURIComponent(segments[2]!);
+  } catch {
+    sendJson(res, 400, { ok: false, code: 'BAD_HERO_ID', message: 'heroId is not valid percent-encoding' });
+    return;
+  }
+  if (heroId === '') {
+    sendJson(res, 400, { ok: false, code: 'BAD_HERO_ID', message: 'heroId is required' });
+    return;
+  }
+
+  const window = parseCommunityWindow(url.searchParams.get('window'));
+  if (window === null) {
+    sendJson(res, 400, { ok: false, code: 'BAD_WINDOW', message: 'window must be all or month' });
+    return;
+  }
+
+  sendJson(res, 200, { ok: true, ...(await repo.heroCommunity(heroId, { window, now: config.now() })) });
 }
 
 async function verifyBearerAuth(

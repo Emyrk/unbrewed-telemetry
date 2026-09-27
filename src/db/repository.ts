@@ -12,9 +12,14 @@ import {
   type QueueWaitStatsRow,
 } from '../stats/queue-wait.js';
 import {
+  community,
+  heroCommunity,
   leaderboard,
   playerGames,
   playerStats,
+  type CommunityPayload,
+  type CommunityWindow,
+  type HeroPayload,
   type LeaderboardPlayer,
   type PlayerGamesCursor,
   type PlayerGamesPage,
@@ -149,6 +154,16 @@ export class PgTelemetryRepository {
   /** Accounts read API (#56): games/wins for every player with a completed game. */
   async leaderboard(options: { limit: number | null }): Promise<LeaderboardPlayer[]> {
     return leaderboard(this.pool, options);
+  }
+
+  /** Stats dashboard (#72): community aggregates over qualifying duels. */
+  async community(options: { window: CommunityWindow; now: Date }): Promise<CommunityPayload> {
+    return community(this.pool, options);
+  }
+
+  /** Stats dashboard (#72): one hero's ladder, matchups and usage. */
+  async heroCommunity(heroId: string, options: { window: CommunityWindow; now: Date }): Promise<HeroPayload> {
+    return heroCommunity(this.pool, heroId, options);
   }
 
   /**
