@@ -25,7 +25,15 @@
  */
 
 /** The tiers the accounts surface buckets bot opposition into. */
-export type BotTier = 'easy' | 'medium' | 'hard' | 'expert' | 'unknown';
+export type BotTier = 'easy' | 'medium' | 'hard' | 'expert' | 'jevx3' | 'unknown';
+
+/**
+ * Every tier a rule or a stamped `bot_difficulty` may resolve to, `unknown`
+ * aside. `jevx3` is the engine's Prodigy tier (#77): the wire name is `jevx3`
+ * and clients map it to a display name. It is its own tier, not a kind of
+ * expert — a Prodigy win is not an expert win.
+ */
+export const KNOWN_BOT_TIERS: readonly Exclude<BotTier, 'unknown'>[] = ['easy', 'medium', 'hard', 'expert', 'jevx3'];
 
 /** The bucket for a label no rule claims. Never guessed at. */
 export const UNKNOWN_BOT_TIER = 'unknown';
@@ -66,6 +74,9 @@ export const BOT_TIER_RULES: readonly BotTierRule[] = [
   { kind: 'prefix', label: 'bot:medium(', tier: 'medium', why: 'tier named in the label; budget varies' },
   { kind: 'prefix', label: 'bot:hard(', tier: 'hard', why: 'tier named in the label; budget varies' },
   { kind: 'prefix', label: 'bot:expert(', tier: 'expert', why: 'tier named in the label; budget varies' },
+  // Prodigy (#77): the engine serves it as `bot:jevx3(512,10000ms)`.
+  { kind: 'exact', label: 'bot:jevx3', tier: 'jevx3', why: 'Prodigy tier; non-search label is bot:<difficulty>' },
+  { kind: 'prefix', label: 'bot:jevx3(', tier: 'jevx3', why: 'Prodigy serving label bot:jevx3(512,10000ms)' },
   // ISMCTS is only ever served as expert (EXPERT_SERVE_BUDGET).
   { kind: 'prefix', label: 'bot:ismcts(', tier: 'expert', why: 'ISMCTS is the expert preset (EXPERT_SERVE_BUDGET)' },
   // Monte-Carlo serving presets. Since engine#263 the simulation count is the
@@ -104,10 +115,18 @@ export function botTierFromPilot(pilot: string | null | undefined): BotTier {
 /**
  * The tier for one seat, `bot_difficulty` first: a stamped difficulty is what
  * the engine meant, and the label is only the fallback reconstruction of it.
+ *
+ * A stamped value outside {@link KNOWN_BOT_TIERS} is `unknown` (#77) rather
+ * than passed through: consumers key fixed buckets on the tier, and a stamp
+ * nobody taught them would otherwise vanish from them silently. It does not
+ * fall back to the label either — the engine said something, just not
+ * something we understand, and guessing past it would be inventing data.
  */
 export function botTier(botDifficulty: string | null | undefined, pilot: string | null | undefined): BotTier {
   const stamped = (botDifficulty ?? '').trim().toLowerCase();
-  if (stamped !== '') return stamped as BotTier;
+  if (stamped !== '') {
+    return (KNOWN_BOT_TIERS as readonly string[]).includes(stamped) ? (stamped as BotTier) : UNKNOWN_BOT_TIER;
+  }
   return botTierFromPilot(pilot);
 }
 
@@ -133,6 +152,8 @@ function sqlSafeLabel(label: string): string {
  */
 export function botTierSql(pilotExpr: string, botDifficultyExpr: string): string {
   const normalized = `regexp_replace(lower(${pilotExpr}), '\\s', '', 'g')`;
+  const stamped = `NULLIF(lower(btrim(${botDifficultyExpr})), '')`;
+  const known = KNOWN_BOT_TIERS.map((tier) => `'${sqlSafeLabel(tier)}'`).join(', ');
   const branches = BOT_TIER_RULES.map((rule) => {
     const label = sqlSafeLabel(rule.label);
     const test = rule.kind === 'exact' ? `${normalized} = '${label}'` : `${normalized} LIKE '${label}%'`;
@@ -140,7 +161,9 @@ export function botTierSql(pilotExpr: string, botDifficultyExpr: string): string
   }).join('\n');
   return [
     `COALESCE(`,
-    `           NULLIF(lower(btrim(${botDifficultyExpr})), ''),`,
+    // A stamp outside the known set is `unknown`, not a label fallback — see botTier.
+    `           CASE WHEN ${stamped} IN (${known}) THEN ${stamped}`,
+    `                WHEN ${stamped} IS NOT NULL THEN '${UNKNOWN_BOT_TIER}' END,`,
     `           CASE`,
     branches,
     `           END,`,

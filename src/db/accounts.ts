@@ -142,6 +142,8 @@ export interface PlayerHeroOpponentStats {
   medium: PlayerHeroOpponentSplit;
   hard: PlayerHeroOpponentSplit;
   expert: PlayerHeroOpponentSplit;
+  /** Prodigy (#77). Its own bucket — a Prodigy win is not an expert win. */
+  jevx3: PlayerHeroOpponentSplit;
 }
 
 export interface PlayerHeroStat {
@@ -215,7 +217,7 @@ export interface PlayerSplitStat {
 }
 
 export interface PlayerBotStat extends PlayerSplitStat {
-  /** A tier from `bot-tier.ts` — `easy`/`medium`/`hard`/`expert`, or `unknown`. */
+  /** A tier from `bot-tier.ts` — `easy`/`medium`/`hard`/`expert`/`jevx3`, or `unknown`. */
   difficulty: string;
 }
 
@@ -555,7 +557,7 @@ export async function playerStats(
   };
 }
 
-/** The five buckets, all zero — the shape a hero with no qualifying game reports. */
+/** The six buckets, all zero — the shape a hero with no qualifying game reports. */
 function emptyHeroOpponents(): PlayerHeroOpponentStats {
   return {
     human: { games: 0, wins: 0 },
@@ -563,6 +565,7 @@ function emptyHeroOpponents(): PlayerHeroOpponentStats {
     medium: { games: 0, wins: 0 },
     hard: { games: 0, wins: 0 },
     expert: { games: 0, wins: 0 },
+    jevx3: { games: 0, wins: 0 },
   };
 }
 
@@ -573,6 +576,7 @@ const HERO_OPPONENT_BUCKETS = new Set<keyof PlayerHeroOpponentStats>([
   'medium',
   'hard',
   'expert',
+  'jevx3',
 ]);
 
 /**
@@ -1662,8 +1666,8 @@ const Q_GAMES_CTE = `
 /**
  * Every human seat of a Q game (`q` must be in scope), with its opponent kind:
  * `human` when the opposing seat is human, `casual` for an easy/medium bot, and
- * `hardExpert` for any other bot tier — hard, expert and `unknown` alike (the
- * api prices unknown as hard). Tiers come from `bot-tier.ts`, stamped
+ * `hardExpert` for any other bot tier — hard, expert, jevx3 and `unknown` alike
+ * (the api prices unknown as hard). Tiers come from `bot-tier.ts`, stamped
  * `bot_difficulty` first. A seat whose only opposition is an `unknown` pilot
  * kind (or none at all, a producer bug) gets a null kind and sits in no bucket.
  * `vs_expert` feeds `totals.humanVsExpert`.
