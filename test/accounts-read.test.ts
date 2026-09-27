@@ -26,6 +26,8 @@ const READ_TOKEN = 'accounts-read-token-for-tests';
 const ALICE = '11111111-1111-4111-8111-111111111111';
 const BOB = '22222222-2222-4222-8222-222222222222';
 const CAROL = '33333333-3333-4333-8333-333333333333';
+const DAVE = '44444444-4444-4444-8444-444444444444';
+const EVE = '55555555-5555-4555-8555-555555555555';
 
 const appConfig = (now: Date, accountsReadToken: string) => ({
   telemetrySecret: 'unused',
@@ -165,6 +167,44 @@ interface LeaderboardBody {
     wins: number;
     byOpponentKind: StatsBody['byOpponentKind'];
   }>;
+}
+
+/** The community payload (stats dashboard contract §1a). */
+interface CommunityBody {
+  ok: true;
+  window: 'all' | 'month';
+  windowStart: string | null;
+  generatedAt: string;
+  totals: { games: number; human: number; hardExpert: number; casual: number; humanVsExpert: { games: number; wins: number } };
+  weekly: Array<{ weekStart: string; human: number; hardExpert: number; casual: number }>;
+  heroes: Array<{
+    heroId: string;
+    heroName: string | null;
+    games: number;
+    wins: number;
+    draws: number;
+    crown: { playerId: string; wins: number; games: number } | null;
+  }>;
+  matchups: Array<{ heroId: string; opponentHeroId: string; games: number; wins: number; draws: number }>;
+}
+
+/** The hero page payload (stats dashboard contract §1b). */
+interface HeroBody {
+  ok: true;
+  heroId: string;
+  heroName: string | null;
+  window: 'all' | 'month';
+  windowStart: string | null;
+  generatedAt: string;
+  games: number;
+  wins: number;
+  draws: number;
+  totalHumanSeatGames: number;
+  pilotCount: number;
+  pilots: Array<{ playerId: string; games: number; wins: number; draws: number }>;
+  crown: { playerId: string; games: number; wins: number; draws: number } | null;
+  matchups: Array<{ opponentHeroId: string; opponentHeroName: string | null; games: number; wins: number; draws: number }>;
+  byOpponentKind: { human: number; hardExpert: number; casual: number };
 }
 
 function heroName(heroId: string): string {
@@ -1562,6 +1602,289 @@ describeDb('accounts read api', () => {
       for (const query of ['', '?limit=', '?limit=abc', '?limit=0', '?limit=-5']) {
         expect((await leaderboard(query)).players.length).toBe(3);
       }
+    });
+  });
+  describe('community aggregates (stats dashboard #72)', () => {
+    const KK = 'king-kong';
+    const MANDO = 'the-mandalorian';
+    const THETIS = 'thetis';
+    const seat = (heroId: string, pilot: string, extra: Partial<SeatSpec> = {}): SeatSpec => ({
+      deck: `${heroId}@1.0.0`,
+      heroId,
+      pilot,
+      ...extra,
+    });
+    const duel = (id: string, endedAt: string, a: SeatSpec, b: SeatSpec, winner: number | null) =>
+      game({ id, endedAt, teams: [[a], [b]], winner, draw: winner === null });
+
+    // `now` is 2026-08-06 (Thu): month window starts 2026-08-01, the current
+    // week starts Mon 2026-08-03.
+    beforeEach(async () => {
+      const campaign = await cpRepo.createCampaign({
+        name: 'community-exclusion-test',
+        spec: { note: 'test' },
+        baseSeed: 72,
+        games: [{ spec: { step: 'test' } }],
+        createdBy: 'test',
+      });
+      // --- excluded by Q ---
+      // Campaign game with a human seat.
+      await ingest(duel('c-campaign', '2026-08-02T09:00:00.000Z',
+        seat(KK, 'human', { playerId: ALICE }), seat(MANDO, 'bot:hard'), 0), campaign.id);
+      // Bot-vs-bot duel.
+      await ingest(duel('c-botbot', '2026-08-02T09:00:00.000Z', seat(KK, 'bot:easy'), seat(MANDO, 'bot:hard'), 0));
+      // 2v2 with a human.
+      await ingest(game({
+        id: 'c-2v2',
+        endedAt: '2026-08-02T09:00:00.000Z',
+        teams: [
+          [seat(KK, 'human', { playerId: ALICE }), seat(THETIS, 'bot:easy')],
+          [seat(MANDO, 'bot:hard'), seat('nancy-drew', 'bot:hard')],
+        ],
+        winner: 0,
+      }));
+
+      // --- qualifying duels ---
+      await ingest(duel('c-hvh', '2026-08-02T10:00:00.000Z',
+        seat(KK, 'human', { playerId: ALICE }), seat(MANDO, 'human', { playerId: BOB }), 0));
+      await ingest(duel('c-easy', '2026-08-03T10:00:00.000Z',
+        seat(MANDO, 'human', { playerId: BOB }), seat(KK, 'bot:easy'), 0));
+      await ingest(duel('c-medium', '2026-08-04T10:00:00.000Z',
+        seat(THETIS, 'human', { playerId: CAROL }), seat(MANDO, 'bot:medium'), 1));
+      await ingest(duel('c-hard', '2026-08-04T11:00:00.000Z',
+        seat(MANDO, 'human', { playerId: BOB }), seat(THETIS, 'bot:hard', { botDifficulty: 'hard' }), 0));
+      await ingest(duel('c-expert', '2026-08-05T10:00:00.000Z',
+        seat(KK, 'human', { playerId: ALICE }), seat(MANDO, 'bot:ismcts(512,10000ms)'), 0));
+      // A knob-grid label no tier rule claims: `unknown`, priced as hardExpert.
+      // Guest human (no player id): counts for hero usage, never for pilots.
+      await ingest(duel('c-unknown', '2026-08-05T11:00:00.000Z',
+        seat(THETIS, 'human'), seat(KK, 'bot:mc(sims-8/eps-1/depth-2)'), 1));
+      // Legacy label decoded to hard; a draw.
+      await ingest(duel('c-draw', '2026-08-05T12:00:00.000Z',
+        seat(THETIS, 'human', { playerId: CAROL }), seat(KK, 'bot:mc(64, 400ms)'), null));
+      // Last month: in `all`, out of `month`.
+      await ingest(duel('c-lastmonth', '2026-07-20T10:00:00.000Z',
+        seat(KK, 'human', { playerId: ALICE }), seat(THETIS, 'bot:easy'), 0));
+      // Dave ties Alice on King Kong wins (3) but in more games (4).
+      for (const [id, endedAt, winner] of [
+        ['c-dave-1', '2026-08-01T10:00:00.000Z', 0],
+        ['c-dave-2', '2026-08-01T11:00:00.000Z', 0],
+        ['c-dave-3', '2026-08-02T11:00:00.000Z', 1],
+        ['c-dave-4', '2026-08-03T11:00:00.000Z', 0],
+      ] as const) {
+        await ingest(duel(id, endedAt, seat(KK, 'human', { playerId: DAVE }), seat(MANDO, 'bot:hard'), winner));
+      }
+      // Eve ties Bob on Mandalorian wins and games (2/3) but got there first.
+      for (const [id, endedAt, winner] of [
+        ['c-eve-1', '2026-08-01T12:00:00.000Z', 0],
+        ['c-eve-2', '2026-08-02T12:00:00.000Z', 0],
+        ['c-eve-3', '2026-08-03T12:00:00.000Z', 1],
+      ] as const) {
+        await ingest(duel(id, endedAt, seat(MANDO, 'human', { playerId: EVE }), seat(THETIS, 'bot:easy'), winner));
+      }
+    });
+
+    async function communityBody(query = ''): Promise<CommunityBody> {
+      const response = await read(`/accounts/community${query}`);
+      expect(response.status).toBe(200);
+      return (await response.json()) as CommunityBody;
+    }
+
+    async function heroBody(heroId: string, query = ''): Promise<HeroBody> {
+      const response = await read(`/accounts/heroes/${heroId}${query}`);
+      expect(response.status).toBe(200);
+      return (await response.json()) as HeroBody;
+    }
+
+    it('401s without the bearer, 400s a bad window, and 503s when unconfigured', async () => {
+      for (const path of ['/accounts/community', `/accounts/heroes/${KK}`]) {
+        const missing = await read(path, null);
+        expect(missing.status).toBe(401);
+        expect(await errorCode(missing)).toBe('UNAUTHORIZED');
+        expect((await read(path, 'not-the-token')).status).toBe(401);
+
+        const bad = await read(`${path}?window=week`);
+        expect(bad.status).toBe(400);
+        expect(await errorCode(bad)).toBe('BAD_WINDOW');
+      }
+
+      const unconfigured = createServer(createApp({ repo, cpRepo, config: appConfig(now, '') }));
+      await new Promise<void>((resolve) => unconfigured.listen(0, resolve));
+      try {
+        const address = unconfigured.address();
+        if (!address || typeof address === 'string') throw new Error('expected TCP address');
+        for (const path of ['/accounts/community', `/accounts/heroes/${KK}`]) {
+          const response = await fetch(`http://127.0.0.1:${address.port}${path}`, {
+            headers: { authorization: `Bearer ${READ_TOKEN}` },
+          });
+          expect(response.status).toBe(503);
+          expect(await errorCode(response)).toBe('AUTH_NOT_CONFIGURED');
+        }
+      } finally {
+        await new Promise<void>((resolve, reject) => unconfigured.close((e) => (e ? reject(e) : resolve())));
+      }
+    });
+
+    it('counts only qualifying duels, by game kind, over all time', async () => {
+      const body = await communityBody();
+      expect(body.ok).toBe(true);
+      expect(body.window).toBe('all');
+      expect(body.windowStart).toBeNull();
+      expect(body.generatedAt).toBe(now.toISOString());
+      // 15 Q games: campaign, bot-vs-bot and 2v2 excluded. Human-vs-human is one
+      // game; unknown tier and the legacy hard label are hardExpert.
+      expect(body.totals).toEqual({
+        games: 15,
+        human: 1,
+        hardExpert: 8,
+        casual: 6,
+        humanVsExpert: { games: 1, wins: 1 },
+      });
+    });
+
+    it('scopes totals, heroes, crowns and matchups to the current UTC month', async () => {
+      const body = await communityBody('?window=month');
+      expect(body.window).toBe('month');
+      expect(body.windowStart).toBe('2026-08-01T00:00:00.000Z');
+      expect(body.totals).toEqual({
+        games: 14,
+        human: 1,
+        hardExpert: 8,
+        casual: 5,
+        humanVsExpert: { games: 1, wins: 1 },
+      });
+      const kk = body.heroes.find((hero) => hero.heroId === KK)!;
+      expect(kk).toMatchObject({ games: 6, wins: 5, draws: 0 });
+      // Alice's July win falls out: Dave's 3 wins now beat her 2.
+      expect(kk.crown).toEqual({ playerId: DAVE, wins: 3, games: 4 });
+      expect(body.matchups.find((m) => m.heroId === KK && m.opponentHeroId === THETIS)).toEqual({
+        heroId: KK, opponentHeroId: THETIS, games: 2, wins: 1, draws: 1,
+      });
+    });
+
+    it('always returns 12 zero-filled Monday weeks, oldest first, whatever the window', async () => {
+      const all = await communityBody();
+      const month = await communityBody('?window=month');
+      expect(month.weekly).toEqual(all.weekly);
+      expect(all.weekly).toHaveLength(12);
+      expect(all.weekly[0]!.weekStart).toBe('2026-05-18');
+      expect(all.weekly[11]!.weekStart).toBe('2026-08-03');
+      for (const week of all.weekly) expect(new Date(`${week.weekStart}T00:00:00Z`).getUTCDay()).toBe(1);
+      expect(all.weekly.slice(9)).toEqual([
+        { weekStart: '2026-07-20', human: 0, hardExpert: 0, casual: 1 },
+        { weekStart: '2026-07-27', human: 1, hardExpert: 3, casual: 2 },
+        { weekStart: '2026-08-03', human: 0, hardExpert: 5, casual: 3 },
+      ]);
+      for (const week of all.weekly.slice(0, 9)) {
+        expect(week).toMatchObject({ human: 0, hardExpert: 0, casual: 0 });
+      }
+    });
+
+    it('counts hero usage as human seat-games, with crowns and their tiebreaks', async () => {
+      const body = await communityBody();
+      expect(body.heroes).toEqual([
+        // Alice 3W/3G beats Dave 3W/4G on fewer games.
+        { heroId: KK, heroName: 'King Kong', games: 7, wins: 6, draws: 0, crown: { playerId: ALICE, wins: 3, games: 3 } },
+        // Both human seats of the human-vs-human game count. Eve and Bob are
+        // 2W/3G; Eve reached two wins first.
+        {
+          heroId: MANDO, heroName: 'The Mandalorian', games: 6, wins: 4, draws: 0,
+          crown: { playerId: EVE, wins: 2, games: 3 },
+        },
+        // No signed-in winner: unclaimed.
+        { heroId: THETIS, heroName: 'Thetis', games: 3, wins: 0, draws: 1, crown: null },
+      ]);
+    });
+
+    it('returns a symmetric matchup grid over all seats, without mirrors or excluded games', async () => {
+      const body = await communityBody();
+      expect(body.matchups).toEqual([
+        { heroId: KK, opponentHeroId: MANDO, games: 7, wins: 5, draws: 0 },
+        { heroId: MANDO, opponentHeroId: KK, games: 7, wins: 2, draws: 0 },
+        { heroId: MANDO, opponentHeroId: THETIS, games: 5, wins: 4, draws: 0 },
+        { heroId: THETIS, opponentHeroId: MANDO, games: 5, wins: 1, draws: 0 },
+        { heroId: KK, opponentHeroId: THETIS, games: 3, wins: 2, draws: 1 },
+        { heroId: THETIS, opponentHeroId: KK, games: 3, wins: 0, draws: 1 },
+      ]);
+      for (const cell of body.matchups) {
+        const mirror = body.matchups.find((m) => m.heroId === cell.opponentHeroId && m.opponentHeroId === cell.heroId);
+        expect(mirror?.games).toBe(cell.games);
+        expect(cell.heroId).not.toBe(cell.opponentHeroId);
+      }
+    });
+
+    it('serves one hero page: pilots, crown, matchup row and opponent kinds', async () => {
+      const body = await heroBody(KK);
+      expect(body).toEqual({
+        ok: true,
+        heroId: KK,
+        heroName: 'King Kong',
+        window: 'all',
+        windowStart: null,
+        generatedAt: now.toISOString(),
+        games: 7,
+        wins: 6,
+        draws: 0,
+        totalHumanSeatGames: 16,
+        pilotCount: 2,
+        pilots: [
+          { playerId: ALICE, games: 3, wins: 3, draws: 0 },
+          { playerId: DAVE, games: 4, wins: 3, draws: 0 },
+        ],
+        crown: { playerId: ALICE, games: 3, wins: 3, draws: 0 },
+        matchups: [
+          { opponentHeroId: MANDO, opponentHeroName: 'The Mandalorian', games: 7, wins: 5, draws: 0 },
+          { opponentHeroId: THETIS, opponentHeroName: 'Thetis', games: 3, wins: 2, draws: 1 },
+        ],
+        byOpponentKind: { human: 1, hardExpert: 5, casual: 1 },
+      });
+
+      const month = await heroBody(KK, '?window=month');
+      expect(month).toMatchObject({
+        windowStart: '2026-08-01T00:00:00.000Z',
+        games: 6,
+        wins: 5,
+        totalHumanSeatGames: 15,
+        pilots: [
+          { playerId: DAVE, games: 4, wins: 3, draws: 0 },
+          { playerId: ALICE, games: 2, wins: 2, draws: 0 },
+        ],
+        crown: { playerId: DAVE, games: 4, wins: 3, draws: 0 },
+        byOpponentKind: { human: 1, hardExpert: 5, casual: 0 },
+      });
+    });
+
+    it('orders pilots by the crown tiebreak and leaves a winless ladder uncrowned', async () => {
+      expect((await heroBody(MANDO)).pilots.map((pilot) => pilot.playerId)).toEqual([EVE, BOB]);
+      const thetis = await heroBody(THETIS);
+      // The guest seat counts for usage but is not a pilot.
+      expect(thetis).toMatchObject({
+        games: 3,
+        pilotCount: 1,
+        pilots: [{ playerId: CAROL, games: 2, wins: 0, draws: 1 }],
+        crown: null,
+        byOpponentKind: { human: 0, hardExpert: 2, casual: 1 },
+      });
+    });
+
+    it('answers an unknown hero with zeros, not a 404', async () => {
+      expect(await heroBody('no-such-hero')).toEqual({
+        ok: true,
+        heroId: 'no-such-hero',
+        heroName: null,
+        window: 'all',
+        windowStart: null,
+        generatedAt: now.toISOString(),
+        games: 0,
+        wins: 0,
+        draws: 0,
+        totalHumanSeatGames: 16,
+        pilotCount: 0,
+        pilots: [],
+        crown: null,
+        matchups: [],
+        byOpponentKind: { human: 0, hardExpert: 0, casual: 0 },
+      });
     });
   });
 });
