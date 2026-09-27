@@ -145,14 +145,21 @@ export class PgTelemetryRepository {
 
   /**
    * Accounts read API (#52): lifetime aggregates for one player. `minSeconds`
-   * (#63) floors only the per-hero opponent breakdown.
+   * (#63) floors only the per-hero opponent breakdown. `now` anchors the
+   * activity calendar's window (defaults to the wall clock).
    */
-  async playerStats(playerId: string, options: { minSeconds?: number } = {}): Promise<PlayerStats> {
+  async playerStats(
+    playerId: string,
+    options: { minSeconds?: number; now?: Date } = {},
+  ): Promise<PlayerStats> {
     return playerStats(this.pool, playerId, options);
   }
 
-  /** Accounts read API (#56): games/wins for every player with a completed game. */
-  async leaderboard(options: { limit: number | null }): Promise<LeaderboardPlayer[]> {
+  /**
+   * Accounts read API (#56): games/wins for every player with a completed game.
+   * `since` adds the `windowGames`/`windowWins` pair to every row.
+   */
+  async leaderboard(options: { limit: number | null; since?: Date | null }): Promise<LeaderboardPlayer[]> {
     return leaderboard(this.pool, options);
   }
 
