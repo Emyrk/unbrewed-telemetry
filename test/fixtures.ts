@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { GameSubmission, QueueEvent } from '../src/types.js';
+import type { GameReplaySubmission, GameSubmission, QueueEvent } from '../src/types.js';
 
 export interface CanonicalRulesOverrides {
   heroHealth?: number;
@@ -135,6 +135,33 @@ export function sampleQueueEvent(overrides: Partial<QueueEvent> = {}): QueueEven
     formatId: 'duel',
     quickMatch: true,
     ts: '2026-08-23T11:59:00.000Z',
+    ...overrides,
+  };
+}
+
+/**
+ * A minimal hand-built replay bundle (#70). Mirrors `ReplayBundle` in
+ * unbrewed-engine/protocol/protocol.ts without importing it; real bundles carry
+ * full hero and card rules under `config.players.<seat>`.
+ */
+export function sampleReplayBundle(
+  overrides: Partial<GameReplaySubmission['bundle']> = {},
+): GameReplaySubmission['bundle'] {
+  return {
+    v: 1,
+    engine: { schemaVersion: 2, dslVersion: '0.78.0' },
+    config: {
+      seed: 1,
+      players: {
+        p1: { heroId: 'thrall', hero: {}, cards: [] },
+        p2: { heroId: 'king-kong', hero: {}, cards: [] },
+      },
+      map: {},
+    },
+    actionLog: [{ type: 'END_TURN', player: 'p1' }],
+    meta: { winner: 'p1', heroes: { p1: 'thrall', p2: 'king-kong' }, turns: 1, endedAt: 0, mapTitle: 'x' },
+    digests: ['abc'],
+    digestVersion: 1,
     ...overrides,
   };
 }

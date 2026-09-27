@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unbrewed.xyz/schemas/telemetry/game-replay.v1.schema.json",
+  "title": "Unbrewed Telemetry Game Replay v1",
+  "description": "The full replay bundle of one finished live game, keyed by the engine's live game id. Mirrors ReplayBundle in unbrewed-engine/protocol/protocol.ts; the engine is the authority on the interior of config, actionLog and meta.",
+  "type": "object",
+  "required": ["gameId", "bundle"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": 1,
+      "description": "Optional. The version of record is the request path (/v1/replays); producers may stamp it anyway so a stored payload is self-describing."
+    },
+    "gameId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "description": "The engine's live game id — the same id the /v1/games submission for this game carries."
+    },
+    "bundle": { "$ref": "#/$defs/bundle" }
+  },
+  "$defs": {
+    "bundle": {
+      "type": "object",
+      "required": ["v", "engine", "config", "actionLog", "meta"],
+      "additionalProperties": false,
+      "properties": {
+        "v": { "const": 1 },
+        "engine": {
+          "type": "object",
+          "required": ["schemaVersion", "dslVersion"],
+          "additionalProperties": false,
+          "properties": {
+            "schemaVersion": { "type": "integer", "minimum": 0 },
+            "dslVersion": { "type": "string" }
+          }
+        },
+        "config": {
+          "type": "object",
+          "description": "Engine-owned wire shape (InitConfig + map). Deliberately not enumerated: the engine's preValidateReplayBundle is the authority on its interior."
+        },
+        "actionLog": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "object" }
+        },
+        "meta": { "type": "object" },
+        "digests": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "digestVersion": { "type": "integer" }
+      }
+    }
+  }
+}

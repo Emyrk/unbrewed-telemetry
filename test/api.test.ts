@@ -32,6 +32,7 @@ describeDb('telemetry api with postgres', () => {
         telemetrySecret: secret,
         allowUnauthenticatedIngest: false,
         bodyLimitBytes: 1024 * 1024,
+        replayBodyLimitBytes: 2 * 1024 * 1024,
         now: () => now,
         discordClientId: '',
         discordClientSecret: '',

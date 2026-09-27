@@ -32,6 +32,7 @@ const appConfig = (now: Date, accountsReadToken: string) => ({
   accountsReadToken,
   allowUnauthenticatedIngest: true,
   bodyLimitBytes: 1024 * 1024,
+  replayBodyLimitBytes: 2 * 1024 * 1024,
   now: () => now,
   discordClientId: '',
   discordClientSecret: '',

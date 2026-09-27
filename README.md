@@ -267,6 +267,38 @@ choices worth knowing when reading the numbers:
 - Match rate counts searches still open at the window edge as unmatched, so a
   window much shorter than a typical search reads pessimistic.
 
+
+### `POST /v1/replays`
+
+Persists the full replay bundle of one finished live game, matching
+`schemas/game-replay.v1.schema.json`. `bundle` is the engine's `ReplayBundle`
+(`unbrewed-engine/protocol/protocol.ts`): `v`, `engine`, `config`, `actionLog`,
+`meta`, and optional `digests`/`digestVersion`. `config` is deliberately not
+enumerated — the engine owns its interior.
+
+Auth is the same **HMAC-only** scheme as `/v1/queue-events`. The body cap is
+separate from every other route: `MAX_REPLAY_BODY_BYTES`, default 2 MB (the
+rest use `MAX_BODY_BYTES`, default 1 MB), because bundles run ~70 KB but carry
+cosmetics blobs.
+
+```json
+{ "gameId": "live-game-id", "bundle": { "v": 1, "engine": { "schemaVersion": 2, "dslVersion": "0.78.0" }, "config": {}, "actionLog": [{ "type": "END_TURN", "player": "p1" }], "meta": { "turns": 1 } } }
+```
+
+Player identity is refused: `displayName`, `playerName` and `email` anywhere in
+the bundle, and `name` directly on a `config.players.<seat>` (deeper, `name` is
+rules content such as hero and counter names). A new game returns
+`201 {"ok": true, "gameId", "duplicate": false}`; a re-post of the same
+`gameId` returns `200` with `"duplicate": true` and writes nothing. Bad
+signature `401`, wrong content type `415`, oversized body `413`, bad JSON or a
+schema violation `400`.
+
+Rows land in `game_replays` (migration `016`), one per game id, with
+`engine_schema_version`, `engine_dsl_version`, `digest_version`,
+`action_count`, `turns` and `bundle_bytes` copied out of the bundle. There is
+no foreign key to `games`: join on `game_id` at read time. **Run
+`npm run db:migrate` before deploying this code.**
+
 ### Admin control plane
 
 `GET /admin` uses Discord OAuth and the `ADMIN_DISCORD_IDS` allowlist. Admins can:

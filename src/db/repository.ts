@@ -29,6 +29,7 @@ import type {
   DeckDetailResponse,
   DeckProfile,
   DeckStatsResponse,
+  GameReplaySubmission,
   GameSubmission,
   IngestCreated,
   IngestDuplicate,
@@ -148,6 +149,45 @@ export class PgTelemetryRepository {
   /** Accounts read API (#56): games/wins for every player with a completed game. */
   async leaderboard(options: { limit: number | null }): Promise<LeaderboardPlayer[]> {
     return leaderboard(this.pool, options);
+  }
+
+  /**
+   * Replay bundles (#70): store one finished live game's bundle, keyed by the
+   * engine's game id. A re-post of the same game is a no-op and reports
+   * `duplicate`, like `/v1/games`. The scalar columns are copied out of the
+   * bundle here so analysis can filter without unpacking the jsonb.
+   */
+  async insertGameReplay(args: {
+    gameId: string;
+    bundle: GameReplaySubmission['bundle'];
+    receivedAt: Date;
+    source: string | null;
+    authKeyId: string | null;
+  }): Promise<{ duplicate: boolean }> {
+    const { bundle } = args;
+    const json = JSON.stringify(bundle);
+    const turns = typeof bundle.meta.turns === 'number' ? bundle.meta.turns : null;
+    const result = await this.pool.query(
+      `INSERT INTO game_replays
+         (game_id, received_at, source, auth_key_id, engine_schema_version, engine_dsl_version,
+          digest_version, action_count, turns, bundle_bytes, bundle)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+       ON CONFLICT (game_id) DO NOTHING`,
+      [
+        args.gameId,
+        args.receivedAt,
+        args.source,
+        args.authKeyId,
+        bundle.engine.schemaVersion,
+        bundle.engine.dslVersion,
+        bundle.digestVersion ?? null,
+        bundle.actionLog.length,
+        turns,
+        Buffer.byteLength(json),
+        json,
+      ],
+    );
+    return { duplicate: result.rowCount === 0 };
   }
 
   /**

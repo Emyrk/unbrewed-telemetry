@@ -687,6 +687,24 @@ export interface QueueEventsSubmission {
   events: QueueEvent[];
 }
 
+/**
+ * One finished live game's replay bundle (schemas/game-replay.v1.schema.json).
+ * `bundle` mirrors `ReplayBundle` in unbrewed-engine/protocol/protocol.ts.
+ */
+export interface GameReplaySubmission {
+  schemaVersion?: 1;
+  gameId: string;
+  bundle: {
+    v: 1;
+    engine: { schemaVersion: number; dslVersion: string };
+    config: Record<string, unknown>;
+    actionLog: unknown[];
+    meta: Record<string, unknown>;
+    digests?: string[];
+    digestVersion?: number;
+  };
+}
+
 /** One `quick_match` bucket of the trailing-window queue wait aggregate. */
 export interface QueueWaitBucket {
   quickMatch: boolean;
