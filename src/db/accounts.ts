@@ -18,8 +18,9 @@
  * because the accounts service knows its own user ids and telemetry does not.
  *
  * Everything here is single-player (`WHERE s.player_id = $1`) except the
- * leaderboard aggregate at the bottom (#56), which groups the same predicates
- * across players so a leaderboard row equals that player's own stats row.
+ * leaderboard aggregate (#56), which groups the same predicates across players
+ * so a leaderboard row equals that player's own stats row, and the community
+ * aggregates at the bottom (#72), which read only qualifying duels (Q).
  */
 
 import type { Pool } from 'pg';
@@ -53,6 +54,12 @@ export const CONCESSION_END_CONDITIONS = ['forfeit', 'timeout', 'disconnect'];
  * a bot cannot agree to lose. Only the human bucket is collusion-shaped.
  */
 export const MIN_HUMAN_WIN_TURNS = 5;
+
+/** Days the activity calendar covers, today (UTC) included. */
+export const PLAYER_CALENDAR_DAYS = 182;
+
+/** Format ids a 1v1 matchup grid reads: the production id and the mock label. */
+const DUEL_FORMATS = ['duel', '1v1'];
 
 export interface PlayerGameSeat {
   heroId: string | null;
@@ -167,6 +174,24 @@ export interface PlayerOpponentHeroStat {
   wins: number;
 }
 
+/** Games on one UTC day, for the dashboard's activity calendar. */
+export interface PlayerCalendarDay {
+  /** `YYYY-MM-DD`, UTC. */
+  date: string;
+  games: number;
+}
+
+/** The player's own hero against one opposing hero, duels only. */
+export interface PlayerHeroOpponentHeroStat {
+  heroId: string | null;
+  heroName: string | null;
+  opponentHeroId: string | null;
+  opponentHeroName: string | null;
+  games: number;
+  wins: number;
+  draws: number;
+}
+
 export interface PlayerMapStat {
   map: string;
   games: number;
@@ -229,6 +254,13 @@ export interface PlayerStats {
   clutchWins: number;
   /** Fewest `games.turns` in any such win; null when the player has never had one. */
   fastestBotWinTurns: number | null;
+  /**
+   * Games per UTC day over the last {@link PLAYER_CALENDAR_DAYS} days ending
+   * today, only days with games, oldest first.
+   */
+  calendar: PlayerCalendarDay[];
+  /** Own hero x each opposing seat's hero, duel/1v1 games only, games desc. */
+  byHeroOpponentHero: PlayerHeroOpponentHeroStat[];
 }
 
 /** Decoded pagination cursor: the sort key of the last row of the previous page. */
@@ -460,7 +492,7 @@ function mean(value: string | null): number | null {
 /**
  * Lifetime aggregates for one player. Sim games excluded.
  *
- * Eight independent grouped queries rather than one mega-query: they share the
+ * Independent grouped queries rather than one mega-query: they share the
  * same two CTEs but group differently, and this endpoint sits behind
  * unbrewed-api's 60s per-user cache, so the round trips are cheap relative to
  * the readability. Nothing is aggregated in JS — the queries return one row per
@@ -477,10 +509,22 @@ function mean(value: string | null): number | null {
 export async function playerStats(
   pool: Pool,
   playerId: string,
-  options: { minSeconds?: number } = {},
+  options: { minSeconds?: number; now?: Date } = {},
 ): Promise<PlayerStats> {
   const minSeconds = clampPlayerStatsMinSeconds(options.minSeconds ?? null);
-  const [totals, overview, streaks, byOpponentHero, byMap, byOpponentKind, botChallenges, heroOpponents] =
+  const now = options.now ?? new Date();
+  const [
+    totals,
+    overview,
+    streaks,
+    byOpponentHero,
+    byMap,
+    byOpponentKind,
+    botChallenges,
+    heroOpponents,
+    calendar,
+    byHeroOpponentHero,
+  ] =
     await Promise.all([
       playerTotals(pool, playerId),
       playerOverview(pool, playerId),
@@ -490,6 +534,8 @@ export async function playerStats(
       playerByOpponentKind(pool, playerId),
       playerBotChallenges(pool, playerId),
       playerByHeroOpponent(pool, playerId, minSeconds),
+      playerCalendar(pool, playerId, now),
+      playerByHeroOpponentHero(pool, playerId),
     ]);
 
   for (const hero of totals.byHero) {
@@ -504,6 +550,8 @@ export async function playerStats(
     byOpponentHero,
     byMap,
     byOpponentKind,
+    calendar,
+    byHeroOpponentHero,
   };
 }
 
@@ -683,6 +731,44 @@ async function playerOverview(
 }
 
 /**
+ * The one definition of a result sequence and its win runs, shared by a
+ * player's own `streaks`/`recentForm` and the leaderboard's `currentStreak`/
+ * `recentForm` so the two can never disagree. Reads a `played` relation with
+ * `won`, `draw`, `ended_at`, `game_id` (plus `key` when partitioned) and
+ * defines three CTEs:
+ *
+ * - `ordered`: one row per game, `rn` numbering play order from 1, and the
+ *   game's `result` letter;
+ * - `islands`: each game labelled with the consecutive same-outcome run it is in;
+ * - `runs`: one row per win run, its length and the `rn` it ends on.
+ *
+ * `key` names the partition column (`player_id` for the cross-player read), or
+ * null for a relation that is already one player's.
+ */
+function resultRunsCtes(key: string | null): string {
+  const by = key ? `${key}, ` : '';
+  const partition = key ? `PARTITION BY ${key} ` : '';
+  return `
+      ordered AS (
+        SELECT ${by}(won AND NOT draw) AS is_win,
+               (CASE WHEN draw THEN 'D' WHEN won THEN 'W' ELSE 'L' END)::text AS result,
+               row_number() OVER (${partition}ORDER BY ended_at, game_id) AS rn
+        FROM played
+      ),
+      islands AS (
+        SELECT ${by}is_win, rn,
+               rn - row_number() OVER (PARTITION BY ${by}is_win ORDER BY rn) AS run_id
+        FROM ordered
+      ),
+      runs AS (
+        SELECT ${by}run_id, count(*) AS len, max(rn) AS last_rn
+        FROM islands
+        WHERE is_win
+        GROUP BY ${by}run_id
+      )`;
+}
+
+/**
  * Win streaks and recent form, both ordered by the same `(ended_at, id)` key the
  * games feed sorts on so the client's "last 10" matches the first page it shows.
  *
@@ -705,23 +791,7 @@ async function playerStreaks(
     `
       WITH mine AS (${PLAYER_SEATS_CTE}),
       played AS (${PLAYER_GAMES_CTE}),
-      ordered AS (
-        SELECT (won AND NOT draw) AS is_win,
-               (CASE WHEN draw THEN 'D' WHEN won THEN 'W' ELSE 'L' END)::text AS result,
-               row_number() OVER (ORDER BY ended_at, game_id) AS rn
-        FROM played
-      ),
-      islands AS (
-        SELECT is_win, rn,
-               rn - row_number() OVER (PARTITION BY is_win ORDER BY rn) AS run_id
-        FROM ordered
-      ),
-      runs AS (
-        SELECT run_id, count(*) AS len, max(rn) AS last_rn
-        FROM islands
-        WHERE is_win
-        GROUP BY run_id
-      )
+      ${resultRunsCtes(null)}
       SELECT
         COALESCE((SELECT max(len) FROM runs), 0) AS best,
         COALESCE(
@@ -775,6 +845,80 @@ async function playerByOpponentHero(pool: Pool, playerId: string): Promise<Playe
     heroName: row.hero_name,
     games: Number(row.games),
     wins: Number(row.wins),
+  }));
+}
+
+/**
+ * Games per UTC day for the activity calendar: the {@link PLAYER_CALENDAR_DAYS}
+ * days ending on `now`'s UTC date, only days with games, oldest first. Same
+ * game set as every other block here (all formats, every opponent, campaigns
+ * excluded). A game is dated by its end time in UTC; one stamped after `now`
+ * falls outside the window rather than onto a future day.
+ */
+async function playerCalendar(pool: Pool, playerId: string, now: Date): Promise<PlayerCalendarDay[]> {
+  const result = await pool.query<{ date: string; games: string }>(
+    `
+      WITH mine AS (${PLAYER_SEATS_CTE}),
+      played AS (${PLAYER_GAMES_CTE}),
+      bounds AS (SELECT ($2::timestamptz AT TIME ZONE 'UTC')::date AS today)
+      SELECT to_char((ended_at AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS date,
+             count(*) AS games
+      FROM played, bounds
+      WHERE (ended_at AT TIME ZONE 'UTC')::date BETWEEN today - ($3::int - 1) AND today
+      GROUP BY 1
+      ORDER BY 1 ASC
+    `,
+    [playerId, now, PLAYER_CALENDAR_DAYS],
+  );
+
+  return result.rows.map((row) => ({ date: row.date, games: Number(row.games) }));
+}
+
+/**
+ * The player's own hero against each opposing seat's hero, duel/1v1 only, games
+ * desc. Duels have exactly one opposing seat, so each game is one cell entry;
+ * restricting to duels keeps the grid a true 1v1 matchup read (a 2v2 would
+ * credit a hero with a "matchup" its teammate fought). Win predicate is the
+ * seat's `won`, as in `byOpponentHero`.
+ */
+async function playerByHeroOpponentHero(
+  pool: Pool,
+  playerId: string,
+): Promise<PlayerHeroOpponentHeroStat[]> {
+  const result = await pool.query<{
+    hero_id: string | null;
+    hero_name: string | null;
+    opponent_hero_id: string | null;
+    opponent_hero_name: string | null;
+    games: string;
+    wins: string;
+    draws: string;
+  }>(
+    `
+      WITH mine AS (${PLAYER_SEATS_CTE}),
+      played AS (${PLAYER_GAMES_CTE})
+      SELECT p.hero_id, p.hero_name,
+             o.hero_id AS opponent_hero_id, o.hero_name AS opponent_hero_name,
+             count(*) AS games,
+             count(*) FILTER (WHERE p.won) AS wins,
+             count(*) FILTER (WHERE p.draw) AS draws
+      FROM played p
+      JOIN games g ON g.id = p.game_id AND g.format = ANY($2::text[])
+      JOIN game_seats o ON o.game_id = p.game_id AND o.team_index <> p.team_index
+      GROUP BY 1, 2, 3, 4
+      ORDER BY count(*) DESC, 1 ASC NULLS LAST, 3 ASC NULLS LAST
+    `,
+    [playerId, DUEL_FORMATS],
+  );
+
+  return result.rows.map((row) => ({
+    heroId: row.hero_id,
+    heroName: row.hero_name,
+    opponentHeroId: row.opponent_hero_id,
+    opponentHeroName: row.opponent_hero_name,
+    games: Number(row.games),
+    wins: Number(row.wins),
+    draws: Number(row.draws),
   }));
 }
 
@@ -998,7 +1142,25 @@ export interface LeaderboardPlayer {
   gamesPlayed: number;
   wins: number;
   byOpponentKind: PlayerOpponentKindStats;
+  /** Hero with the most games; ties to most wins, then heroId asc. Null-hero seats never qualify. */
+  mainHeroId: string | null;
+  /** That hero's name as the player's most recent game on it reported it. */
+  mainHeroName: string | null;
+  /** Last 5 results, newest first — `PlayerStats.recentForm`'s rule, shorter. */
+  recentForm: PlayerResult[];
+  /** `PlayerStats.streaks.current`, same rule. */
+  currentStreak: number;
+  /** Only with `?since=`: games since then, casual (easy/medium) bot opponents excluded. */
+  windowGames?: number;
+  /** Only with `?since=`: wins among those `windowGames`. */
+  windowWins?: number;
 }
+
+/** How many results a leaderboard row's `recentForm` carries. */
+export const LEADERBOARD_RECENT_FORM = 5;
+
+/** Bot tiers a leaderboard `?since=` window leaves out: the casual opponents. */
+const CASUAL_BOT_TIERS = ['easy', 'medium'];
 
 /**
  * `?limit=` is a safety cap the caller may set, not a page size: absent, blank,
@@ -1023,7 +1185,7 @@ export function clampLeaderboardLimit(requested: number | null): number | null {
  */
 const ALL_PLAYER_SEATS_CTE = `
   SELECT DISTINCT ON (s.player_id, s.game_id)
-         s.player_id, s.game_id, s.team_index, s.won
+         s.player_id, s.game_id, s.team_index, s.won, s.hero_id, s.hero_name
   FROM game_seats s
   WHERE s.player_id IS NOT NULL AND s.player_id <> ''
   ORDER BY s.player_id, s.game_id, s.team_index, s.seat_index
@@ -1031,7 +1193,8 @@ const ALL_PLAYER_SEATS_CTE = `
 
 /** The cross-player twin of `PLAYER_GAMES_CTE`: same completed-game filter. */
 const ALL_PLAYER_GAMES_CTE = `
-  SELECT seats.player_id, seats.game_id, seats.team_index, seats.won, g.draw
+  SELECT seats.player_id, seats.game_id, seats.team_index, seats.won, seats.hero_id, seats.hero_name,
+         g.draw, ${ENDED_AT} AS ended_at
   FROM seats
   JOIN games g ON g.id = seats.game_id
   WHERE g.campaign_id IS NULL
@@ -1060,7 +1223,7 @@ const ALL_PLAYER_GAMES_CTE = `
  */
 export async function leaderboard(
   pool: Pool,
-  options: { limit: number | null } = { limit: null },
+  options: { limit: number | null; since?: Date | null } = { limit: null },
 ): Promise<LeaderboardPlayer[]> {
   const limit = clampLeaderboardLimit(options.limit);
   const result = await pool.query<{ player_id: string; games_played: string; wins: string }>(
@@ -1078,11 +1241,15 @@ export async function leaderboard(
     [limit],
   );
 
-  const players = result.rows.map((row) => ({
+  const players: LeaderboardPlayer[] = result.rows.map((row) => ({
     playerId: row.player_id,
     gamesPlayed: Number(row.games_played),
     wins: Number(row.wins),
     byOpponentKind: { human: { games: 0, wins: 0, draws: 0 }, bots: [] } as PlayerOpponentKindStats,
+    mainHeroId: null,
+    mainHeroName: null,
+    recentForm: [],
+    currentStreak: 0,
   }));
 
   // Second round trip rather than one wide query: the split needs a different
@@ -1094,7 +1261,139 @@ export async function leaderboard(
     const split = splits.get(player.playerId);
     if (split) player.byOpponentKind = split;
   }
+
+  const since = options.since ?? null;
+  const extras = await leaderboardRowExtras(pool, players.map((player) => player.playerId), since);
+  for (const player of players) {
+    const extra = extras.get(player.playerId);
+    if (extra) Object.assign(player, extra);
+    if (since !== null) {
+      player.windowGames ??= 0;
+      player.windowWins ??= 0;
+    }
+  }
   return players;
+}
+
+type LeaderboardRowExtras = Pick<
+  LeaderboardPlayer,
+  'mainHeroId' | 'mainHeroName' | 'recentForm' | 'currentStreak' | 'windowGames' | 'windowWins'
+>;
+
+/**
+ * The dashboard fields of a leaderboard row (stats dashboard T2), for the given
+ * players. Kept apart from `leaderboard`'s own query on purpose: `gamesPlayed`/
+ * `wins`/`byOpponentKind` price XP api-side and must not move when these do.
+ *
+ * - `recentForm` / `currentStreak` come from {@link resultRunsCtes}, the very
+ *   CTEs `playerStreaks` uses, partitioned per player — same order key, same
+ *   "a draw breaks a run" rule — so a row always agrees with that player's
+ *   `/stats` (`recentForm` is its first five entries).
+ * - `mainHero*`: most games on the seat's hero, then most wins, then hero id
+ *   asc. Seats with no hero id are not a hero, so never a main hero.
+ * - `windowGames`/`windowWins` (only when `since` is given): games ending at or
+ *   after `since`, less games against a casual bot. A game is casual by
+ *   `leaderboardOpponentKinds`'s per-game rule — any opposing bot makes it a bot
+ *   game, filed under the alphabetically first bot tier — so a window row
+ *   agrees with the `byOpponentKind` split. Unknown tiers are not casual.
+ */
+async function leaderboardRowExtras(
+  pool: Pool,
+  playerIds: string[],
+  since: Date | null,
+): Promise<Map<string, LeaderboardRowExtras>> {
+  const extras = new Map<string, LeaderboardRowExtras>();
+  if (playerIds.length === 0) return extras;
+
+  const result = await pool.query<{
+    player_id: string;
+    recent_form: PlayerResult[] | null;
+    current_streak: string | null;
+    main_hero_id: string | null;
+    main_hero_name: string | null;
+    window_games: string | null;
+    window_wins: string | null;
+  }>(
+    `
+      WITH all_seats AS (${ALL_PLAYER_SEATS_CTE}),
+      seats AS (SELECT * FROM all_seats WHERE player_id = ANY($1::text[])),
+      played AS (${ALL_PLAYER_GAMES_CTE}),
+      ${resultRunsCtes('player_id')},
+      latest AS (
+        SELECT player_id, max(rn) AS last_rn FROM ordered GROUP BY player_id
+      ),
+      form AS (
+        SELECT o.player_id, array_agg(o.result ORDER BY o.rn DESC) AS recent_form
+        FROM ordered o
+        JOIN latest l ON l.player_id = o.player_id
+        WHERE o.rn > l.last_rn - $2::int
+        GROUP BY o.player_id
+      ),
+      streak AS (
+        SELECT l.player_id, max(r.len) AS current_streak
+        FROM latest l
+        JOIN runs r ON r.player_id = l.player_id AND r.last_rn = l.last_rn
+        GROUP BY l.player_id
+      ),
+      hero_totals AS (
+        SELECT player_id, hero_id,
+               (array_agg(hero_name ORDER BY ended_at DESC, game_id DESC)
+                  FILTER (WHERE hero_name IS NOT NULL))[1] AS hero_name,
+               count(*) AS games,
+               count(*) FILTER (WHERE won) AS wins
+        FROM played
+        WHERE hero_id IS NOT NULL
+        GROUP BY player_id, hero_id
+      ),
+      main_hero AS (
+        SELECT DISTINCT ON (player_id) player_id, hero_id, hero_name
+        FROM hero_totals
+        ORDER BY player_id, games DESC, wins DESC, hero_id ASC
+      ),
+      in_window AS (
+        SELECT * FROM played WHERE $3::timestamptz IS NOT NULL AND ended_at >= $3::timestamptz
+      ),
+      window_bots AS (
+        SELECT p.player_id, p.game_id,
+               min(${botTierSql('o.pilot', 'o.bot_difficulty')}) AS bot_tier
+        FROM in_window p
+        JOIN game_seats o ON o.game_id = p.game_id AND o.team_index <> p.team_index
+        WHERE o.pilot_kind = 'bot'
+        GROUP BY p.player_id, p.game_id
+      ),
+      window_totals AS (
+        SELECT w.player_id, count(*) AS window_games, count(*) FILTER (WHERE w.won) AS window_wins
+        FROM in_window w
+        LEFT JOIN window_bots b ON b.player_id = w.player_id AND b.game_id = w.game_id
+        WHERE b.bot_tier IS NULL OR b.bot_tier <> ALL($4::text[])
+        GROUP BY w.player_id
+      )
+      SELECT l.player_id, f.recent_form, s.current_streak,
+             m.hero_id AS main_hero_id, m.hero_name AS main_hero_name,
+             w.window_games, w.window_wins
+      FROM latest l
+      LEFT JOIN form f ON f.player_id = l.player_id
+      LEFT JOIN streak s ON s.player_id = l.player_id
+      LEFT JOIN main_hero m ON m.player_id = l.player_id
+      LEFT JOIN window_totals w ON w.player_id = l.player_id
+    `,
+    [playerIds, LEADERBOARD_RECENT_FORM, since, CASUAL_BOT_TIERS],
+  );
+
+  for (const row of result.rows) {
+    const extra: LeaderboardRowExtras = {
+      mainHeroId: row.main_hero_id,
+      mainHeroName: row.main_hero_name,
+      recentForm: row.recent_form ?? [],
+      currentStreak: count(row.current_streak),
+    };
+    if (since !== null) {
+      extra.windowGames = count(row.window_games);
+      extra.windowWins = count(row.window_wins);
+    }
+    extras.set(row.player_id, extra);
+  }
+  return extras;
 }
 
 /**
@@ -1238,5 +1537,460 @@ async function playerBotChallenges(
   return {
     clutchWins: count(result.rows[0]?.clutch_wins ?? null),
     fastestBotWinTurns: fastest === null ? null : Number(fastest),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Community aggregates (stats dashboard T1, #72): `/accounts/community` and
+// `/accounts/heroes/:heroId`. Field names, filters and rules are the stats
+// dashboard contract's §0/§1a/§1b; nothing here is per-player history.
+// ---------------------------------------------------------------------------
+
+/** `window=all` (the default) or the current calendar month in UTC. */
+export type CommunityWindow = 'all' | 'month';
+
+/** Parse `?window=`: absent or blank is `all`, anything unrecognised is null (→ 400). */
+export function parseCommunityWindow(value: string | null): CommunityWindow | null {
+  if (value === null || value === '' || value === 'all') return 'all';
+  if (value === 'month') return 'month';
+  return null;
+}
+
+/** Start of `now`'s calendar month in UTC, or null for `all`. */
+export function communityWindowStart(window: CommunityWindow, now: Date): Date | null {
+  if (window === 'all') return null;
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+}
+
+export interface CommunityKindCounts {
+  human: number;
+  hardExpert: number;
+  casual: number;
+}
+
+export interface CommunityWeek extends CommunityKindCounts {
+  /** YYYY-MM-DD, a Monday, UTC. */
+  weekStart: string;
+}
+
+export interface CommunityHero {
+  heroId: string;
+  heroName: string | null;
+  games: number;
+  wins: number;
+  draws: number;
+  crown: { playerId: string; wins: number; games: number } | null;
+}
+
+export interface CommunityMatchup {
+  heroId: string;
+  opponentHeroId: string;
+  games: number;
+  wins: number;
+  draws: number;
+}
+
+export interface CommunityPayload {
+  window: CommunityWindow;
+  windowStart: string | null;
+  generatedAt: string;
+  totals: CommunityKindCounts & {
+    games: number;
+    humanVsExpert: { games: number; wins: number };
+  };
+  weekly: CommunityWeek[];
+  heroes: CommunityHero[];
+  matchups: CommunityMatchup[];
+}
+
+export interface HeroPilot {
+  playerId: string;
+  games: number;
+  wins: number;
+  draws: number;
+}
+
+export interface HeroMatchup {
+  opponentHeroId: string;
+  opponentHeroName: string | null;
+  games: number;
+  wins: number;
+  draws: number;
+}
+
+export interface HeroPayload {
+  heroId: string;
+  heroName: string | null;
+  window: CommunityWindow;
+  windowStart: string | null;
+  generatedAt: string;
+  games: number;
+  wins: number;
+  draws: number;
+  totalHumanSeatGames: number;
+  pilotCount: number;
+  pilots: HeroPilot[];
+  crown: HeroPilot | null;
+  matchups: HeroMatchup[];
+  byOpponentKind: CommunityKindCounts;
+}
+
+/** `weekly` always spans this many Monday-UTC weeks, the current one last. */
+export const COMMUNITY_WEEKS = 12;
+/** `pilots` on the hero page is capped here. */
+export const HERO_PILOTS_LIMIT = 50;
+
+/**
+ * Qualifying community games (Q), one row per game, with its timestamp:
+ *
+ *   g.campaign_id IS NULL                 -- sim campaigns land in `games` too
+ *   AND g.format IN ('duel', '1v1')       -- community aggregates are duel only
+ *   AND EXISTS (human seat)               -- also removes every bot-vs-bot game
+ *
+ * Unwindowed on purpose: `weekly` ignores `window`, so each query applies its
+ * own time predicate on `ts`. The format predicate can use `games_format_idx`;
+ * the EXISTS probe hits the `game_seats` primary key (game_id leads it).
+ */
+const Q_GAMES_CTE = `
+  SELECT g.id AS game_id, g.draw, ${ENDED_AT} AS ts
+  FROM games g
+  WHERE g.campaign_id IS NULL
+    AND g.format IN ('duel', '1v1')
+    AND EXISTS (SELECT 1 FROM game_seats h WHERE h.game_id = g.id AND h.pilot_kind = 'human')
+`;
+
+/**
+ * Every human seat of a Q game (`q` must be in scope), with its opponent kind:
+ * `human` when the opposing seat is human, `casual` for an easy/medium bot, and
+ * `hardExpert` for any other bot tier — hard, expert and `unknown` alike (the
+ * api prices unknown as hard). Tiers come from `bot-tier.ts`, stamped
+ * `bot_difficulty` first. A seat whose only opposition is an `unknown` pilot
+ * kind (or none at all, a producer bug) gets a null kind and sits in no bucket.
+ * `vs_expert` feeds `totals.humanVsExpert`.
+ */
+const Q_OPPONENT_TIER = botTierSql('o.pilot', 'o.bot_difficulty');
+const Q_HUMAN_SEATS_CTE = `
+  SELECT s.game_id, q.ts, q.draw, s.hero_id, s.hero_name, s.won,
+         NULLIF(btrim(s.player_id), '') AS player_id,
+         CASE
+           WHEN bool_or(o.pilot_kind = 'bot' AND ${Q_OPPONENT_TIER} NOT IN ('easy', 'medium')) THEN 'hardExpert'
+           WHEN bool_or(o.pilot_kind = 'bot') THEN 'casual'
+           WHEN bool_or(o.pilot_kind = 'human') THEN 'human'
+         END AS opponent_kind,
+         coalesce(bool_or(o.pilot_kind = 'bot' AND ${Q_OPPONENT_TIER} = 'expert'), false) AS vs_expert
+  FROM q
+  JOIN game_seats s ON s.game_id = q.game_id AND s.pilot_kind = 'human'
+  -- The tier is decoded inside the aggregates, i.e. only for opposing seats of
+  -- Q games; a derived table here gets flattened and decodes every sim seat.
+  LEFT JOIN game_seats o ON o.game_id = s.game_id AND o.team_index <> s.team_index
+  GROUP BY s.game_id, s.team_index, s.seat_index, q.ts, q.draw, s.hero_id, s.hero_name, s.won, s.player_id
+`;
+
+/**
+ * Game kind per Q game (`human_seats` in scope): `human` with two human seats,
+ * otherwise its human seat's opponent kind.
+ */
+const Q_GAME_KINDS_CTE = `
+  SELECT game_id, min(ts) AS ts,
+         CASE WHEN count(*) >= 2 THEN 'human' ELSE min(opponent_kind) END AS kind
+  FROM human_seats
+  GROUP BY game_id
+`;
+
+/**
+ * Every seat of a Q game (human or bot pilot) against every opposing seat —
+ * the matchup-cell grain. Each game contributes both orientations, so
+ * `A|B.games == B|A.games`; mirrors and null hero ids are dropped.
+ */
+const Q_MATCHUP_PAIRS_CTE = `
+  SELECT q.game_id, q.ts, q.draw, s.hero_id, s.won, o.hero_id AS opponent_hero_id,
+         o.hero_name AS opponent_hero_name
+  FROM q
+  JOIN game_seats s ON s.game_id = q.game_id
+  JOIN game_seats o ON o.game_id = s.game_id AND o.team_index <> s.team_index
+  WHERE s.hero_id IS NOT NULL AND o.hero_id IS NOT NULL AND s.hero_id <> o.hero_id
+`;
+
+/**
+ * Per (hero, signed-in player) standing in the window, ordered by the crown
+ * rule: most wins, then fewer games, then whoever reached that win count first
+ * (the timestamp of their latest win *is* the moment they reached it), then
+ * `player_id` asc. Games/wins count distinct games so one account on both
+ * seats of a mirror counts once. `rank` is 1 for the crown candidate.
+ */
+const HERO_PILOTS_CTE = `
+  SELECT hero_id, player_id,
+         count(DISTINCT game_id) AS games,
+         count(DISTINCT game_id) FILTER (WHERE won) AS wins,
+         count(DISTINCT game_id) FILTER (WHERE draw) AS draws,
+         row_number() OVER (
+           PARTITION BY hero_id
+           ORDER BY count(DISTINCT game_id) FILTER (WHERE won) DESC,
+                    count(DISTINCT game_id) ASC,
+                    max(ts) FILTER (WHERE won) ASC NULLS LAST,
+                    player_id ASC
+         ) AS rank
+  FROM human_seats
+  WHERE player_id IS NOT NULL AND hero_id IS NOT NULL
+    AND ($1::timestamptz IS NULL OR ts >= $1)
+  GROUP BY hero_id, player_id
+`;
+
+interface CountRow {
+  games: string;
+  wins: string;
+  draws: string;
+}
+
+function kindCounts(rows: Array<{ kind: string | null; n: string }>): CommunityKindCounts {
+  const counts: CommunityKindCounts = { human: 0, hardExpert: 0, casual: 0 };
+  for (const row of rows) {
+    if (row.kind === 'human' || row.kind === 'hardExpert' || row.kind === 'casual') {
+      counts[row.kind] += Number(row.n);
+    }
+  }
+  return counts;
+}
+
+/** `GET /accounts/community` (contract §1a). */
+export async function community(
+  pool: Pool,
+  options: { window: CommunityWindow; now: Date },
+): Promise<CommunityPayload> {
+  const start = communityWindowStart(options.window, options.now);
+  const base = `q AS (${Q_GAMES_CTE}), human_seats AS (${Q_HUMAN_SEATS_CTE})`;
+
+  const [totals, expert, weekly, heroes, crowns, matchups] = await Promise.all([
+    pool.query<{ kind: string | null; n: string }>(
+      `
+        WITH ${base}, kinds AS (${Q_GAME_KINDS_CTE})
+        SELECT kind, count(*) AS n
+        FROM kinds
+        WHERE $1::timestamptz IS NULL OR ts >= $1
+        GROUP BY kind
+      `,
+      [start],
+    ),
+    pool.query<{ games: string; wins: string }>(
+      `
+        WITH ${base}
+        SELECT count(*) AS games, count(*) FILTER (WHERE won) AS wins
+        FROM human_seats
+        WHERE vs_expert AND ($1::timestamptz IS NULL OR ts >= $1)
+      `,
+      [start],
+    ),
+    // Independent of `window`: always the last 12 Monday-UTC weeks, zero-filled.
+    pool.query<{ week_start: string; human: string; hard_expert: string; casual: string }>(
+      `
+        WITH ${base}, kinds AS (${Q_GAME_KINDS_CTE}),
+        weeks AS (
+          SELECT generate_series(
+                   date_trunc('week', $1::timestamptz AT TIME ZONE 'UTC') - interval '${COMMUNITY_WEEKS - 1} weeks',
+                   date_trunc('week', $1::timestamptz AT TIME ZONE 'UTC'),
+                   interval '1 week'
+                 ) AS week
+        )
+        SELECT to_char(w.week, 'YYYY-MM-DD') AS week_start,
+               count(k.game_id) FILTER (WHERE k.kind = 'human') AS human,
+               count(k.game_id) FILTER (WHERE k.kind = 'hardExpert') AS hard_expert,
+               count(k.game_id) FILTER (WHERE k.kind = 'casual') AS casual
+        FROM weeks w
+        LEFT JOIN kinds k
+          ON k.ts >= (w.week AT TIME ZONE 'UTC')
+         AND k.ts < ((w.week + interval '1 week') AT TIME ZONE 'UTC')
+        GROUP BY w.week
+        ORDER BY w.week ASC
+      `,
+      [options.now],
+    ),
+    pool.query<CountRow & { hero_id: string; hero_name: string | null }>(
+      `
+        WITH ${base}
+        SELECT hero_id,
+               (array_agg(hero_name ORDER BY ts DESC) FILTER (WHERE hero_name IS NOT NULL))[1] AS hero_name,
+               count(*) AS games,
+               count(*) FILTER (WHERE won) AS wins,
+               count(*) FILTER (WHERE draw) AS draws
+        FROM human_seats
+        WHERE hero_id IS NOT NULL AND ($1::timestamptz IS NULL OR ts >= $1)
+        GROUP BY hero_id
+        ORDER BY count(*) DESC, hero_id ASC
+      `,
+      [start],
+    ),
+    pool.query<{ hero_id: string; player_id: string; games: string; wins: string }>(
+      `
+        WITH ${base}, pilots AS (${HERO_PILOTS_CTE})
+        SELECT hero_id, player_id, games, wins
+        FROM pilots
+        WHERE rank = 1 AND wins > 0
+      `,
+      [start],
+    ),
+    pool.query<CountRow & { hero_id: string; opponent_hero_id: string }>(
+      `
+        WITH q AS (${Q_GAMES_CTE}), pairs AS (${Q_MATCHUP_PAIRS_CTE})
+        SELECT hero_id, opponent_hero_id,
+               count(*) AS games,
+               count(*) FILTER (WHERE won) AS wins,
+               count(*) FILTER (WHERE draw) AS draws
+        FROM pairs
+        WHERE $1::timestamptz IS NULL OR ts >= $1
+        GROUP BY hero_id, opponent_hero_id
+        ORDER BY count(*) DESC, hero_id ASC, opponent_hero_id ASC
+      `,
+      [start],
+    ),
+  ]);
+
+  const kinds = kindCounts(totals.rows);
+  const crownByHero = new Map(crowns.rows.map((row) => [row.hero_id, row]));
+
+  return {
+    window: options.window,
+    windowStart: start?.toISOString() ?? null,
+    generatedAt: options.now.toISOString(),
+    totals: {
+      games: totals.rows.reduce((sum, row) => sum + Number(row.n), 0),
+      ...kinds,
+      humanVsExpert: { games: count(expert.rows[0]?.games ?? null), wins: count(expert.rows[0]?.wins ?? null) },
+    },
+    weekly: weekly.rows.map((row) => ({
+      weekStart: row.week_start,
+      human: Number(row.human),
+      hardExpert: Number(row.hard_expert),
+      casual: Number(row.casual),
+    })),
+    heroes: heroes.rows.map((row) => {
+      const crown = crownByHero.get(row.hero_id);
+      return {
+        heroId: row.hero_id,
+        heroName: row.hero_name,
+        games: Number(row.games),
+        wins: Number(row.wins),
+        draws: Number(row.draws),
+        crown: crown ? { playerId: crown.player_id, wins: Number(crown.wins), games: Number(crown.games) } : null,
+      };
+    }),
+    matchups: matchups.rows.map((row) => ({
+      heroId: row.hero_id,
+      opponentHeroId: row.opponent_hero_id,
+      games: Number(row.games),
+      wins: Number(row.wins),
+      draws: Number(row.draws),
+    })),
+  };
+}
+
+/**
+ * `GET /accounts/heroes/:heroId` (contract §1b). A hero with no games in the
+ * window — or an id telemetry has never seen — is zeros and empty arrays, not
+ * an error: a never-played hero is a valid page.
+ */
+export async function heroCommunity(
+  pool: Pool,
+  heroId: string,
+  options: { window: CommunityWindow; now: Date },
+): Promise<HeroPayload> {
+  const start = communityWindowStart(options.window, options.now);
+  const base = `q AS (${Q_GAMES_CTE}), human_seats AS (${Q_HUMAN_SEATS_CTE})`;
+
+  const [name, totals, byKind, pilots, matchups] = await Promise.all([
+    // The name is not windowed: a hero unplayed this month still has one.
+    pool.query<{ hero_name: string | null }>(
+      `
+        WITH q AS (${Q_GAMES_CTE})
+        SELECT s.hero_name
+        FROM q
+        JOIN game_seats s ON s.game_id = q.game_id
+        WHERE s.hero_id = $1 AND s.hero_name IS NOT NULL
+        ORDER BY q.ts DESC
+        LIMIT 1
+      `,
+      [heroId],
+    ),
+    pool.query<CountRow & { total: string; pilot_count: string }>(
+      `
+        WITH ${base}
+        SELECT count(*) FILTER (WHERE hero_id = $2) AS games,
+               count(*) FILTER (WHERE hero_id = $2 AND won) AS wins,
+               count(*) FILTER (WHERE hero_id = $2 AND draw) AS draws,
+               count(*) AS total,
+               count(DISTINCT player_id) FILTER (WHERE hero_id = $2) AS pilot_count
+        FROM human_seats
+        WHERE $1::timestamptz IS NULL OR ts >= $1
+      `,
+      [start, heroId],
+    ),
+    pool.query<{ kind: string | null; n: string }>(
+      `
+        WITH ${base}
+        SELECT opponent_kind AS kind, count(*) AS n
+        FROM human_seats
+        WHERE hero_id = $2 AND ($1::timestamptz IS NULL OR ts >= $1)
+        GROUP BY opponent_kind
+      `,
+      [start, heroId],
+    ),
+    pool.query<CountRow & { player_id: string }>(
+      `
+        WITH ${base}, pilots AS (${HERO_PILOTS_CTE})
+        SELECT player_id, games, wins, draws
+        FROM pilots
+        WHERE hero_id = $2
+        ORDER BY rank ASC
+        LIMIT ${HERO_PILOTS_LIMIT}
+      `,
+      [start, heroId],
+    ),
+    pool.query<CountRow & { opponent_hero_id: string; opponent_hero_name: string | null }>(
+      `
+        WITH q AS (${Q_GAMES_CTE}), pairs AS (${Q_MATCHUP_PAIRS_CTE})
+        SELECT opponent_hero_id,
+               (array_agg(opponent_hero_name ORDER BY ts DESC)
+                  FILTER (WHERE opponent_hero_name IS NOT NULL))[1] AS opponent_hero_name,
+               count(*) AS games,
+               count(*) FILTER (WHERE won) AS wins,
+               count(*) FILTER (WHERE draw) AS draws
+        FROM pairs
+        WHERE hero_id = $2 AND ($1::timestamptz IS NULL OR ts >= $1)
+        GROUP BY opponent_hero_id
+        ORDER BY count(*) DESC, opponent_hero_id ASC
+      `,
+      [start, heroId],
+    ),
+  ]);
+
+  const row = totals.rows[0];
+  const pilotRows: HeroPilot[] = pilots.rows.map((pilot) => ({
+    playerId: pilot.player_id,
+    games: Number(pilot.games),
+    wins: Number(pilot.wins),
+    draws: Number(pilot.draws),
+  }));
+  const leader = pilotRows[0];
+
+  return {
+    heroId,
+    heroName: name.rows[0]?.hero_name ?? null,
+    window: options.window,
+    windowStart: start?.toISOString() ?? null,
+    generatedAt: options.now.toISOString(),
+    games: count(row?.games ?? null),
+    wins: count(row?.wins ?? null),
+    draws: count(row?.draws ?? null),
+    totalHumanSeatGames: count(row?.total ?? null),
+    pilotCount: count(row?.pilot_count ?? null),
+    pilots: pilotRows,
+    crown: leader && leader.wins >= 1 ? leader : null,
+    matchups: matchups.rows.map((matchup) => ({
+      opponentHeroId: matchup.opponent_hero_id,
+      opponentHeroName: matchup.opponent_hero_name,
+      games: Number(matchup.games),
+      wins: Number(matchup.wins),
+      draws: Number(matchup.draws),
+    })),
+    byOpponentKind: kindCounts(byKind.rows),
   };
 }
