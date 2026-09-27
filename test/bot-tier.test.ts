@@ -65,6 +65,18 @@ describe('botTierFromPilot', () => {
 });
 
 describe('botTier', () => {
+  it('decodes the Prodigy tier from a stamp or the label (#77)', () => {
+    expect(botTier('jevx3', 'bot:jevx3(512,10000ms)')).toBe('jevx3');
+    expect(botTier(null, 'bot:jevx3(512,10000ms)')).toBe('jevx3');
+    expect(botTier(null, 'bot:jevx3')).toBe('jevx3');
+    expect(botTierFromPilot('bot:jevx3(512, 10000ms)')).toBe('jevx3');
+  });
+
+  it('reads a stamp outside the known tiers as unknown, not the label (#77)', () => {
+    expect(botTier('banana', 'bot:easy')).toBe('unknown');
+    expect(botTier('banana', null)).toBe('unknown');
+  });
+
   it('prefers a stamped bot_difficulty over the label', () => {
     // A future engine-side stamp must win: the label is archaeology.
     expect(botTier('expert', 'bot:mc(64, 400ms)')).toBe('expert');
@@ -90,5 +102,13 @@ describe('botTierSql', () => {
     expect(sql).toContain("= 'bot:easy' THEN 'easy'");
     expect(sql).toContain("LIKE 'bot:mc(16,%' THEN 'medium'");
     expect(sql).toContain("LIKE 'bot:ismcts(%' THEN 'expert'");
+    expect(sql).toContain("= 'bot:jevx3' THEN 'jevx3'");
+    expect(sql).toContain("LIKE 'bot:jevx3(%' THEN 'jevx3'");
+  });
+
+  it('only passes a stamp through when it names a known tier (#77)', () => {
+    const sql = botTierSql('pilot', 'bot_difficulty');
+    expect(sql).toContain("IN ('easy', 'medium', 'hard', 'expert', 'jevx3')");
+    expect(sql).toContain("IS NOT NULL THEN 'unknown'");
   });
 });

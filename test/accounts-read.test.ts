@@ -102,13 +102,14 @@ async function errorCode(response: Response): Promise<string | undefined> {
   return ((await response.json()) as { code?: string }).code;
 }
 
-/** The per-hero opponent-kind cross (#63) — five fixed buckets, always present. */
+/** The per-hero opponent-kind cross (#63) — six fixed buckets (jevx3 since #77), always present. */
 interface HeroOpponents {
   human: { games: number; wins: number };
   easy: { games: number; wins: number };
   medium: { games: number; wins: number };
   hard: { games: number; wins: number };
   expert: { games: number; wins: number };
+  jevx3: { games: number; wins: number };
 }
 
 const NO_HERO_OPPONENTS: HeroOpponents = {
@@ -117,6 +118,7 @@ const NO_HERO_OPPONENTS: HeroOpponents = {
   medium: { games: 0, wins: 0 },
   hard: { games: 0, wins: 0 },
   expert: { games: 0, wins: 0 },
+  jevx3: { games: 0, wins: 0 },
 };
 
 /** The zeroed block with the named buckets filled in — every assertion is whole. */
@@ -1019,7 +1021,7 @@ describeDb('accounts read api', () => {
       const body = await stats(ALICE);
       const rolled = body.byHero.reduce(
         (totals, row) => {
-          for (const kind of ['human', 'easy', 'medium', 'hard', 'expert'] as const) {
+          for (const kind of ['human', 'easy', 'medium', 'hard', 'expert', 'jevx3'] as const) {
             totals[kind].games += row.byOpponent[kind].games;
             totals[kind].wins += row.byOpponent[kind].wins;
           }
@@ -1036,7 +1038,7 @@ describeDb('accounts read api', () => {
       });
       for (const bot of body.byOpponentKind.bots) {
         if (bot.difficulty === 'unknown') continue; // no key to roll it into
-        const bucket = rolled[bot.difficulty as 'easy' | 'medium' | 'hard' | 'expert'];
+        const bucket = rolled[bot.difficulty as 'easy' | 'medium' | 'hard' | 'expert' | 'jevx3'];
         expect(bucket).toEqual({ games: bot.games, wins: bot.wins });
       }
       // Day 7 is the only unbucketed game, so the buckets are one short of the total.
@@ -2217,6 +2219,71 @@ describeDb('accounts read api', () => {
         crown: null,
         matchups: [],
         byOpponentKind: { human: 0, hardExpert: 0, casual: 0 },
+      });
+    });
+  });
+
+  describe('Prodigy (jevx3) tier (#77)', () => {
+    const vsBot = (id: string, day: number, pilot: string, winner: number, botDifficulty?: string) =>
+      game({
+        id,
+        endedAt: `2026-08-0${day}T10:00:00.000Z`,
+        teams: [
+          [{ deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'human', playerId: ALICE }],
+          [{
+            deck: 'the-mandalorian@1.0.0',
+            heroId: 'the-mandalorian',
+            pilot,
+            ...(botDifficulty === undefined ? {} : { botDifficulty }),
+          }],
+        ],
+        winner,
+      });
+
+    beforeEach(async () => {
+      // Stamped, as the engine sends it today.
+      await ingest(vsBot('g-jevx3-stamped', 1, 'bot:jevx3(512,10000ms)', 0, 'jevx3'));
+      // No stamp: the tier comes from the label alone.
+      await ingest(vsBot('g-jevx3-label', 2, 'bot:jevx3(512,10000ms)', 1));
+      // An expert win, which the Prodigy games must not add to.
+      await ingest(vsBot('g-jevx3-expert', 3, 'bot:ismcts(512,10000ms)', 0));
+      // A stamp nobody taught us: unknown, even over a label that decodes.
+      await ingest(vsBot('g-jevx3-banana', 4, 'bot:easy', 0, 'banana'));
+    });
+
+    it('buckets Prodigy seats as jevx3 and a foreign stamp as unknown', async () => {
+      const body = await stats(ALICE);
+      expect(body.byOpponentKind).toEqual({
+        human: { games: 0, wins: 0, draws: 0 },
+        bots: [
+          { difficulty: 'jevx3', games: 2, wins: 1, draws: 0 },
+          { difficulty: 'expert', games: 1, wins: 1, draws: 0 },
+          { difficulty: 'unknown', games: 1, wins: 1, draws: 0 },
+        ],
+      });
+      expect(body.byHero[0]!.byOpponent).toEqual(heroOpponents({
+        expert: { games: 1, wins: 1 },
+        jevx3: { games: 2, wins: 1 },
+      }));
+    });
+
+    it('reports the same split on the leaderboard', async () => {
+      const board = (await (await read('/accounts/leaderboard')).json()) as LeaderboardBody;
+      const row = board.players.find((player) => player.playerId === ALICE);
+      expect(row?.byOpponentKind).toEqual((await stats(ALICE)).byOpponentKind);
+    });
+
+    it('does not count a Prodigy win as an expert win in the community totals', async () => {
+      const response = await read('/accounts/community');
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as CommunityBody;
+      // Prodigy and unknown price as hardExpert; only the ISMCTS game is expert.
+      expect(body.totals).toEqual({
+        games: 4,
+        human: 0,
+        hardExpert: 4,
+        casual: 0,
+        humanVsExpert: { games: 1, wins: 1 },
       });
     });
   });
