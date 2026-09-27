@@ -388,17 +388,31 @@ Server-to-server only, authenticated with `Authorization: Bearer $ACCOUNTS_READ_
   - **Concessions.** For a game whose `end_condition` is `forfeit`, `timeout` or `disconnect` (matched case-insensitively; the list is `CONCESSION_END_CONDITIONS` in `src/db/accounts.ts`), the seat that conceded — the player's own seat, `won = false` — counts toward neither `games` nor `wins`, and the seat conceded to counts toward `games` but earns no `wins`. Nobody profits from a concede in either direction, which is what makes two accounts trading instant concedes worthless. Draws (`simultaneous`) are untouched: both seats played the game out.
   - **Short human wins.** A win in the `human` bucket that took fewer than `MIN_HUMAN_WIN_TURNS` (5) turns counts toward `games` but not `wins`. Bot buckets are exempt — a 2-turn kill on an expert bot is a real result and a bot cannot agree to lose. A NULL `turns` **passes**, deliberately the opposite of the `minSeconds` asymmetry below: a missing turn count is a producer gap on ordinary long games, and treating unknown as short is the mistake that zeroed everyone when the duration floor met a NULL `duration_seconds` column (unbrewed-api#35).
 
+  Two fields feed the player stats dashboard (stats dashboard T2), over the same game set as everything above — the player's own seat, campaigns excluded, every format, every opponent including casual bots:
+
+  - `calendar: [{ date: "YYYY-MM-DD", games }]` — games per UTC day over the last 182 days ending today (UTC; day 182 is today − 181), **only days with games**, oldest first. A game is dated by `COALESCE(ended_at, received_at)` in UTC.
+  - `byHeroOpponentHero: [{ heroId, heroName, opponentHeroId, opponentHeroName, games, wins, draws }]` — the player's own hero crossed with the opposing seat's hero, **duel/1v1 games only** (a 2v2 is left out, since a teammate's fight is not the player's matchup), games descending then `heroId`/`opponentHeroId` ascending.
+
   `?minSeconds=<n>` is an optional anti-farm floor over `byHero[].byOpponent` **and nothing else** — `totalGames`, `byHero[].games`/`wins`, `byOpponentKind` and the records always count the full history, so one call serves both "you played 300 games" and "280 of them count for points". It floors `games.duration_seconds`, the only per-game duration the schema carries (nullable integer, migration `001`; `turns` is the other anti-farm signal and is left to the caller, which already gets `avgTurns`). The default of `0` is *no* filter, null durations included; any positive floor requires a game to have actually reported a duration meeting it, so omitting the field is not a way past the bar. Lenient like `limit`: blank, negative, or unparseable means no floor, and a fractional value truncates rather than 400ing. It stays as upstream contract; unbrewed-api no longer sends it, because `duration_seconds` turned out to be NULL on every live game.
 
-- `GET /accounts/leaderboard?limit=<n>` returns the XP inputs for **every** player with at least one completed game — the only cross-player read on this surface:
+- `GET /accounts/leaderboard?limit=<n>&since=<ISO>` returns the XP inputs for **every** player with at least one completed game — the only cross-player read on this surface:
 
   ```json
   { "players": [{ "playerId": "…", "gamesPlayed": 123, "wins": 45,
                   "byOpponentKind": { "human": { "games": 80, "wins": 30, "draws": 2 },
-                                      "bots": [{ "difficulty": "hard", "games": 43, "wins": 15, "draws": 1 }] } }] }
+                                      "bots": [{ "difficulty": "hard", "games": 43, "wins": 15, "draws": 1 }] },
+                  "mainHeroId": "medusa", "mainHeroName": "Medusa",
+                  "recentForm": ["W", "L", "W", "W", "D"], "currentStreak": 1,
+                  "windowGames": 12, "windowWins": 7 }] }
   ```
 
   XP is computed api-side from tiered weights telemetry does not know, so rows cannot be pre-sorted by it; they come back `gamesPlayed` descending (`playerId` breaks ties) and the caller sorts. `byOpponentKind` is the same block, with the same semantics, that `/stats` returns — a game with *any* bot opponent is a bot game, opposing seats only, bot rows keyed on the tier decoded from the pilot label — and it is what lets the caller price a human win differently from an easy-bot win instead of weighting everything as human. `limit` is an optional safety cap, not a page size: omit it — or send a blank, unparseable, or non-positive value — and every player is returned. A row is by construction identical to what that player's own `/stats` reports as `totalGames`/`wins`/`byOpponentKind`.
+
+  The leaderboard dashboard fields (stats dashboard T2) are always sent and never touch `gamesPlayed`/`wins`/`byOpponentKind`, which the api prices XP from (a test pins those bytes):
+
+  - `mainHeroId`/`mainHeroName` — the hero with the most games, ties to most wins, then `heroId` ascending; seats with no hero id never qualify, so both are null only for a player with no hero on record. The name is the one the player's latest game on that hero reported.
+  - `recentForm` — the last 5 results, newest first; `currentStreak` — consecutive wins ending on the newest game. Both come from the same SQL as `/stats`'s `recentForm`/`streaks.current` (`resultRunsCtes` in `src/db/accounts.ts`), so `recentForm` is always the first five of the player's own list.
+  - `?since=<ISO>` adds `windowGames`/`windowWins`: games ending at or after `since`, **excluding** games against a casual (easy/medium) bot. A game's bot tier is `byOpponentKind`'s — any opposing bot makes it a bot game, filed under the alphabetically first tier — and an `unknown` tier is not casual. Players with no games in the window get `0`/`0`. Accepted forms are a date (`2026-09-01`, midnight UTC) or a date-time with `Z` or an offset; anything else, including an empty value or a time without a zone, is `400 BAD_SINCE`.
 
 - `GET /accounts/community?window=all|month` and `GET /accounts/heroes/:heroId?window=all|month` (#72) are the community aggregates behind the stats dashboard's community and per-hero pages (field-by-field shapes: the stats dashboard contract §1a/§1b). Both read **qualifying community games only**: `campaign_id IS NULL AND format IN ('duel','1v1') AND` at least one human seat, so sim campaigns, bot-vs-bot games and team formats never count. Timestamps are `COALESCE(ended_at, received_at)`.
 

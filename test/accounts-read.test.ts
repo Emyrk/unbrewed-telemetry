@@ -156,6 +156,16 @@ interface StatsBody {
   };
   clutchWins: number;
   fastestBotWinTurns: number | null;
+  calendar: Array<{ date: string; games: number }>;
+  byHeroOpponentHero: Array<{
+    heroId: string | null;
+    heroName: string | null;
+    opponentHeroId: string | null;
+    opponentHeroName: string | null;
+    games: number;
+    wins: number;
+    draws: number;
+  }>;
 }
 
 /** The leaderboard payload unbrewed-api ranks by XP (#56). */
@@ -166,6 +176,12 @@ interface LeaderboardBody {
     gamesPlayed: number;
     wins: number;
     byOpponentKind: StatsBody['byOpponentKind'];
+    mainHeroId: string | null;
+    mainHeroName: string | null;
+    recentForm: Array<'W' | 'L' | 'D'>;
+    currentStreak: number;
+    windowGames?: number;
+    windowWins?: number;
   }>;
 }
 
@@ -337,6 +353,8 @@ describeDb('accounts read api', () => {
       },
       clutchWins: 0,
       fastestBotWinTurns: null,
+      calendar: [],
+      byHeroOpponentHero: [],
     });
   });
 
@@ -838,6 +856,25 @@ describeDb('accounts read api', () => {
         // qualifying kills — none of them at 1 HP, all of them 10 turns long.
         clutchWins: 0,
         fastestBotWinTurns: 10,
+        // `now` is 2026-08-06 noon: the day-7 game is a future day, off the calendar.
+        calendar: [1, 2, 3, 4, 5, 6].map((day) => ({ date: `2026-08-0${day}`, games: 1 })),
+        byHeroOpponentHero: [
+          {
+            heroId: 'king-kong', heroName: 'King Kong',
+            opponentHeroId: 'the-mandalorian', opponentHeroName: 'The Mandalorian',
+            games: 4, wins: 3, draws: 0,
+          },
+          {
+            heroId: 'medusa', heroName: 'Medusa',
+            opponentHeroId: 'the-mandalorian', opponentHeroName: 'The Mandalorian',
+            games: 2, wins: 1, draws: 1,
+          },
+          {
+            heroId: 'bigfoot', heroName: 'Bigfoot',
+            opponentHeroId: 'the-mandalorian', opponentHeroName: 'The Mandalorian',
+            games: 1, wins: 0, draws: 0,
+          },
+        ],
       });
     });
   });
@@ -1542,6 +1579,10 @@ describeDb('accounts read api', () => {
               human: { games: 2, wins: 1, draws: 0 },
               bots: [{ difficulty: 'hard', games: 2, wins: 2, draws: 0 }],
             },
+            mainHeroId: 'king-kong',
+            mainHeroName: 'King Kong',
+            recentForm: ['W', 'W', 'L', 'W'],
+            currentStreak: 2,
           },
           // Bob: the two games against Alice, plus an easy-bot win.
           {
@@ -1552,6 +1593,10 @@ describeDb('accounts read api', () => {
               human: { games: 2, wins: 1, draws: 0 },
               bots: [{ difficulty: 'easy', games: 1, wins: 1, draws: 0 }],
             },
+            mainHeroId: 'medusa',
+            mainHeroName: 'Medusa',
+            recentForm: ['W', 'W', 'L'],
+            currentStreak: 2,
           },
           // Carol: never faced a human — the mixed bot side files under 'easy'.
           {
@@ -1565,6 +1610,11 @@ describeDb('accounts read api', () => {
                 { difficulty: 'hard', games: 1, wins: 0, draws: 0 },
               ],
             },
+            // The campaign game carrying her id would make this W, W, L.
+            mainHeroId: 'bigfoot',
+            mainHeroName: 'Bigfoot',
+            recentForm: ['W', 'L'],
+            currentStreak: 1,
           },
         ],
       });
@@ -1596,11 +1646,294 @@ describeDb('accounts read api', () => {
             human: { games: 2, wins: 1, draws: 0 },
             bots: [{ difficulty: 'hard', games: 2, wins: 2, draws: 0 }],
           },
+          mainHeroId: 'king-kong',
+          mainHeroName: 'King Kong',
+          recentForm: ['W', 'W', 'L', 'W'],
+          currentStreak: 2,
         },
       ]);
       // A blank, unparseable, or non-positive limit is "no cap", not zero rows.
       for (const query of ['', '?limit=', '?limit=abc', '?limit=0', '?limit=-5']) {
         expect((await leaderboard(query)).players.length).toBe(3);
+      }
+    });
+
+    // The api prices leaderboard XP off these four fields (contract §1d/§4), so
+    // the dashboard additions must leave them byte-for-byte as they were. The
+    // literal is the raw #56 body this fixture produced before T2, with only
+    // the T2 keys deleted from each row (served key order kept).
+    it('leaves the XP-priced fields byte-identical, with or without ?since=', async () => {
+      const LEGACY_PLAYERS =
+        '[{"playerId":"11111111-1111-4111-8111-111111111111","gamesPlayed":4,"wins":3,' +
+        '"byOpponentKind":{"human":{"games":2,"wins":1,"draws":0},' +
+        '"bots":[{"difficulty":"hard","games":2,"wins":2,"draws":0}]}},' +
+        '{"playerId":"22222222-2222-4222-8222-222222222222","gamesPlayed":3,"wins":2,' +
+        '"byOpponentKind":{"human":{"games":2,"wins":1,"draws":0},' +
+        '"bots":[{"difficulty":"easy","games":1,"wins":1,"draws":0}]}},' +
+        '{"playerId":"33333333-3333-4333-8333-333333333333","gamesPlayed":2,"wins":1,' +
+        '"byOpponentKind":{"human":{"games":0,"wins":0,"draws":0},' +
+        '"bots":[{"difficulty":"easy","games":1,"wins":1,"draws":0},' +
+        '{"difficulty":"hard","games":1,"wins":0,"draws":0}]}}]';
+      const t2Keys = ['mainHeroId', 'mainHeroName', 'recentForm', 'currentStreak', 'windowGames', 'windowWins'];
+      for (const query of ['', '?since=2026-08-03T00:00:00.000Z', '?since=2000-01-01']) {
+        const body = JSON.parse(await (await read(`/accounts/leaderboard${query}`)).text()) as {
+          players: Array<Record<string, unknown>>;
+        };
+        for (const row of body.players) for (const key of t2Keys) delete row[key];
+        expect(JSON.stringify(body.players)).toBe(LEGACY_PLAYERS);
+      }
+    });
+  });
+
+  // Stats dashboard T2 (contract §1c/§1d). Each fixture carries the contract's
+  // mandatory rows — a campaign game, a bot-vs-bot game, a 2v2 with a human, a
+  // casual-bot game, an unknown-tier bot and a human-vs-human game — and the
+  // tests say what each one does to the new fields.
+  describe('stats dashboard T2: player calendar and own-hero grid', () => {
+    // `now` is 2026-08-06T12:00Z, so the 182-day window is 2026-02-06..2026-08-06.
+    beforeEach(async () => {
+      // Human vs human, one second before the window opens: in the grid, off the calendar.
+      await ingest(game({
+        id: 'g-t2-out',
+        endedAt: '2026-02-05T23:59:59.000Z',
+        teams: [
+          [{ deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'human', playerId: ALICE }],
+          [{ deck: 'medusa@1.0.0', heroId: 'medusa', pilot: 'human', playerId: BOB }],
+        ],
+        winner: 0,
+      }));
+      // Casual bot, on the window's first instant (day 182): counted everywhere.
+      await ingest(game({
+        id: 'g-t2-in',
+        endedAt: '2026-02-06T00:00:00.000Z',
+        teams: [
+          [{ deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'human', playerId: ALICE }],
+          [{ deck: 'bigfoot@1.0.0', heroId: 'bigfoot', pilot: 'bot:easy', botDifficulty: 'easy' }],
+        ],
+        winner: 0,
+      }));
+      // An unknown-tier bot, then a human-vs-human draw, on the same day.
+      await ingest(game({
+        id: 'g-t2-unknown',
+        endedAt: '2026-08-05T10:00:00.000Z',
+        teams: [
+          [{ deck: 'medusa@1.0.0', heroId: 'medusa', pilot: 'human', playerId: ALICE }],
+          [{ deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'bot:mystery' }],
+        ],
+        winner: 1,
+      }));
+      await ingest(game({
+        id: 'g-t2-draw',
+        endedAt: '2026-08-05T12:00:00.000Z',
+        teams: [
+          [{ deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'human', playerId: ALICE }],
+          [{ deck: 'medusa@1.0.0', heroId: 'medusa', pilot: 'human', playerId: BOB }],
+        ],
+        winner: null,
+        draw: true,
+      }));
+      // A 2v2 with a human teammate: on the calendar, never in the duel grid.
+      await ingest(game({
+        id: 'g-t2-2v2',
+        endedAt: '2026-08-06T09:00:00.000Z',
+        teams: [
+          [
+            { deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'human', playerId: ALICE },
+            { deck: 'medusa@1.0.0', heroId: 'medusa', pilot: 'human' },
+          ],
+          [
+            { deck: 'the-mandalorian@1.0.0', heroId: 'the-mandalorian', pilot: 'bot:hard', botDifficulty: 'hard' },
+            { deck: 'bigfoot@1.0.0', heroId: 'bigfoot', pilot: 'bot:hard', botDifficulty: 'hard' },
+          ],
+        ],
+        winner: 0,
+      }));
+      // Bot vs bot: nobody's.
+      await ingest(game({
+        id: 'g-t2-bots',
+        endedAt: '2026-08-06T10:00:00.000Z',
+        teams: [
+          [{ deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'bot:hard', botDifficulty: 'hard' }],
+          [{ deck: 'medusa@1.0.0', heroId: 'medusa', pilot: 'bot:hard', botDifficulty: 'hard' }],
+        ],
+        winner: 0,
+      }));
+      // A campaign seat carrying Alice's id, inside the window: excluded from both.
+      const campaign = await cpRepo.createCampaign({
+        name: 't2-calendar-exclusion-test',
+        spec: { note: 'test' },
+        baseSeed: 7,
+        games: [{ spec: { step: 'test' } }],
+        createdBy: 'test',
+      });
+      await ingest(game({
+        id: 'g-t2-campaign',
+        endedAt: '2026-08-06T11:00:00.000Z',
+        teams: [
+          [{ deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'bot:ismcts', playerId: ALICE }],
+          [{ deck: 'the-mandalorian@1.0.0', heroId: 'the-mandalorian', pilot: 'bot:mc' }],
+        ],
+        winner: 0,
+      }), campaign.id);
+    });
+
+    it('counts games per UTC day over the last 182 days, oldest first, non-empty days only', async () => {
+      const body = await stats(ALICE);
+      expect(body.calendar).toEqual([
+        { date: '2026-02-06', games: 1 }, // day 182: in
+        { date: '2026-08-05', games: 2 },
+        { date: '2026-08-06', games: 1 }, // the 2v2; the campaign game is not counted
+      ]);
+      // Day 183 is out of the calendar but still in the lifetime totals.
+      expect(body.totalGames).toBe(5);
+    });
+
+    it('crosses own hero with the opposing hero over duels only, games desc', async () => {
+      const body = await stats(ALICE);
+      expect(body.byHeroOpponentHero).toEqual([
+        {
+          heroId: 'king-kong', heroName: 'King Kong',
+          opponentHeroId: 'medusa', opponentHeroName: 'Medusa',
+          games: 2, wins: 1, draws: 1,
+        },
+        {
+          heroId: 'king-kong', heroName: 'King Kong',
+          opponentHeroId: 'bigfoot', opponentHeroName: 'Bigfoot',
+          games: 1, wins: 1, draws: 0,
+        },
+        {
+          heroId: 'medusa', heroName: 'Medusa',
+          opponentHeroId: 'king-kong', opponentHeroName: 'King Kong',
+          games: 1, wins: 0, draws: 0,
+        },
+      ]);
+      // The 2v2 is the only game against the Mandalorian: absent from the grid,
+      // present in the all-format opponent table.
+      expect(body.byHeroOpponentHero.some((row) => row.opponentHeroId === 'the-mandalorian')).toBe(false);
+      expect(body.byOpponentHero.some((row) => row.heroId === 'the-mandalorian')).toBe(true);
+    });
+  });
+
+  describe('stats dashboard T2: leaderboard row extras and ?since=', () => {
+    // Dave, oldest first: six real games (W L W W L W) plus a campaign win that
+    // must not count. Heroes: king-kong x2 (1 win), medusa x2 (2 wins), bigfoot
+    // x1, the 2v2 on thetis x1. Eve: one king-kong loss, one bigfoot loss.
+    beforeEach(async () => {
+      const duel = (id: string, endedAt: string, mine: SeatSpec, theirs: SeatSpec, winner: number) =>
+        ingest(game({ id, endedAt, teams: [[mine], [theirs]], winner }));
+      await duel('g-lb2-1', '2026-07-01T10:00:00.000Z',
+        { deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'human', playerId: DAVE },
+        { deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'human', playerId: EVE }, 0);
+      await duel('g-lb2-2', '2026-07-02T10:00:00.000Z',
+        { deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'human', playerId: DAVE },
+        { deck: 'medusa@1.0.0', heroId: 'medusa', pilot: 'bot:easy', botDifficulty: 'easy' }, 1);
+      await duel('g-lb2-3', '2026-08-01T10:00:00.000Z',
+        { deck: 'medusa@1.0.0', heroId: 'medusa', pilot: 'human', playerId: DAVE },
+        { deck: 'bigfoot@1.0.0', heroId: 'bigfoot', pilot: 'bot:hard', botDifficulty: 'hard' }, 0);
+      await duel('g-lb2-4', '2026-08-02T10:00:00.000Z',
+        { deck: 'medusa@1.0.0', heroId: 'medusa', pilot: 'human', playerId: DAVE },
+        { deck: 'bigfoot@1.0.0', heroId: 'bigfoot', pilot: 'bot:easy', botDifficulty: 'easy' }, 0);
+      await duel('g-lb2-5', '2026-08-03T10:00:00.000Z',
+        { deck: 'bigfoot@1.0.0', heroId: 'bigfoot', pilot: 'human', playerId: DAVE },
+        { deck: 'medusa@1.0.0', heroId: 'medusa', pilot: 'bot:mystery' }, 1);
+      await ingest(game({
+        id: 'g-lb2-6',
+        endedAt: '2026-08-04T10:00:00.000Z',
+        teams: [
+          [
+            { deck: 'thetis@1.0.0', heroId: 'thetis', pilot: 'human', playerId: DAVE },
+            { deck: 'medusa@1.0.0', heroId: 'medusa', pilot: 'human' },
+          ],
+          [
+            { deck: 'the-mandalorian@1.0.0', heroId: 'the-mandalorian', pilot: 'bot:hard', botDifficulty: 'hard' },
+            { deck: 'bigfoot@1.0.0', heroId: 'bigfoot', pilot: 'bot:hard', botDifficulty: 'hard' },
+          ],
+        ],
+        winner: 0,
+      }));
+      await duel('g-lb2-eve', '2026-08-02T12:00:00.000Z',
+        { deck: 'bigfoot@1.0.0', heroId: 'bigfoot', pilot: 'human', playerId: EVE },
+        { deck: 'medusa@1.0.0', heroId: 'medusa', pilot: 'bot:medium', botDifficulty: 'medium' }, 1);
+      await duel('g-lb2-bots', '2026-08-05T10:00:00.000Z',
+        { deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'bot:hard', botDifficulty: 'hard' },
+        { deck: 'medusa@1.0.0', heroId: 'medusa', pilot: 'bot:hard', botDifficulty: 'hard' }, 0);
+      // Would make king-kong Dave's main hero (3 games) and his form W, W, L, … .
+      const campaign = await cpRepo.createCampaign({
+        name: 't2-leaderboard-exclusion-test',
+        spec: { note: 'test' },
+        baseSeed: 8,
+        games: [{ spec: { step: 'test' } }],
+        createdBy: 'test',
+      });
+      await ingest(game({
+        id: 'g-lb2-campaign',
+        endedAt: '2026-08-05T11:00:00.000Z',
+        teams: [
+          [{ deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'bot:ismcts', playerId: DAVE }],
+          [{ deck: 'the-mandalorian@1.0.0', heroId: 'the-mandalorian', pilot: 'bot:mc' }],
+        ],
+        winner: 0,
+      }), campaign.id);
+    });
+
+    async function board(query = ''): Promise<LeaderboardBody['players']> {
+      return ((await (await read(`/accounts/leaderboard${query}`)).json()) as LeaderboardBody).players;
+    }
+
+    function row(players: LeaderboardBody['players'], playerId: string) {
+      const found = players.find((player) => player.playerId === playerId);
+      if (!found) throw new Error(`no leaderboard row for ${playerId}`);
+      return found;
+    }
+
+    it('picks the main hero by games, then wins, then hero id', async () => {
+      const players = await board();
+      // Dave: king-kong and medusa tie on 2 games; medusa has more wins.
+      expect(row(players, DAVE)).toMatchObject({ mainHeroId: 'medusa', mainHeroName: 'Medusa' });
+      // Eve: king-kong and bigfoot tie on games and wins; bigfoot sorts first.
+      expect(row(players, EVE)).toMatchObject({ mainHeroId: 'bigfoot', mainHeroName: 'Bigfoot' });
+    });
+
+    it('caps recentForm at 5 and agrees with each player\'s own stats', async () => {
+      const players = await board();
+      // Six games, newest first W L W W L | W — the oldest drops off.
+      expect(row(players, DAVE)).toMatchObject({ recentForm: ['W', 'L', 'W', 'W', 'L'], currentStreak: 1 });
+      expect(row(players, EVE)).toMatchObject({ recentForm: ['L', 'L'], currentStreak: 0 });
+      for (const player of players) {
+        const own = await stats(player.playerId);
+        expect(player.recentForm).toEqual(own.recentForm.slice(0, 5));
+        expect(player.currentStreak).toBe(own.streaks.current);
+      }
+    });
+
+    it('omits windowGames/windowWins without ?since=', async () => {
+      for (const player of await board()) {
+        expect(player).not.toHaveProperty('windowGames');
+        expect(player).not.toHaveProperty('windowWins');
+      }
+    });
+
+    it('counts games since ?since= and excludes casual bot opponents', async () => {
+      const players = await board('?since=2026-08-01T00:00:00.000Z');
+      // Dave since Aug 1: hard W, easy W (casual, out), unknown-tier L (not
+      // casual, in), 2v2 vs hard W. The campaign win is never counted.
+      expect(row(players, DAVE)).toMatchObject({ windowGames: 3, windowWins: 2 });
+      // Eve's only window game is against a medium bot: a zero row, not a missing one.
+      expect(row(players, EVE)).toMatchObject({ windowGames: 0, windowWins: 0 });
+      // All-time: Dave's July human win counts, his July easy-bot loss does not.
+      const allTime = await board('?since=2000-01-01');
+      expect(row(allTime, DAVE)).toMatchObject({ windowGames: 4, windowWins: 3 });
+      expect(row(allTime, EVE)).toMatchObject({ windowGames: 1, windowWins: 0 });
+      // A window that starts after everything is zero, and the lifetime fields are untouched.
+      const future = await board('?since=2026-09-01T00:00:00Z');
+      expect(row(future, DAVE)).toMatchObject({ gamesPlayed: 6, wins: 4, windowGames: 0, windowWins: 0 });
+    });
+
+    it('400s BAD_SINCE on a since that is not an ISO timestamp', async () => {
+      for (const since of ['yesterday', '', '2026-08-01T00:00', '2026-13-45', '1722470400000']) {
+        const response = await read(`/accounts/leaderboard?since=${encodeURIComponent(since)}`);
+        expect(response.status).toBe(400);
+        expect(await errorCode(response)).toBe('BAD_SINCE');
       }
     });
   });
