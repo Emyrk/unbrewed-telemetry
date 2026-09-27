@@ -3,6 +3,7 @@ import { randomUUID, createHmac } from 'node:crypto';
 import { validateGameSubmission } from '../ingest/schema.js';
 import { validateDeckDefinitions } from '../ingest/deck-schema.js';
 import { validateQueueEvents } from '../ingest/queue-events-schema.js';
+import { validateGameReplay } from '../ingest/game-replay-schema.js';
 import { deckRulesNotices } from '../ingest/deck-rules.js';
 import type { PgTelemetryRepository } from '../db/repository.js';
 import type { CampaignItemBucket, ControlPlaneRepository, SimJobCheckpoint } from '../db/control-plane-repository.js';
@@ -10,6 +11,7 @@ import type {
   DeckDefinitionSubmission,
   GameSubmission,
   QueueEventsSubmission,
+  GameReplaySubmission,
   RecentHourlyResponse,
 } from '../types.js';
 import { verifyIngestAuth } from './auth.js';
@@ -37,6 +39,8 @@ export interface AppConfig {
   telemetrySecret: string;
   allowUnauthenticatedIngest: boolean;
   bodyLimitBytes: number;
+  /** Cap for `POST /v1/replays` only: bundles run ~70 KB but carry cosmetics blobs. */
+  replayBodyLimitBytes: number;
   now: () => Date;
   discordClientId: string;
   discordClientSecret: string;
@@ -95,6 +99,11 @@ async function handleRequest(
 
   if (req.method === 'POST' && url.pathname === '/v1/queue-events') {
     await handleQueueEventIngest(req, res, repo, config);
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/v1/replays') {
+    await handleReplayIngest(req, res, repo, config);
     return;
   }
 
@@ -451,6 +460,65 @@ async function handleQueueEventIngest(
   const { events } = parsed as QueueEventsSubmission;
   const inserted = await repo.insertQueueEvents(events, config.now());
   sendJson(res, 201, { ok: true, inserted });
+}
+
+/**
+ * Replay bundles (#70). HMAC only, like `/v1/queue-events`: the producer is the
+ * game server itself. One row per game id; a re-post is a 200 duplicate, the
+ * same semantics `/v1/games` has. The engine POSTs fire-and-forget.
+ */
+async function handleReplayIngest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  repo: PgTelemetryRepository,
+  config: AppConfig,
+): Promise<void> {
+  const contentType = req.headers['content-type'];
+  if (contentType && !String(contentType).toLowerCase().includes('application/json')) {
+    sendJson(res, 415, { ok: false, code: 'UNSUPPORTED_MEDIA_TYPE', message: 'Content-Type must be application/json' });
+    return;
+  }
+
+  const body = await readBody(req, config.replayBodyLimitBytes);
+  if (!body.ok) {
+    sendJson(res, body.status, { ok: false, code: body.code, message: body.message });
+    return;
+  }
+
+  const auth = verifyIngestAuth(req.headers, body.body, {
+    secret: config.telemetrySecret,
+    allowUnauthenticated: config.allowUnauthenticatedIngest,
+    toleranceMs: 5 * 60 * 1000,
+    nowMs: () => config.now().getTime(),
+  });
+  if (!auth.ok) {
+    sendJson(res, auth.status, { ok: false, code: auth.code, message: auth.message });
+    return;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body.body.toString('utf8'));
+  } catch {
+    sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Request body is not valid JSON' });
+    return;
+  }
+
+  const validation = validateGameReplay(parsed);
+  if (!validation.ok) {
+    sendJson(res, 400, { ok: false, code: 'VALIDATION_FAILED', errors: validation.errors });
+    return;
+  }
+
+  const { gameId, bundle } = parsed as GameReplaySubmission;
+  const { duplicate } = await repo.insertGameReplay({
+    gameId,
+    bundle,
+    receivedAt: config.now(),
+    source: 'engine',
+    authKeyId: auth.authKeyId,
+  });
+  sendJson(res, duplicate ? 200 : 201, { ok: true, gameId, duplicate });
 }
 
 async function handleDeckIngest(

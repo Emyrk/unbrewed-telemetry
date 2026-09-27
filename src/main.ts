@@ -26,6 +26,7 @@ const server = createServer(createApp({
     telemetrySecret: config.telemetrySecret,
     allowUnauthenticatedIngest: config.allowUnauthenticatedIngest,
     bodyLimitBytes: config.bodyLimitBytes,
+    replayBodyLimitBytes: config.replayBodyLimitBytes,
     now: () => new Date(),
     discordClientId: config.discordClientId,
     discordClientSecret: config.discordClientSecret,

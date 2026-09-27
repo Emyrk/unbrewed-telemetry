@@ -17,7 +17,7 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 const describeDb = databaseUrl ? describe : describe.skip;
 
 const appConfig = (now: Date) => ({
-  telemetrySecret: 'unused', allowUnauthenticatedIngest: true, bodyLimitBytes: 1024 * 1024, now: () => now,
+  telemetrySecret: 'unused', allowUnauthenticatedIngest: true, bodyLimitBytes: 1024 * 1024, replayBodyLimitBytes: 2 * 1024 * 1024, now: () => now,
   discordClientId: '', discordClientSecret: '', discordRedirectUri: '', adminDiscordIds: [], secureCookies: false,
   accountsReadToken: '',
 });

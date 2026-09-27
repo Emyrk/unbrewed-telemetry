@@ -21,6 +21,7 @@ const appConfig = (now: Date) => ({
   telemetrySecret: 'unused',
   allowUnauthenticatedIngest: true,
   bodyLimitBytes: 1024 * 1024,
+  replayBodyLimitBytes: 2 * 1024 * 1024,
   now: () => now,
   discordClientId: '',
   discordClientSecret: '',
