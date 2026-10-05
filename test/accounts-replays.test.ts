@@ -79,7 +79,7 @@ describeDb('GET /accounts/replays/:gameId', () => {
   it('503s when ACCOUNTS_READ_TOKEN is unset, even with a bearer', async () => {
     const res = await get(`/accounts/replays/${GAME_ID}`, 'anything', unconfiguredUrl);
     expect(res.status).toBe(503);
-    expect((await res.json()).code).toBe('AUTH_NOT_CONFIGURED');
+    expect(((await res.json()) as { code: string }).code).toBe('AUTH_NOT_CONFIGURED');
   });
 
   it('refuses a missing or wrong bearer', async () => {
