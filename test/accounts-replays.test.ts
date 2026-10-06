@@ -112,10 +112,15 @@ describeDb('GET /accounts/replays/:gameId', () => {
     expect(res.status).toBe(404);
   });
 
-  it('400s an over-long id and an empty id', async () => {
+  it('400s an over-long id and bad percent-encoding, 404s an empty id', async () => {
     expect((await get(`/accounts/replays/${'x'.repeat(201)}`)).status).toBe(400);
     expect((await get('/accounts/replays/')).status).toBe(404);
     expect((await get('/accounts/replays/%E0%A4%A')).status).toBe(400);
+  });
+
+  it('400s control characters in the id instead of 500ing', async () => {
+    expect((await get('/accounts/replays/Probe-1%00')).status).toBe(400);
+    expect((await get('/accounts/replays/Probe-1%0a')).status).toBe(400);
   });
 
   it('keeps nothing else reachable under the prefix', async () => {
