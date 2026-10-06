@@ -1088,8 +1088,9 @@ async function handleAccountsReplay(
     sendJson(res, 400, { ok: false, code: 'BAD_GAME_ID', message: 'gameId is not valid percent-encoding' });
     return;
   }
-  if (gameId === '' || gameId.length > 200) {
-    sendJson(res, 400, { ok: false, code: 'BAD_GAME_ID', message: 'gameId must be 1-200 characters' });
+  // Control characters (NUL especially) would make Postgres reject the text parameter -> 500.
+  if (gameId.length > 200 || /[\u0000-\u001f\u007f]/.test(gameId)) {
+    sendJson(res, 400, { ok: false, code: 'BAD_GAME_ID', message: 'gameId must be at most 200 characters, without control characters' });
     return;
   }
 
