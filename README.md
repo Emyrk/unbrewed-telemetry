@@ -268,6 +268,102 @@ choices worth knowing when reading the numbers:
   window much shorter than a typical search reads pessimistic.
 
 
+### `POST /v1/sandbox-events`
+
+Ingests a batch of **sandbox** (non-Pro) room lifecycle events from the Go
+relay (`unbrewed-p2p/gameserver`), matching
+`schemas/sandbox-events.v1.schema.json`. This is a separate data bucket:
+sandbox has no rules engine, so it says nothing about balance. Rows land in
+`sandbox_events` (migration `017`) and nothing in `games`, `game_seats` or any
+Pro stat or dashboard total reads them.
+
+Auth is a **named bearer credential with the `sandbox:submit` scope** — HMAC is
+not accepted, and neither is a `games:submit`-only key. The stored `source` is
+the credential's telemetry source, never anything the relay says.
+
+```text
+Authorization: Bearer ubk_<keyId>.<secret>
+Content-Type: application/json
+```
+
+```json
+{
+  "schemaVersion": 1,
+  "events": [
+    { "eventId": "6f1c…uuid", "type": "room_opened",   "roomId": "a1b2c3", "ts": "2026-10-08T19:00:00Z" },
+    { "eventId": "…", "type": "player_joined", "roomId": "a1b2c3", "playerHash": "9f2e4c1a7b3d5e60", "connections": 1, "ts": "…" },
+    { "eventId": "…", "type": "player_left",   "roomId": "a1b2c3", "playerHash": "9f2e4c1a7b3d5e60", "connections": 0, "ts": "…" },
+    { "eventId": "…", "type": "hero_seen",     "roomId": "a1b2c3", "playerHash": "9f2e4c1a7b3d5e60", "heroName": "Medusa", "ts": "…" },
+    { "eventId": "…", "type": "room_closed",   "roomId": "a1b2c3", "reason": "inactive",
+      "lifetimeMs": 3600000, "distinctPlayers": 2, "peakConnections": 3, "stateUpdates": 412, "ts": "…" }
+  ]
+}
+```
+
+- `eventId`: uuid, unique. A re-sent event is a no-op counted in `duplicates`,
+  so producer retries are safe.
+- `roomId`: the sandbox lobby gid as the relay sees it (max 128 chars).
+- `playerHash`: 16 lowercase hex chars, an HMAC of the normalized name with a
+  relay-only salt. **Raw player names are refused**: `name`, `playerName` and
+  `displayName` (like any unknown property, at any level) are a `400`.
+- `connections`: live connections in the room after the join/leave.
+- `heroName`: sent once per (room, player, hero), max 128 chars.
+- `room_closed.reason`: `inactive` (12h GC) | `shutdown` (relay SIGTERM).
+- Per-type fields are required, and only valid, on their types:
+  `playerHash`+`connections` on `player_joined`/`player_left`,
+  `playerHash`+`heroName` on `hero_seen`, and `reason`, `lifetimeMs`,
+  `distinctPlayers`, `peakConnections`, `stateUpdates` on `room_closed`.
+
+A valid batch returns `201 {"ok": true, "inserted": <n>, "duplicates": <m>}`.
+No or bad key is `401`, a key without `sandbox:submit` is `403`, wrong content
+type `415`, oversized body `413`, bad JSON or a schema violation `400`. The
+relay POSTs fire-and-forget, so it never depends on the response.
+
+**Deploy order:**
+
+1. `npm run db:migrate` (creates `sandbox_events`).
+2. Deploy this service.
+3. An admin creates the telemetry source `sandbox-relay` in `/admin` and a
+   credential on it with the `sandbox:submit` scope.
+4. Hand the `ubk_…` key to the relay out of band. Until it has one, the relay's
+   fire-and-forget POSTs simply fail, so the relay may ship before or after.
+
+### `GET /v1/stats/sandbox`
+
+Sandbox usage over a trailing window, read from `sandbox_events` only. Same
+(public, aggregates-only) access as `/v1/stats/dashboard`. The query lives in
+`src/stats/sandbox.ts` as `SANDBOX_STATS_SQL`, shared by the repository, this
+endpoint, and the script:
+
+```sh
+npm run stats:sandbox            # trailing 7d
+npm run stats:sandbox -- 24      # trailing 24h
+```
+
+`windowHours` defaults to `168`; anything that is not a number in
+`(0, 8784]` is `400 BAD_WINDOW`. The window is on `received_at` (server clock).
+
+```json
+{
+  "ok": true, "windowHours": 168, "generatedAt": "2026-10-09T12:00:00.000Z",
+  "roomsOpened": 3, "games": 2, "uniquePlayers": 3, "returningPlayers": 1, "peakConnections": 3,
+  "daily": [{ "date": "2026-10-09", "roomsOpened": 3, "games": 2, "uniquePlayers": 3 }],
+  "hourOfWeek": [{ "dow": 0, "hour": 0, "joins": 0 }, "… 168 cells, dow 0 = Sunday, UTC"],
+  "topHeroes": [{ "heroName": "Medusa", "players": 2 }]
+}
+```
+
+- `games`: rooms where at least two distinct `playerHash` values joined; a room
+  one person opened to fiddle with is not a game. `daily` applies the rule per
+  UTC day.
+- `uniquePlayers`: distinct hashes that joined; `returningPlayers`: those also
+  seen on any event received before the window.
+- `hourOfWeek`: `player_joined` counts, always all 7×24 cells.
+- `topHeroes`: distinct players per hero name, top 10.
+
+The dashboard shows these on its own **Sandbox** tab; they are never summed
+into the Pro totals.
+
 ### `POST /v1/replays`
 
 Persists the full replay bundle of one finished live game, matching

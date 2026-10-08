@@ -1076,3 +1076,16 @@ body {
   .grid-4 { grid-template-columns: repeat(2, 1fr); }
   .two-col, .modal-cols, .map-grid, .deck-overall-grid { grid-template-columns: 1fr; }
 }
+
+/* Sandbox tab (#84): relay rooms, a separate bucket from the Pro stats. */
+.sandbox-head { margin-bottom: 14px; flex-wrap: wrap; gap: 10px; }
+.sandbox-heat {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: 34px repeat(24, minmax(0, 1fr));
+  gap: 2px;
+  align-items: center;
+}
+.sandbox-heat-label { font-size: 11px; color: var(--muted); }
+.sandbox-heat-cell { aspect-ratio: 1; border-radius: 2px; min-width: 0; }
+.sandbox-hero { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border); }

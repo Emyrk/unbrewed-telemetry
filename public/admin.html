@@ -512,7 +512,7 @@
         html += `<div style="margin-bottom:1.5rem;padding:1rem;background:var(--surface);border:1px solid var(--border);border-radius:8px">`;
         html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.6rem"><strong>${esc(s.name)}</strong><button class="btn btn-danger btn-sm" onclick="deleteSource('${s.id}')">Delete</button></div>`;
         html += `<div class="muted" style="margin-bottom:0.5rem">${esc(s.description||'')}</div>`;
-        html += `<div class="form-row"><input id="cred-label-${s.id}" placeholder="key label" style="width:160px"><select id="cred-scopes-${s.id}" multiple style="width:300px;height:60px"><option value="games:submit" selected>games:submit</option><option value="decks:submit">decks:submit</option><option value="sim:claim">sim:claim</option><option value="sim:complete">sim:complete</option></select><button class="btn btn-primary btn-sm" onclick="createCredential('${s.id}')">Create Key</button></div>`;
+        html += `<div class="form-row"><input id="cred-label-${s.id}" placeholder="key label" style="width:160px"><select id="cred-scopes-${s.id}" multiple style="width:300px;height:60px"><option value="games:submit" selected>games:submit</option><option value="decks:submit">decks:submit</option><option value="sim:claim">sim:claim</option><option value="sim:complete">sim:complete</option><option value="sandbox:submit">sandbox:submit</option></select><button class="btn btn-primary btn-sm" onclick="createCredential('${s.id}')">Create Key</button></div>`;
         const visibleCredentials = showRevokedCredentials
           ? s.credentials
           : s.credentials.filter(credential => !credential.revokedAt);

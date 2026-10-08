@@ -53,9 +53,9 @@ export function parseBearer(headers: IncomingHttpHeaders): { keyId: string; secr
   return { keyId: match[1]!, secret: match[2]! };
 }
 
-export type Scope = 'games:submit' | 'decks:submit' | 'sim:claim' | 'sim:complete';
+export type Scope = 'games:submit' | 'decks:submit' | 'sim:claim' | 'sim:complete' | 'sandbox:submit';
 
-export const ALL_SCOPES: Scope[] = ['games:submit', 'decks:submit', 'sim:claim', 'sim:complete'];
+export const ALL_SCOPES: Scope[] = ['games:submit', 'decks:submit', 'sim:claim', 'sim:complete', 'sandbox:submit'];
 
 export function hasScope(credentialScopes: string[], required: Scope): boolean {
   return credentialScopes.includes(required);
