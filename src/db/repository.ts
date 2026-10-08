@@ -213,6 +213,41 @@ export class PgTelemetryRepository {
   }
 
   /**
+   * Replay read (tournaments): one stored bundle by game id, or null. `bundleJson`
+   * is the jsonb rendered by Postgres (`bundle::text`) so the route can splice it
+   * into the response without a parse/re-serialize round trip.
+   */
+  async getGameReplay(gameId: string): Promise<{
+    gameId: string;
+    receivedAt: Date;
+    engineSchemaVersion: unknown;
+    engineDslVersion: unknown;
+    digestVersion: unknown;
+    actionCount: number;
+    turns: number | null;
+    bundleJson: string;
+  } | null> {
+    const result = await this.pool.query(
+      `SELECT game_id, received_at, engine_schema_version, engine_dsl_version,
+              digest_version, action_count, turns, bundle::text AS bundle_json
+         FROM game_replays WHERE game_id = $1`,
+      [gameId],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      gameId: row.game_id,
+      receivedAt: row.received_at,
+      engineSchemaVersion: row.engine_schema_version,
+      engineDslVersion: row.engine_dsl_version,
+      digestVersion: row.digest_version,
+      actionCount: row.action_count,
+      turns: row.turns,
+      bundleJson: row.bundle_json,
+    };
+  }
+
+  /**
    * Queue wait events (#68): append one batch of matchmaking lifecycle events
    * exactly as received. No dedupe and no aggregation at write time — the
    * estimate is a query over the raw stream (see `queueWaitStats`).

@@ -422,12 +422,15 @@ Server-to-server only, authenticated with `Authorization: Bearer $ACCOUNTS_READ_
   - `heroes/:heroId` returns that hero's human seat-games, `totalHumanSeatGames` (the denominator), `pilotCount`, up to 50 signed-in `pilots`, `crown`, its matchup row (`games` desc) and `byOpponentKind`. An unknown hero id is `200` with zeros and empty arrays, never a 404.
   - **Crown**: the signed-in player with the most wins on the hero's human seats; ties go to fewer games, then whoever reached that win count first, then `playerId`. `null` when no signed-in player has a win. `pilots` are in the same order.
 
+- `GET /accounts/replays/:gameId` returns one stored replay bundle (#70) for unbrewed-api to proxy: `{ gameId, receivedAt, engine, digestVersion, actionCount, turns, bundle }`. `bundle` is the stored bundle as-is (jsonb, not re-mapped; key order and spacing may differ from what the engine posted, a parse and re-serialize round trip is identical), so the engine's `POST /replay` verifies it as `exact`. Unknown id is `404`, and so is an empty id (`/accounts/replays/` fails the path-segment check); a >200-char id, bad percent-encoding, or a control character (e.g. `%00`) is `400 BAD_GAME_ID`. Served `cache-control: private, max-age=3600`. Server-to-server only, like everything under `/accounts/*`.
+
 ```sh
 curl -H "Authorization: Bearer $ACCOUNTS_READ_TOKEN" \
   'http://localhost:8788/accounts/players/11111111-1111-4111-8111-111111111111/games?limit=20'
 curl -H "Authorization: Bearer $ACCOUNTS_READ_TOKEN" 'http://localhost:8788/accounts/leaderboard'
 curl -H "Authorization: Bearer $ACCOUNTS_READ_TOKEN" 'http://localhost:8788/accounts/community?window=month'
 curl -H "Authorization: Bearer $ACCOUNTS_READ_TOKEN" 'http://localhost:8788/accounts/heroes/king-kong'
+curl -H "Authorization: Bearer $ACCOUNTS_READ_TOKEN" 'http://localhost:8788/accounts/replays/live-<room>-<created>-<hash12>'
 ```
 
 ### `GET /v1/stats/bot-execution`

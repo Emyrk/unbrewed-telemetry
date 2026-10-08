@@ -194,6 +194,11 @@ async function handleRequest(
     return;
   }
 
+  if (req.method === 'GET' && url.pathname.startsWith('/accounts/replays/')) {
+    await handleAccountsReplay(req, url, res, repo, config);
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname.startsWith('/accounts/players/')) {
     await handleAccountsPlayerRead(req, url, res, repo, config);
     return;
@@ -1049,6 +1054,67 @@ async function handleAccountsHero(
   }
 
   sendJson(res, 200, { ok: true, ...(await repo.heroCommunity(heroId, { window, now: config.now() })) });
+}
+
+/**
+ * Tournaments: `/accounts/replays/:gameId` — one stored replay bundle, served
+ * verbatim (the jsonb text is spliced in, never re-mapped) so the engine's
+ * `POST /replay` accepts it back as `verification: "exact"`. Unknown id is a
+ * 404; no campaign filter (unbrewed-api decides which games are public).
+ */
+async function handleAccountsReplay(
+  req: IncomingMessage,
+  url: URL,
+  res: ServerResponse,
+  repo: PgTelemetryRepository,
+  config: AppConfig,
+): Promise<void> {
+  const auth = verifyAccountsReadAuth(req.headers, config.accountsReadToken);
+  if (!auth.ok) {
+    sendJson(res, auth.status, { ok: false, code: auth.code, message: auth.message });
+    return;
+  }
+
+  // /accounts/replays/:gameId — nothing else lives under this prefix.
+  const segments = url.pathname.split('/').filter(Boolean);
+  if (segments.length !== 3 || segments[0] !== 'accounts' || segments[1] !== 'replays') {
+    sendJson(res, 404, { ok: false, code: 'NOT_FOUND', message: 'Not found' });
+    return;
+  }
+  let gameId: string;
+  try {
+    gameId = decodeURIComponent(segments[2]!);
+  } catch {
+    sendJson(res, 400, { ok: false, code: 'BAD_GAME_ID', message: 'gameId is not valid percent-encoding' });
+    return;
+  }
+  // Control characters (NUL especially) would make Postgres reject the text parameter -> 500.
+  if (gameId.length > 200 || /[\u0000-\u001f\u007f]/.test(gameId)) {
+    sendJson(res, 400, { ok: false, code: 'BAD_GAME_ID', message: 'gameId must be at most 200 characters, without control characters' });
+    return;
+  }
+
+  const row = await repo.getGameReplay(gameId);
+  if (!row) {
+    sendJson(res, 404, { ok: false, code: 'NOT_FOUND', message: 'Replay not found' });
+    return;
+  }
+  const body =
+    '{' +
+    `"gameId":${JSON.stringify(row.gameId)},` +
+    `"receivedAt":${JSON.stringify(row.receivedAt.toISOString())},` +
+    `"engine":${JSON.stringify({ schemaVersion: row.engineSchemaVersion, dslVersion: row.engineDslVersion })},` +
+    `"digestVersion":${JSON.stringify(row.digestVersion ?? null)},` +
+    `"actionCount":${row.actionCount},` +
+    `"turns":${JSON.stringify(row.turns)},` +
+    `"bundle":${row.bundleJson}` +
+    '}';
+  res.writeHead(200, {
+    'content-type': 'application/json',
+    'content-length': Buffer.byteLength(body),
+    'cache-control': 'private, max-age=3600',
+  });
+  res.end(body);
 }
 
 async function verifyBearerAuth(
