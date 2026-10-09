@@ -724,3 +724,72 @@ export interface QueueWaitStatsResponse {
   generatedAt: string;
   buckets: QueueWaitBucket[];
 }
+
+/**
+ * Sandbox (non-Pro) room lifecycle events from the Go relay
+ * (schemas/sandbox-events.v1.schema.json, #84). A separate bucket: nothing
+ * here feeds games/game_seats or any balance stat.
+ */
+export type SandboxEventType = 'room_opened' | 'player_joined' | 'player_left' | 'hero_seen' | 'room_closed';
+
+export type SandboxCloseReason = 'inactive' | 'shutdown';
+
+export interface SandboxEvent {
+  eventId: string;
+  type: SandboxEventType;
+  /** A uuid the relay mints per room it creates; free text here. */
+  roomId: string;
+  /** room_opened only: salted HMAC of the lobby name, 16 lowercase hex chars. */
+  lobbyHash?: string;
+  /** player_joined, player_left, hero_seen. 16 lowercase hex chars. */
+  playerHash?: string;
+  /** player_joined, player_left: live connections after the event. */
+  connections?: number;
+  /** hero_seen only. */
+  heroName?: string;
+  /** room_closed only (as are the four counters below). */
+  reason?: SandboxCloseReason;
+  lifetimeMs?: number;
+  distinctPlayers?: number;
+  peakConnections?: number;
+  stateUpdates?: number;
+  ts: string;
+}
+
+export interface SandboxEventsSubmission {
+  schemaVersion?: 1;
+  events: SandboxEvent[];
+}
+
+export interface SandboxDailyRow {
+  /** UTC date, YYYY-MM-DD. */
+  date: string;
+  roomsOpened: number;
+  games: number;
+  uniquePlayers: number;
+}
+
+export interface SandboxHourOfWeekRow {
+  /** 0 = Sunday … 6 = Saturday, UTC. */
+  dow: number;
+  /** 0–23, UTC. */
+  hour: number;
+  joins: number;
+}
+
+export interface SandboxStatsResponse {
+  windowHours: number;
+  generatedAt: string;
+  roomsOpened: number;
+  /** Rooms with at least two distinct player hashes joined in the window. */
+  games: number;
+  uniquePlayers: number;
+  /** Players in the window whose hash was also seen before it. */
+  returningPlayers: number;
+  /** Max `connections` reported in the window, or null when none. */
+  peakConnections: number | null;
+  daily: SandboxDailyRow[];
+  /** Always 7×24 rows, zero-filled, dow-major. */
+  hourOfWeek: SandboxHourOfWeekRow[];
+  topHeroes: Array<{ heroName: string; players: number }>;
+}

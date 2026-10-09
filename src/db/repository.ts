@@ -11,6 +11,7 @@ import {
   windowCutoff,
   type QueueWaitStatsRow,
 } from '../stats/queue-wait.js';
+import { SANDBOX_STATS_SQL, sandboxStats, type SandboxStatsRow } from '../stats/sandbox.js';
 import {
   community,
   heroCommunity,
@@ -47,6 +48,8 @@ import type {
   PilotComparisonResponse,
   QueueEvent,
   QueueWaitStatsResponse,
+  SandboxEvent,
+  SandboxStatsResponse,
   RecentGame,
   RecentGamesResponse,
   RecentHourlyResponse,
@@ -297,6 +300,68 @@ export class PgTelemetryRepository {
       generatedAt: generatedAt.toISOString(),
       buckets: rows.map(queueWaitBucket),
     };
+  }
+
+  /**
+   * Sandbox events (#84): append one batch from the relay. Each event carries
+   * a producer uuid, so a retried batch is a no-op per event rather than a
+   * double count. Returns how many rows were new; the rest were duplicates.
+   */
+  async insertSandboxEvents(
+    events: readonly SandboxEvent[],
+    source: string,
+    receivedAt: Date,
+  ): Promise<{ inserted: number; duplicates: number }> {
+    if (events.length === 0) return { inserted: 0, duplicates: 0 };
+    // 15 bind parameters per event; the schema's maxItems (1000) keeps a batch
+    // well under Postgres's 65535-parameter limit.
+    const columns = 15;
+    const values: unknown[] = [];
+    const tuples = events.map((event, index) => {
+      values.push(
+        event.eventId,
+        receivedAt,
+        source,
+        event.type,
+        event.roomId,
+        event.lobbyHash ?? null,
+        event.playerHash ?? null,
+        event.heroName ?? null,
+        event.connections ?? null,
+        event.reason ?? null,
+        event.lifetimeMs ?? null,
+        event.distinctPlayers ?? null,
+        event.peakConnections ?? null,
+        event.stateUpdates ?? null,
+        event.ts,
+      );
+      const base = index * columns;
+      return `(${Array.from({ length: columns }, (_, i) => `$${base + i + 1}`).join(', ')})`;
+    });
+    // ON CONFLICT DO NOTHING also absorbs an eventId repeated inside one batch.
+    const result = await this.pool.query(
+      `INSERT INTO sandbox_events
+         (event_id, received_at, source, type, room_id, lobby_hash, player_hash, hero_name, connections,
+          reason, lifetime_ms, distinct_players, peak_connections, state_updates, ts)
+       VALUES ${tuples.join(', ')}
+       ON CONFLICT (event_id) DO NOTHING`,
+      values,
+    );
+    const inserted = result.rowCount ?? 0;
+    return { inserted, duplicates: events.length - inserted };
+  }
+
+  /**
+   * Sandbox usage (#84) over a trailing window. The query lives in
+   * `src/stats/sandbox.ts` so the endpoint and the script share one definition.
+   */
+  async sandboxStats(
+    options: { windowHours: number },
+    generatedAt = new Date(),
+  ): Promise<SandboxStatsResponse> {
+    const cutoff = windowCutoff(generatedAt, options.windowHours);
+    const { rows } = await this.pool.query<SandboxStatsRow>(SANDBOX_STATS_SQL, [cutoff]);
+    return sandboxStats(rows[0]!, options.windowHours, generatedAt);
   }
 
   async ingestValid(args: IngestArgs): Promise<IngestCreated | IngestDuplicate> {

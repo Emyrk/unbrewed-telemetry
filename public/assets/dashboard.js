@@ -37,7 +37,17 @@ const DUEL_TABS = [
   ['pilot-comparisons', 'Pilot Comparisons'],
   ['scenario', 'Scenario'],
   ['submissions', 'Submissions'],
+  ['sandbox', 'Sandbox'],
 ];
+
+// Sandbox (non-Pro relay rooms) is its own data bucket: these numbers come from
+// /v1/stats/sandbox only and are never summed into the Pro totals above.
+const SANDBOX_WINDOWS = [
+  [24, '24h'],
+  [168, '7 days'],
+  [720, '30 days'],
+];
+const DOW_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 // Card-context bucket presentation for the influence table.
 const BUCKET_META = {
@@ -486,6 +496,7 @@ function renderView(data) {
     return;
   }
   if (state.deck) { renderDeckPage(); return; }
+  if (state.tab === 'sandbox') { renderSandbox(); return; }
   if (data.totalGames === 0 && state.tab !== 'heroes') {
     els.view.innerHTML = card(empty('No completed games match these filters yet. Submit sample data or run local simulations to populate the dashboard.'));
     return;
@@ -1544,6 +1555,95 @@ function renderSubmissions() {
 
 function submissionTabButton(key, label) {
   return `<button class="subtab${state.subtab === key ? ' active' : ''}" data-subtab="${key}" role="tab" aria-selected="${state.subtab === key}" type="button">${esc(label)}</button>`;
+}
+
+let sandboxWindowHours = 168;
+
+async function renderSandbox() {
+  els.view.innerHTML = card(empty('Loading sandbox activity…'), 'panel');
+  let data;
+  try {
+    data = await fetchJson(`/v1/stats/sandbox?windowHours=${sandboxWindowHours}`);
+  } catch (error) {
+    els.view.innerHTML = card(empty('Failed to load sandbox stats: ' + (error.message || '')), 'panel');
+    return;
+  }
+  if (state.tab !== 'sandbox') return;
+  const windowLabel = (SANDBOX_WINDOWS.find(([hours]) => hours === sandboxWindowHours) || [0, `${sandboxWindowHours}h`])[1];
+  els.view.innerHTML = `
+    <div class="section-head sandbox-head">
+      <div class="kicker">Sandbox rooms on the relay · separate from Pro games · format and pilot filters do not apply</div>
+      <div class="subtabs" role="tablist" aria-label="Sandbox window">
+        ${SANDBOX_WINDOWS.map(([hours, label]) =>
+          `<button class="subtab${hours === sandboxWindowHours ? ' active' : ''}" data-sandbox-window="${hours}" role="tab" aria-selected="${hours === sandboxWindowHours}" type="button">${esc(label)}</button>`).join('')}
+      </div>
+    </div>
+    <div class="stat-cards">
+      ${statCard('Sandbox games', number(data.games), '≥2 players joined · ' + windowLabel, COLORS.text)}
+      ${statCard('Rooms opened', number(data.roomsOpened), windowLabel, COLORS.text)}
+      ${statCard('Unique players', number(data.uniquePlayers), windowLabel, COLORS.text)}
+      ${statCard('Returning players', number(data.returningPlayers), 'seen before this window', COLORS.text)}
+      ${statCard('Peak connections', data.peakConnections == null ? 'n/a' : number(data.peakConnections), 'in one room', COLORS.text)}
+    </div>
+    ${sandboxDailyChart(data.daily || [], windowLabel)}
+    <div class="two-col">
+      ${sandboxHourOfWeek(data.hourOfWeek || [])}
+      <div class="card panel">
+        <div class="section-head">
+          <div class="section-title">Top heroes</div>
+          <div class="kicker">Distinct players · ${esc(windowLabel)}</div>
+        </div>
+        <div class="list tight">${(data.topHeroes || []).length
+          ? data.topHeroes.map((row) => `<div class="sandbox-hero"><span>${esc(row.heroName)}</span><strong>${number(row.players)}</strong></div>`).join('')
+          : empty('No heroes seen in this window.')}</div>
+      </div>
+    </div>`;
+  els.view.querySelectorAll('[data-sandbox-window]').forEach((button) => {
+    button.addEventListener('click', () => {
+      sandboxWindowHours = Number(button.dataset.sandboxWindow);
+      renderSandbox();
+    });
+  });
+}
+
+function sandboxDailyChart(daily, windowLabel) {
+  const max = Math.max(1, ...daily.map((row) => row.games || 0));
+  const bars = daily.map((row) => {
+    const height = Math.max(row.games > 0 ? 6 : 2, Math.round((row.games / max) * 82));
+    const title = `${row.date} · ${number(row.games)} games · ${number(row.roomsOpened)} rooms · ${number(row.uniquePlayers)} players`;
+    return `<div class="recent-hourly-bar" title="${esc(title)}">
+      <div class="recent-hourly-count">${row.games ? number(row.games) : ''}</div>
+      <div class="recent-hourly-stack" style="height:${height}px"><span class="recent-hourly-segment" style="height:100%;background:${COLORS.gold}"></span></div>
+      <div class="recent-hourly-label">${esc(row.date.slice(5))}</div>
+    </div>`;
+  }).join('');
+  return `<div class="card panel recent-hourly-card">
+    <div class="section-head">
+      <div class="section-title">Sandbox games by day</div>
+      <div class="kicker">UTC days with activity · ${esc(windowLabel)}</div>
+    </div>
+    ${daily.length
+      ? `<div class="recent-hourly-chart sandbox-daily-chart" style="grid-template-columns:repeat(${daily.length}, minmax(10px, 1fr))">${bars}</div>`
+      : empty('No sandbox activity in this window.')}
+  </div>`;
+}
+
+function sandboxHourOfWeek(cells) {
+  const max = Math.max(1, ...cells.map((cell) => cell.joins || 0));
+  const rows = DOW_LABELS.map((label, dow) => {
+    const row = cells.filter((cell) => cell.dow === dow).sort((a, b) => a.hour - b.hour);
+    return `<div class="sandbox-heat-label">${label}</div>${row.map((cell) => {
+      const alpha = cell.joins ? 0.15 + 0.85 * (cell.joins / max) : 0.04;
+      return `<div class="sandbox-heat-cell" style="background:rgba(212, 171, 79, ${alpha.toFixed(2)})" title="${label} ${String(cell.hour).padStart(2, '0')}:00 UTC · ${number(cell.joins)} joins"></div>`;
+    }).join('')}`;
+  }).join('');
+  return `<div class="card panel">
+    <div class="section-head">
+      <div class="section-title">When people play</div>
+      <div class="kicker">Player joins by weekday and hour · UTC</div>
+    </div>
+    <div class="sandbox-heat">${rows}</div>
+  </div>`;
 }
 
 async function renderRecent() {

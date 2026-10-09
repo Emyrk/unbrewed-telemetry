@@ -4,6 +4,7 @@ import { validateGameSubmission } from '../ingest/schema.js';
 import { validateDeckDefinitions } from '../ingest/deck-schema.js';
 import { validateQueueEvents } from '../ingest/queue-events-schema.js';
 import { validateGameReplay } from '../ingest/game-replay-schema.js';
+import { validateSandboxEvents } from '../ingest/sandbox-events-schema.js';
 import { deckRulesNotices } from '../ingest/deck-rules.js';
 import type { PgTelemetryRepository } from '../db/repository.js';
 import type { CampaignItemBucket, ControlPlaneRepository, SimJobCheckpoint } from '../db/control-plane-repository.js';
@@ -13,6 +14,7 @@ import type {
   QueueEventsSubmission,
   GameReplaySubmission,
   RecentHourlyResponse,
+  SandboxEventsSubmission,
 } from '../types.js';
 import { verifyIngestAuth } from './auth.js';
 import { verifyAccountsReadAuth } from './accounts-auth.js';
@@ -23,7 +25,8 @@ import {
   clampPlayerStatsMinSeconds,
   decodePlayerGamesCursor,
 } from '../db/accounts.js';
-import { parseBearer, verifySecret, hasScope, type Scope } from './bearer-auth.js';
+import { parseBearer, verifySecret, hasScope, ALL_SCOPES, type Scope } from './bearer-auth.js';
+import { SANDBOX_DEFAULT_WINDOW_HOURS, SANDBOX_MAX_WINDOW_HOURS } from '../stats/sandbox.js';
 import { serveDashboardAsset } from './static.js';
 
 const RECENT_HOURLY_CACHE_MS = 5 * 60 * 1000;
@@ -103,6 +106,11 @@ async function handleRequest(
     return;
   }
 
+  if (req.method === 'POST' && url.pathname === '/v1/sandbox-events') {
+    await handleSandboxEventIngest(req, res, repo, cpRepo, config);
+    return;
+  }
+
   if (req.method === 'POST' && url.pathname === '/v1/replays') {
     await handleReplayIngest(req, res, repo, config);
     return;
@@ -115,6 +123,11 @@ async function handleRequest(
 
   if (req.method === 'GET' && url.pathname === '/v1/stats/dashboard') {
     await handleDashboardStats(url, res, repo, config);
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/v1/stats/sandbox') {
+    await handleSandboxStats(url, res, repo, config);
     return;
   }
 
@@ -479,6 +492,64 @@ async function handleQueueEventIngest(
 }
 
 /**
+ * Sandbox events (#84) from the Go relay. Named bearer credential with the
+ * `sandbox:submit` scope only — no HMAC fallback and no `games:submit`: this
+ * is a separate bucket that must never be mistaken for a Pro game feed. The
+ * stored `source` is the credential's source, never anything the relay says.
+ *
+ * Unlike the other bearer routes, a valid key that lacks the scope is `403`,
+ * not `401`: the relay should learn its credential is wrong, not unknown.
+ */
+async function handleSandboxEventIngest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  repo: PgTelemetryRepository,
+  cpRepo: ControlPlaneRepository,
+  config: AppConfig,
+): Promise<void> {
+  const contentType = req.headers['content-type'];
+  if (contentType && !String(contentType).toLowerCase().includes('application/json')) {
+    sendJson(res, 415, { ok: false, code: 'UNSUPPORTED_MEDIA_TYPE', message: 'Content-Type must be application/json' });
+    return;
+  }
+
+  const body = await readBody(req, config.bodyLimitBytes);
+  if (!body.ok) {
+    sendJson(res, body.status, { ok: false, code: body.code, message: body.message });
+    return;
+  }
+
+  const credential = await resolveBearerCredential(req, cpRepo);
+  if (!credential) {
+    sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', message: 'Valid API key with sandbox:submit scope required' });
+    return;
+  }
+  if (!hasScope(credential.scopes, 'sandbox:submit')) {
+    sendJson(res, 403, { ok: false, code: 'FORBIDDEN', message: 'API key lacks the sandbox:submit scope' });
+    return;
+  }
+  void cpRepo.touchCredentialLastUsed(credential.credentialId).catch(() => {});
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body.body.toString('utf8'));
+  } catch {
+    sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Request body is not valid JSON' });
+    return;
+  }
+
+  const validation = validateSandboxEvents(parsed);
+  if (!validation.ok) {
+    sendJson(res, 400, { ok: false, code: 'VALIDATION_FAILED', errors: validation.errors });
+    return;
+  }
+
+  const { events } = parsed as SandboxEventsSubmission;
+  const { inserted, duplicates } = await repo.insertSandboxEvents(events, credential.sourceName, config.now());
+  sendJson(res, 201, { ok: true, inserted, duplicates });
+}
+
+/**
  * Replay bundles (#70). HMAC only, like `/v1/queue-events`: the producer is the
  * game server itself. One row per game id; a re-post is a 200 duplicate, the
  * same semantics `/v1/games` has. The engine POSTs fire-and-forget.
@@ -706,6 +777,27 @@ async function handleDashboardStats(
 ): Promise<void> {
   const filters = statsFiltersFromUrl(url);
   const stats = await repo.dashboardStats(filters, config.now());
+  sendJson(res, 200, { ok: true, ...stats });
+}
+
+/** Sandbox usage (#84). Same (public, aggregate-only) access as the dashboard. */
+async function handleSandboxStats(
+  url: URL,
+  res: ServerResponse,
+  repo: PgTelemetryRepository,
+  config: AppConfig,
+): Promise<void> {
+  const raw = url.searchParams.get('windowHours');
+  const windowHours = raw === null || raw.trim() === '' ? SANDBOX_DEFAULT_WINDOW_HOURS : Number(raw);
+  if (!Number.isFinite(windowHours) || windowHours <= 0 || windowHours > SANDBOX_MAX_WINDOW_HOURS) {
+    sendJson(res, 400, {
+      ok: false,
+      code: 'BAD_WINDOW',
+      message: `windowHours must be a number in (0, ${SANDBOX_MAX_WINDOW_HOURS}]`,
+    });
+    return;
+  }
+  const stats = await repo.sandboxStats({ windowHours }, config.now());
   sendJson(res, 200, { ok: true, ...stats });
 }
 
@@ -1117,26 +1209,41 @@ async function handleAccountsReplay(
   res.end(body);
 }
 
-async function verifyBearerAuth(
+/**
+ * Resolve a live bearer credential without checking any scope: `null` when the
+ * header is absent, malformed, unknown, revoked, or the secret does not match.
+ * Callers touch `last_used_at` once their scope check passes.
+ */
+async function resolveBearerCredential(
   req: IncomingMessage,
   cpRepo: ControlPlaneRepository,
-  requiredScope: Scope,
-): Promise<BearerContext | null | undefined> {
+): Promise<BearerContext | null> {
   const parsed = parseBearer(req.headers);
   if (!parsed) return null;
   const cred = await cpRepo.lookupCredential(parsed.keyId);
-  if (!cred) return undefined;
-  if (cred.revoked_at) return undefined;
-  if (!verifySecret(parsed.secret, cred.salt, cred.hash)) return undefined;
-  if (!hasScope(cred.scopes, requiredScope)) return undefined;
-  // Touch last_used_at in background (fire-and-forget)
-  void cpRepo.touchCredentialLastUsed(cred.id).catch(() => {});
+  if (!cred) return null;
+  if (cred.revoked_at) return null;
+  if (!verifySecret(parsed.secret, cred.salt, cred.hash)) return null;
   return {
     credentialId: cred.id,
     sourceId: cred.source_id,
     sourceName: cred.source_name,
     scopes: cred.scopes,
   };
+}
+
+async function verifyBearerAuth(
+  req: IncomingMessage,
+  cpRepo: ControlPlaneRepository,
+  requiredScope: Scope,
+): Promise<BearerContext | null | undefined> {
+  if (!parseBearer(req.headers)) return null;
+  const ctx = await resolveBearerCredential(req, cpRepo);
+  if (!ctx) return undefined;
+  if (!hasScope(ctx.scopes, requiredScope)) return undefined;
+  // Touch last_used_at in background (fire-and-forget)
+  void cpRepo.touchCredentialLastUsed(ctx.credentialId).catch(() => {});
+  return ctx;
 }
 
 async function handleAdminFleet(
@@ -1408,8 +1515,7 @@ async function handleAdminCreateCredential(
   if (!data.sourceId || !data.label) {
     sendJson(res, 400, { ok: false, code: 'MISSING_FIELDS', message: 'sourceId and label are required' }); return;
   }
-  const validScopes = ['games:submit', 'decks:submit', 'sim:claim', 'sim:complete'] as const;
-  const scopes = (data.scopes ?? []).filter(s => (validScopes as readonly string[]).includes(s)) as Scope[];
+  const scopes = (data.scopes ?? []).filter(s => (ALL_SCOPES as readonly string[]).includes(s)) as Scope[];
   const result = await cpRepo.createCredential(data.sourceId, data.label, scopes, admin);
   sendJson(res, 201, { ok: true, credential: result });
 }
