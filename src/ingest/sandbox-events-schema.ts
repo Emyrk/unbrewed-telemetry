@@ -12,8 +12,15 @@ const addFormats = addFormatsPlugin as unknown as (instance: Ajv2020) => Ajv2020
 addFormats(ajv);
 const validate = ajv.compile(schema);
 
-function formatAjvError(error: ErrorObject): string {
+function formatAjvError(error: ErrorObject): string | null {
   const path = error.instancePath || '/';
+  // The room_opened/lobbyHash if/then: its own "must match then/else" line
+  // adds nothing, and the else branch's bare "boolean schema is false" says
+  // nothing.
+  if (error.keyword === 'if') return null;
+  if (error.keyword === 'false schema' && error.schemaPath.endsWith('/else/properties/lobbyHash/false schema')) {
+    return `${path}: not carried by events other than room_opened`;
+  }
   if (error.keyword === 'additionalProperties') {
     const extra = (error.params as { additionalProperty?: string }).additionalProperty ?? 'unknown';
     return `${path}: unexpected property ${extra}`;
@@ -24,6 +31,7 @@ function formatAjvError(error: ErrorObject): string {
 type OptionalField = Exclude<keyof SandboxEvent, 'eventId' | 'type' | 'roomId' | 'ts'>;
 
 const OPTIONAL_FIELDS: readonly OptionalField[] = [
+  'lobbyHash',
   'playerHash',
   'connections',
   'heroName',
@@ -36,7 +44,7 @@ const OPTIONAL_FIELDS: readonly OptionalField[] = [
 
 /** The per-type fields: each type requires exactly these and carries no others. */
 const FIELDS_BY_TYPE: Record<SandboxEventType, readonly OptionalField[]> = {
-  room_opened: [],
+  room_opened: ['lobbyHash'],
   player_joined: ['playerHash', 'connections'],
   player_left: ['playerHash', 'connections'],
   hero_seen: ['playerHash', 'heroName'],
@@ -44,10 +52,12 @@ const FIELDS_BY_TYPE: Record<SandboxEventType, readonly OptionalField[]> = {
 };
 
 /**
- * Field/type agreement the JSON Schema deliberately leaves out: every optional
- * field is declared once for all event types, and which types require (and
- * may carry) it is asserted here so the error names the offending event rather
- * than an if/then branch. Same split as the queue-events validator.
+ * Field/type agreement: every optional field is declared once for all event
+ * types, and which types require (and may carry) it is asserted here so the
+ * error names the offending event rather than an if/then branch. Same split as
+ * the queue-events validator. `lobbyHash` is also pinned to `room_opened` by
+ * an if/then in the schema itself, so a copy of the schema alone (the relay
+ * keeps one in its testdata) enforces it too.
  */
 function semanticErrors(submission: SandboxEventsSubmission): string[] {
   const errors: string[] = [];
@@ -68,7 +78,10 @@ function semanticErrors(submission: SandboxEventsSubmission): string[] {
 export function validateSandboxEvents(value: unknown): ValidationResult {
   const ok = validate(value);
   if (!ok) {
-    return { ok: false, errors: (validate.errors ?? []).map(formatAjvError) };
+    return {
+      ok: false,
+      errors: (validate.errors ?? []).map(formatAjvError).filter((e): e is string => e !== null),
+    };
   }
   const errors = semanticErrors(value as SandboxEventsSubmission);
   return { ok: errors.length === 0, errors };

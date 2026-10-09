@@ -14,7 +14,8 @@
     "events": {
       "type": "array",
       "minItems": 1,
-      "description": "At least one event. An empty batch is a producer bug, not a no-op.",
+      "maxItems": 1000,
+      "description": "1 to 1000 events. An empty batch is a producer bug, not a no-op; a larger batch is split by the producer.",
       "items": { "$ref": "#/$defs/event" }
     }
   },
@@ -23,6 +24,12 @@
       "type": "object",
       "required": ["eventId", "type", "roomId", "ts"],
       "additionalProperties": false,
+      "if": {
+        "properties": { "type": { "const": "room_opened" } },
+        "required": ["type"]
+      },
+      "then": { "properties": { "lobbyHash": true }, "required": ["lobbyHash"] },
+      "else": { "properties": { "lobbyHash": false } },
       "properties": {
         "eventId": {
           "type": "string",
@@ -36,7 +43,12 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 128,
-          "description": "The sandbox lobby gid as the relay sees it."
+          "description": "A random uuid the relay mints each time it creates a room, so two sittings that reuse a lobby name stay separate rooms. Treated as free text."
+        },
+        "lobbyHash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$",
+          "description": "The lobby name hashed with the same salted HMAC as playerHash, so a reported lobby can be looked up by name. Required on room_opened, not allowed on any other type."
         },
         "playerHash": {
           "type": "string",

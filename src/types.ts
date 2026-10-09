@@ -737,7 +737,10 @@ export type SandboxCloseReason = 'inactive' | 'shutdown';
 export interface SandboxEvent {
   eventId: string;
   type: SandboxEventType;
+  /** A uuid the relay mints per room it creates; free text here. */
   roomId: string;
+  /** room_opened only: salted HMAC of the lobby name, 16 lowercase hex chars. */
+  lobbyHash?: string;
   /** player_joined, player_left, hero_seen. 16 lowercase hex chars. */
   playerHash?: string;
   /** player_joined, player_left: live connections after the event. */

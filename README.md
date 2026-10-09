@@ -222,7 +222,8 @@ named credential to override.
 
 `waitMs` is optional and only valid on `matched`/`abandoned`; `reason`
 (`expired` | `host_left`) is optional and only valid on `abandoned`. Unknown
-properties are rejected at every level. A valid batch returns
+properties are rejected at every level. A batch holds 1 to 1000 events; more is a `400` (split it producer-side). A
+valid batch returns
 `201 {"ok": true, "inserted": <n>}`; a bad signature is `401` and a schema or
 field/type violation is `400`. The engine POSTs fire-and-forget, so it never
 reads the response — deploy order between the two services does not matter.
@@ -290,11 +291,11 @@ Content-Type: application/json
 {
   "schemaVersion": 1,
   "events": [
-    { "eventId": "6f1c…uuid", "type": "room_opened",   "roomId": "a1b2c3", "ts": "2026-10-08T19:00:00Z" },
-    { "eventId": "…", "type": "player_joined", "roomId": "a1b2c3", "playerHash": "9f2e4c1a7b3d5e60", "connections": 1, "ts": "…" },
-    { "eventId": "…", "type": "player_left",   "roomId": "a1b2c3", "playerHash": "9f2e4c1a7b3d5e60", "connections": 0, "ts": "…" },
-    { "eventId": "…", "type": "hero_seen",     "roomId": "a1b2c3", "playerHash": "9f2e4c1a7b3d5e60", "heroName": "Medusa", "ts": "…" },
-    { "eventId": "…", "type": "room_closed",   "roomId": "a1b2c3", "reason": "inactive",
+    { "eventId": "6f1c…uuid", "type": "room_opened",   "roomId": "3b0e…uuid", "lobbyHash": "5a6b7c8d9e0f1a2b", "ts": "2026-10-08T19:00:00Z" },
+    { "eventId": "…", "type": "player_joined", "roomId": "3b0e…uuid", "playerHash": "9f2e4c1a7b3d5e60", "connections": 1, "ts": "…" },
+    { "eventId": "…", "type": "player_left",   "roomId": "3b0e…uuid", "playerHash": "9f2e4c1a7b3d5e60", "connections": 0, "ts": "…" },
+    { "eventId": "…", "type": "hero_seen",     "roomId": "3b0e…uuid", "playerHash": "9f2e4c1a7b3d5e60", "heroName": "Medusa", "ts": "…" },
+    { "eventId": "…", "type": "room_closed",   "roomId": "3b0e…uuid", "reason": "inactive",
       "lifetimeMs": 3600000, "distinctPlayers": 2, "peakConnections": 3, "stateUpdates": 412, "ts": "…" }
   ]
 }
@@ -302,15 +303,20 @@ Content-Type: application/json
 
 - `eventId`: uuid, unique. A re-sent event is a no-op counted in `duplicates`,
   so producer retries are safe.
-- `roomId`: the sandbox lobby gid as the relay sees it (max 128 chars).
+- `roomId`: a random uuid the relay mints each time it creates a room, so two
+  sittings that reuse a lobby name (the name generator has ~640 names) stay
+  separate games. Stored as free text, max 128 chars.
+- `lobbyHash`: 16 lowercase hex chars, the lobby name under the same salted
+  HMAC as `playerHash`, so a reported lobby can be looked up by name.
+  **Required on `room_opened`, rejected on every other type.**
 - `playerHash`: 16 lowercase hex chars, an HMAC of the normalized name with a
   relay-only salt. **Raw player names are refused**: `name`, `playerName` and
   `displayName` (like any unknown property, at any level) are a `400`.
 - `connections`: live connections in the room after the join/leave.
 - `heroName`: sent once per (room, player, hero), max 128 chars.
 - `room_closed.reason`: `inactive` (12h GC) | `shutdown` (relay SIGTERM).
-- Per-type fields are required, and only valid, on their types:
-  `playerHash`+`connections` on `player_joined`/`player_left`,
+- Per-type fields are required, and only valid, on their types: `lobbyHash`
+  on `room_opened`, `playerHash`+`connections` on `player_joined`/`player_left`,
   `playerHash`+`heroName` on `hero_seen`, and `reason`, `lifetimeMs`,
   `distinctPlayers`, `peakConnections`, `stateUpdates` on `room_closed`.
 

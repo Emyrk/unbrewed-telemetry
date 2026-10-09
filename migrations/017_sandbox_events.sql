@@ -19,7 +19,12 @@ CREATE TABLE sandbox_events (
   -- Telemetry source name, derived from the bearer credential.
   source text NOT NULL,
   type text NOT NULL CHECK (type IN ('room_opened', 'player_joined', 'player_left', 'hero_seen', 'room_closed')),
+  -- A uuid the relay mints per room it creates, so two sittings that reuse a
+  -- lobby name are separate rooms.
   room_id text NOT NULL,
+  -- room_opened only: the lobby name under the same salted HMAC as player_hash,
+  -- so a reported lobby can be looked up by name.
+  lobby_hash text CHECK (lobby_hash IS NULL OR lobby_hash ~ '^[0-9a-f]{16}$'),
   -- player_joined, player_left, hero_seen.
   player_hash text CHECK (player_hash IS NULL OR player_hash ~ '^[0-9a-f]{16}$'),
   -- hero_seen only.
@@ -38,4 +43,7 @@ CREATE TABLE sandbox_events (
 -- Read-time aggregates window on received_at (server clock), like queue_events.
 CREATE INDEX sandbox_events_window_idx ON sandbox_events (received_at, type);
 CREATE INDEX sandbox_events_room_idx ON sandbox_events (room_id);
-CREATE INDEX sandbox_events_player_idx ON sandbox_events (player_hash);
+-- returningPlayers probes "any earlier row for this hash": with received_at
+-- second the EXISTS stops at the first one.
+CREATE INDEX sandbox_events_player_idx ON sandbox_events (player_hash, received_at);
+CREATE INDEX sandbox_events_lobby_idx ON sandbox_events (lobby_hash);

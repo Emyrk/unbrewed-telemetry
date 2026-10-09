@@ -14,18 +14,19 @@ import { sampleGame } from './fixtures.js';
 const PLAYER_A = '9f2e4c1a7b3d5e60';
 const PLAYER_B = '0123456789abcdef';
 const PLAYER_C = 'fedcba9876543210';
+const LOBBY = '5a6b7c8d9e0f1a2b';
 
 function ev(overrides: Partial<SandboxEvent> & Pick<SandboxEvent, 'type'>): SandboxEvent {
   return { eventId: randomUUID(), roomId: 'a1b2c3', ts: '2026-10-08T19:00:00Z', ...overrides };
 }
 
-const opened = (roomId: string) => ev({ type: 'room_opened', roomId });
+const opened = (roomId: string) => ev({ type: 'room_opened', roomId, lobbyHash: LOBBY });
 const joined = (roomId: string, playerHash: string, connections = 1) =>
   ev({ type: 'player_joined', roomId, playerHash, connections });
 
 function contractBatch(): SandboxEvent[] {
   return [
-    ev({ type: 'room_opened' }),
+    ev({ type: 'room_opened', lobbyHash: LOBBY }),
     ev({ type: 'player_joined', playerHash: PLAYER_A, connections: 1 }),
     ev({ type: 'player_left', playerHash: PLAYER_A, connections: 0 }),
     ev({ type: 'hero_seen', playerHash: PLAYER_A, heroName: 'Medusa' }),
@@ -77,8 +78,30 @@ describe('sandbox events schema', () => {
     expect(closed.ok).toBe(false);
     expect(closed.errors).toHaveLength(4);
 
-    const stray = validateSandboxEvents({ events: [ev({ type: 'room_opened', playerHash: PLAYER_A })] });
+    const stray = validateSandboxEvents({ events: [ev({ type: 'room_opened', lobbyHash: LOBBY, playerHash: PLAYER_A })] });
     expect(stray.errors).toEqual(['/events/0/playerHash: not carried by room_opened events']);
+  });
+
+  it('requires lobbyHash on room_opened and rejects it elsewhere', () => {
+    const missing = validateSandboxEvents({ events: [ev({ type: 'room_opened' })] });
+    expect(missing.ok).toBe(false);
+    expect(missing.errors).toEqual(["/events/0: must have required property 'lobbyHash'"]);
+
+    for (const event of [joined('r', PLAYER_A), ...contractBatch().slice(1)]) {
+      const stray = validateSandboxEvents({ events: [{ ...event, lobbyHash: LOBBY }] });
+      expect(stray.ok).toBe(false);
+      expect(stray.errors).toEqual(['/events/0/lobbyHash: not carried by events other than room_opened']);
+    }
+
+    expect(validateSandboxEvents({ events: [{ ...opened('r'), lobbyHash: 'ABCDEF0123456789' }] }).ok).toBe(false);
+    expect(validateSandboxEvents({ events: [{ ...opened('r'), lobbyHash: 'abc' }] }).ok).toBe(false);
+  });
+
+  it('caps a batch at 1000 events', () => {
+    const events = (n: number) => Array.from({ length: n }, () => opened('r'));
+    expect(validateSandboxEvents({ events: events(1000) }).ok).toBe(true);
+    const over = validateSandboxEvents({ events: events(1001) });
+    expect(over.errors).toEqual(['/events: must NOT have more than 1000 items']);
   });
 });
 
@@ -164,18 +187,31 @@ describeDb('sandbox events with postgres', () => {
     expect(await again.json()).toEqual({ ok: true, inserted: 0, duplicates: 5 });
 
     const { rows } = await pool.query(
-      `SELECT source, type, player_hash, hero_name, connections, reason, lifetime_ms::int AS lifetime_ms,
+      `SELECT source, type, lobby_hash, player_hash, hero_name, connections, reason, lifetime_ms::int AS lifetime_ms,
               distinct_players, peak_connections, state_updates, received_at
        FROM sandbox_events ORDER BY id`,
     );
     expect(rows).toHaveLength(5);
     expect(rows.every((row) => row.source === 'sandbox-relay')).toBe(true);
+    expect(rows[0]).toMatchObject({ type: 'room_opened', lobby_hash: LOBBY, player_hash: null });
+    expect(rows[1]).toMatchObject({ type: 'player_joined', lobby_hash: null, player_hash: PLAYER_A });
     expect(rows[3]).toMatchObject({ type: 'hero_seen', player_hash: PLAYER_A, hero_name: 'Medusa' });
     expect(rows[4]).toMatchObject({
       type: 'room_closed', reason: 'inactive', lifetime_ms: 3600000,
       distinct_players: 2, peak_connections: 3, state_updates: 412,
     });
     expect(rows[0].received_at.toISOString()).toBe(now.toISOString());
+  });
+
+  it('rejects a batch over 1000 events with 400, not a bind-parameter 500', async () => {
+    const events = Array.from({ length: 1001 }, (_, i) => joined(`r${i}`, PLAYER_A));
+    const response = await post({ events }, sandboxKey);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ ok: false, code: 'VALIDATION_FAILED' });
+    expect((await pool.query('SELECT count(*)::int AS n FROM sandbox_events')).rows[0].n).toBe(0);
+
+    const full = await post({ events: events.slice(0, 1000) }, sandboxKey);
+    expect(await full.json()).toEqual({ ok: true, inserted: 1000, duplicates: 0 });
   });
 
   it('dedupes an eventId repeated inside one batch', async () => {

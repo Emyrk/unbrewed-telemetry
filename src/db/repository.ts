@@ -313,7 +313,9 @@ export class PgTelemetryRepository {
     receivedAt: Date,
   ): Promise<{ inserted: number; duplicates: number }> {
     if (events.length === 0) return { inserted: 0, duplicates: 0 };
-    const columns = 14;
+    // 15 bind parameters per event; the schema's maxItems (1000) keeps a batch
+    // well under Postgres's 65535-parameter limit.
+    const columns = 15;
     const values: unknown[] = [];
     const tuples = events.map((event, index) => {
       values.push(
@@ -322,6 +324,7 @@ export class PgTelemetryRepository {
         source,
         event.type,
         event.roomId,
+        event.lobbyHash ?? null,
         event.playerHash ?? null,
         event.heroName ?? null,
         event.connections ?? null,
@@ -338,7 +341,7 @@ export class PgTelemetryRepository {
     // ON CONFLICT DO NOTHING also absorbs an eventId repeated inside one batch.
     const result = await this.pool.query(
       `INSERT INTO sandbox_events
-         (event_id, received_at, source, type, room_id, player_hash, hero_name, connections,
+         (event_id, received_at, source, type, room_id, lobby_hash, player_hash, hero_name, connections,
           reason, lifetime_ms, distinct_players, peak_connections, state_updates, ts)
        VALUES ${tuples.join(', ')}
        ON CONFLICT (event_id) DO NOTHING`,
