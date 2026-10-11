@@ -431,6 +431,14 @@ export async function rebuildRollups(client: PoolClient): Promise<{ rows: Record
   await client.query('CREATE TEMP TABLE rollup_rebuild_games (id text PRIMARY KEY) ON COMMIT DROP');
   await client.query('INSERT INTO rollup_rebuild_games SELECT id FROM games');
   await client.query('ANALYZE rollup_rebuild_games');
+  // A game without a bucket (written by pre-018 code) cannot be keyed; the
+  // backfill buckets those first, so one here arrived mid-run.
+  const unbucketed = await client.query<{ id: string }>(
+    'SELECT g.id FROM games g JOIN rollup_rebuild_games s ON s.id = g.id WHERE g.pilot_bucket IS NULL LIMIT 1',
+  );
+  if (unbucketed.rows[0]) {
+    throw new Error(`game ${unbucketed.rows[0].id} has no pilot bucket; run the backfill (again) before rebuilding`);
+  }
   const [submissions, ...gameRollups] = ROLLUPS;
   const inSnapshot = (column: string) => `${column} IN (SELECT id FROM rollup_rebuild_games)`;
   const rows: Record<string, number> = {};

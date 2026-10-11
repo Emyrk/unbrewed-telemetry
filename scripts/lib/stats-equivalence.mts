@@ -145,9 +145,17 @@ export async function checkEquivalence(
     }
   }
 
-  // The bucket predicate must select exactly the games the per-game LIKE did.
-  const pilotFilterMismatches: EquivalenceReport['pilotFilterMismatches'] = [];
-  for (const allowed of pilotFilters(pilots)) {
+  const pilotFilterMismatches = await comparePilotFilters(pool, pilotFilters(pilots));
+  return { calls, mismatches, pilotFilterMismatches };
+}
+
+/** Pilot allowlists for which the production filter and the pre-#87 per-game LIKE select different games. */
+export async function comparePilotFilters(
+  pool: Pool,
+  filters: string[][],
+): Promise<EquivalenceReport['pilotFilterMismatches']> {
+  const mismatches: EquivalenceReport['pilotFilterMismatches'] = [];
+  for (const allowed of filters) {
     const result = await pool.query<{ legacy_only: string; bucket_only: string }>(
       `
         WITH legacy AS (SELECT g.id FROM games g WHERE ${LEGACY_PILOT_FILTER_SQL}),
@@ -160,8 +168,7 @@ export async function checkEquivalence(
     );
     const legacyOnly = Number(result.rows[0]!.legacy_only);
     const bucketOnly = Number(result.rows[0]!.bucket_only);
-    if (legacyOnly > 0 || bucketOnly > 0) pilotFilterMismatches.push({ pilots: allowed, legacyOnly, bucketOnly });
+    if (legacyOnly > 0 || bucketOnly > 0) mismatches.push({ pilots: allowed, legacyOnly, bucketOnly });
   }
-
-  return { calls, mismatches, pilotFilterMismatches };
+  return mismatches;
 }

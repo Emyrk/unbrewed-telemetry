@@ -171,7 +171,12 @@ export class PgTelemetryRepository {
       this.rollupsKnownReady = await rollupsReady(this.pool);
       if (!this.rollupsKnownReady) return false;
     }
-    await foldPendingRollups(this.pool, { maxBatches: FOLD_ON_READ_MAX_BATCHES });
+    try {
+      await foldPendingRollups(this.pool, { maxBatches: FOLD_ON_READ_MAX_BATCHES });
+    } catch (error) {
+      // Serve the rollups as of the last good fold rather than fail the read.
+      console.error('[telemetry] rollup fold before read failed; serving stale rollups', error);
+    }
     return true;
   }
 
@@ -2928,11 +2933,63 @@ function splitDeckId(deck: string): { deckId: string; deckVersion: string | null
   return { deckId: deck.slice(0, at), deckVersion: deck.slice(at + 1) };
 }
 
-/** The pilot allowlist in `$paramIndex`, as a predicate over games `g`. */
+/**
+ * The pilot allowlist in `$paramIndex`, as a predicate over games `g`. A game
+ * written by pre-018 code during a rolling deploy has no bucket until the
+ * backfill runs; those get the per-game seat check instead. It is an
+ * uncorrelated set built once per query from the `games_unbucketed_idx`
+ * partial index (empty once backfilled): a per-row fallback inflates the
+ * estimated cost enough to trigger JIT, which alone took over a second.
+ */
 export function pilotFilterSql(paramIndex = 2): string {
-  return `($${paramIndex}::text[] IS NULL OR g.pilot_bucket IN (
+  return `($${paramIndex}::text[] IS NULL
+            OR g.pilot_bucket IN (
               SELECT b.id FROM pilot_buckets b WHERE ${pilotBucketMatchSql(paramIndex)}
+            )
+            OR g.id IN (
+              SELECT u.id FROM games u WHERE u.pilot_bucket IS NULL AND ${seatPilotFilterSql(paramIndex)}
             ))`;
+}
+
+/**
+ * The pilot allowlist evaluated against the seats of unbucketed game `u`
+ * directly (the pre-#87 form). The `u.pilot_bucket IS NULL` inside each
+ * subquery is deliberate: the extra outer reference stops the planner from
+ * turning them into hashed subplans over every seat, so they cost an index
+ * probe per unbucketed game.
+ */
+function seatPilotFilterSql(paramIndex: number): string {
+  return `(
+              (
+                NOT EXISTS (
+                  SELECT 1 FROM unnest($${paramIndex}::text[]) AS allowed(pilot)
+                  WHERE allowed.pilot NOT LIKE 'must:%'
+                )
+                OR NOT EXISTS (
+                  SELECT 1
+                  FROM game_seats s2
+                  WHERE s2.game_id = u.id
+                    AND u.pilot_bucket IS NULL
+                    AND NOT EXISTS (
+                      SELECT 1 FROM unnest($${paramIndex}::text[]) AS allowed(pilot)
+                      WHERE allowed.pilot NOT LIKE 'must:%'
+                        AND (s2.pilot LIKE allowed.pilot || '%' OR s2.pilot_kind = allowed.pilot)
+                    )
+                )
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM unnest($${paramIndex}::text[]) AS required(pilot)
+                WHERE required.pilot LIKE 'must:%'
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM game_seats s3
+                    WHERE s3.game_id = u.id
+                      AND u.pilot_bucket IS NULL
+                      AND (s3.pilot LIKE substring(required.pilot from 6) || '%' OR s3.pilot_kind = substring(required.pilot from 6))
+                  )
+              )
+            )`;
 }
 
 /**

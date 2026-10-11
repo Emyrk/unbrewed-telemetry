@@ -1,5 +1,10 @@
 -- 018_stats_rollups.sql
 -- Pre-aggregated dashboard stats (#87).
+
+-- The ALTERs below need ACCESS EXCLUSIVE locks. Fail fast (and roll back)
+-- rather than queue behind a slow dashboard query while every ingest queues
+-- behind us; a failed deploy is retried by Railway.
+SET LOCAL lock_timeout = '5s';
 --
 -- Every dashboard load used to re-aggregate games/game_seats/game_cards and
 -- evaluate the pilot allowlist per game with a correlated
@@ -20,6 +25,13 @@
 --    1.3M-row game_cards/game_starting_cards copies of `format` and
 --    `pilot_bucket` are backfilled by `npm run stats:backfill-rollups`, which
 --    batches and has a dry run.
+--
+--    `pilot_bucket` stays NULLable on purpose. During a rolling deploy the old
+--    container keeps ingesting without it; a NOT NULL here would 500 every
+--    POST /v1/games and /v1/sim/complete it serves. The backfill script
+--    assigns a bucket to any game still missing one, and a follow-up
+--    migration adds NOT NULL once production is backfilled. Until then the
+--    raw pilot filter falls back to the per-game seat check for those games.
 --
 -- 2. Rollup tables (`stats_*_rollup`), keyed by format and pilot bucket plus
 --    whatever each dashboard view groups on. Ingest queues the game id in
@@ -93,8 +105,12 @@ SET pilot_bucket = g.pilot_bucket
 FROM games g
 WHERE g.id = s.game_id;
 
-ALTER TABLE games ALTER COLUMN pilot_bucket SET NOT NULL;
-ALTER TABLE game_seats ALTER COLUMN pilot_bucket SET NOT NULL;
+-- Games still without a bucket: only those the pre-018 container writes during
+-- the rolling deploy, until the backfill buckets them. The raw pilot filter
+-- reads them through this (normally empty) index; the follow-up NOT NULL
+-- migration drops it.
+CREATE INDEX games_unbucketed_idx ON games (id) WHERE pilot_bucket IS NULL;
+
 
 -- One row per (format, pilot bucket, map, boss, source, credential, labels).
 -- Serves the dashboard summary, formats, boss breakdown, maps, the deck

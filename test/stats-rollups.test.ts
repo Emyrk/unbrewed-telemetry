@@ -11,7 +11,8 @@ import { migrate } from '../src/db/migrate.js';
 import { PgTelemetryRepository } from '../src/db/repository.js';
 import { foldPendingRollups, pilotBucketSeats, rebuildRollups, ROLLUP_TABLES } from '../src/db/rollups.js';
 import type { GameSubmission } from '../src/types.js';
-import { checkEquivalence } from '../scripts/lib/stats-equivalence.mjs';
+import { backfillRollups } from '../scripts/lib/rollup-backfill.mjs';
+import { checkEquivalence, comparePilotFilters, pilotFilters } from '../scripts/lib/stats-equivalence.mjs';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const describeDb = databaseUrl ? describe : describe.skip;
@@ -216,6 +217,56 @@ describeDb('dashboard rollups with postgres', () => {
     expect(after.totalGames).toBe(before.totalGames + 1);
     expect(after.totalSubmissions).toBe(before.totalSubmissions + 1);
   }, 30_000);
+
+  it('survives games written by pre-018 code during a rolling deploy until the backfill', async () => {
+    // Production between deploy and backfill: not ready, and the old container
+    // still writing games without a pilot bucket and without queueing them.
+    await pool.query('UPDATE stats_rollup_state SET ready_at = NULL');
+    const old = { ...fixtureGames(1)[0]!, gameId: 'rollup-old-shape', stateHash: 'old-shape' };
+    await repo.ingestValid({ payload: old, idempotencyKey: 'rollup-old-shape', receivedAt, authKeyId: null });
+    // Strip what the new ingest adds, leaving exactly the pre-018 row shape.
+    await pool.query(`UPDATE games SET pilot_bucket = NULL WHERE id = 'rollup-old-shape'`);
+    await pool.query(`UPDATE game_seats SET pilot_bucket = NULL WHERE game_id = 'rollup-old-shape'`);
+    await pool.query(`UPDATE game_cards SET format = NULL, pilot_bucket = NULL WHERE game_id = 'rollup-old-shape'`);
+    await pool.query(`UPDATE game_starting_cards SET format = NULL, pilot_bucket = NULL WHERE game_id = 'rollup-old-shape'`);
+    await pool.query(`DELETE FROM stats_rollup_pending WHERE game_id = 'rollup-old-shape'`);
+
+    // New-shape ingest keeps working next to it.
+    const fresh = { ...fixtureGames(2)[1]!, gameId: 'rollup-new-shape', stateHash: 'new-shape' };
+    const created = await repo.ingestValid({ payload: fresh, idempotencyKey: 'rollup-new-shape', receivedAt, authKeyId: null });
+    expect(created.kind).toBe('created');
+
+    // Reads stay on the raw tables and still count the unbucketed game under
+    // every pilot filter, exactly as the pre-#87 per-game filter did.
+    const { pilots } = await pool
+      .query<{ pilot: string }>('SELECT DISTINCT pilot FROM game_seats ORDER BY pilot')
+      .then((result) => ({ pilots: result.rows.map((row) => row.pilot) }));
+    expect(await comparePilotFilters(pool, pilotFilters(pilots))).toEqual([]);
+    const raw = new PgTelemetryRepository(pool, { statsSource: 'raw' });
+    const auto = new PgTelemetryRepository(pool);
+    expect(await auto.dashboardStats({ format: null, pilots: [] }, receivedAt))
+      .toEqual(await raw.dashboardStats({ format: null, pilots: [] }, receivedAt));
+    expect((await auto.dashboardStats({ format: null, pilots: [] }, receivedAt)).totalGames).toBe(162);
+
+    const result = await backfillRollups(pool, { batchSize: 7 });
+    expect(result.bucketsAssigned).toBe(1);
+    const bucketed = await pool.query(`
+      SELECT
+        (SELECT COUNT(*) FROM games WHERE pilot_bucket IS NULL)::int AS games,
+        (SELECT COUNT(*) FROM game_seats WHERE pilot_bucket IS NULL)::int AS seats,
+        (SELECT COUNT(*) FROM game_cards WHERE format IS NULL OR pilot_bucket IS NULL)::int AS cards,
+        (SELECT ready_at IS NOT NULL FROM stats_rollup_state) AS ready
+    `);
+    expect(bucketed.rows[0]).toEqual({ games: 0, seats: 0, cards: 0, ready: true });
+
+    // A re-run is a no-op that leaves the rollups as they are.
+    expect((await backfillRollups(pool)).bucketsAssigned).toBe(0);
+
+    const report = await checkEquivalence(pool, { generatedAt: receivedAt });
+    expect(report.pilotFilterMismatches).toEqual([]);
+    expect(report.mismatches).toEqual([]);
+    expect((await auto.dashboardStats({ format: null, pilots: [] }, receivedAt)).totalGames).toBe(162);
+  }, 120_000);
 
   it('reads the raw tables until the backfill marks the rollups ready', async () => {
     const expected = await new PgTelemetryRepository(pool, { statsSource: 'raw' }).dashboardStats({ format: null, pilots: [] });
