@@ -78,11 +78,10 @@ describeDb('stats response cache (#86)', () => {
 
     await postGame('cache-002');
     nowMs += TTL_MS - 1;
-    const started = performance.now();
-    // Same filters, different parameter order: one cache entry.
+    // Same filters, different parameter order: one cache entry. A hit is served
+    // from memory without touching Postgres, so the stale count proves it.
     const second = await fetch(`${baseUrl}/v1/stats/dashboard?pilot=bot:hard&format=duel`);
     const body = (await second.json()) as { totalGames: number };
-    expect(performance.now() - started).toBeLessThan(100);
     expect(second.headers.get('x-stats-cache')).toBe('hit');
     expect(body.totalGames).toBe(1);
 
@@ -135,6 +134,13 @@ describeDb('stats response cache (#86)', () => {
     expect((await read()).headers.get('x-stats-cache')).toBe('hit');
     // Auth still runs on every request, cached or not.
     expect((await fetch(`${baseUrl}/accounts/community?window=all`)).status).toBe(401);
+
+    for (const path of ['/accounts/leaderboard', '/accounts/heroes/king-kong?window=all']) {
+      const response = await fetch(`${baseUrl}${path}`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+      expect(response.status).toBe(200);
+      expect(response.headers.get('cache-control')).toBe('private, max-age=60, stale-while-revalidate=60');
+      expect((await fetch(`${baseUrl}${path}`)).headers.get('cache-control')).toBe('no-store');
+    }
   });
 
   it('leaves ingest and auth routes uncached', async () => {

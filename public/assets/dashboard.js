@@ -98,6 +98,8 @@ const DASH_TTL_MS = 60000;
 const STALE_MAX_MS = 10 * 60 * 1000;
 const DECK_DETAIL_TTL_MS = 120000;
 const deckDetailCache = new Map();
+// Above the early-paint renderIndependentTab() call, which reads it (TDZ).
+let sandboxWindowHours = 168;
 
 renderTabs();
 renderIndependentTab();
@@ -1593,8 +1595,6 @@ function renderSubmissions() {
 function submissionTabButton(key, label) {
   return `<button class="subtab${state.subtab === key ? ' active' : ''}" data-subtab="${key}" role="tab" aria-selected="${state.subtab === key}" type="button">${esc(label)}</button>`;
 }
-
-let sandboxWindowHours = 168;
 
 async function renderSandbox() {
   const url = `/v1/stats/sandbox?windowHours=${sandboxWindowHours}`;
