@@ -26,6 +26,14 @@ import {
   type PlayerGamesPage,
   type PlayerStats,
 } from './accounts.js';
+import {
+  countInvalidSubmission,
+  foldPendingRollups,
+  queueRollups,
+  resolvePilotBucket,
+  rollupsReady,
+  subtractRollups,
+} from './rollups.js';
 import type {
   BotExecutionStatsResponse,
   CardContextBucket,
@@ -131,8 +139,46 @@ interface DuplicateRow {
   game_id: string | null;
 }
 
+export interface RepositoryOptions {
+  /**
+   * Where dashboard aggregates come from (#87). `auto` reads the rollup tables
+   * once the backfill has marked them ready and the raw tables until then;
+   * `raw` and `rollup` force one side, for the equivalence check.
+   */
+  statsSource?: 'auto' | 'raw' | 'rollup';
+}
+
+/** A read folds at most this many 500-game batches; the background fold catches up on the rest. */
+const FOLD_ON_READ_MAX_BATCHES = 4;
+
 export class PgTelemetryRepository {
-  constructor(private readonly pool: Pool) {}
+  private rollupsKnownReady = false;
+
+  constructor(
+    private readonly pool: Pool,
+    private readonly options: RepositoryOptions = {},
+  ) {}
+
+  /**
+   * Whether stats reads use the rollup tables. Readiness is sticky once seen.
+   * A rollup read first folds what ingest has queued since the last fold, so
+   * it includes every committed game unless another fold is mid-flight.
+   */
+  private async useRollups(): Promise<boolean> {
+    const source = this.options.statsSource ?? 'auto';
+    if (source === 'raw') return false;
+    if (source === 'auto' && !this.rollupsKnownReady) {
+      this.rollupsKnownReady = await rollupsReady(this.pool);
+      if (!this.rollupsKnownReady) return false;
+    }
+    try {
+      await foldPendingRollups(this.pool, { maxBatches: FOLD_ON_READ_MAX_BATCHES });
+    } catch (error) {
+      // Serve the rollups as of the last good fold rather than fail the read.
+      console.error('[telemetry] rollup fold before read failed; serving stale rollups', error);
+    }
+    return true;
+  }
 
   async ping(): Promise<void> {
     await this.pool.query('SELECT 1');
@@ -400,11 +446,13 @@ export class PgTelemetryRepository {
       return { kind: 'duplicate', submissionId: duplicate.id, gameId: duplicate.game_id };
     }
 
-    await insertGame(client, submissionId, args.receivedAt, normalized, args.payload, args.campaignId, args.campaignGameIndex);
+    const pilotBucket = await resolvePilotBucket(client, normalized.seats);
+    await insertGame(client, submissionId, args.receivedAt, normalized, args.payload, pilotBucket, args.campaignId, args.campaignGameIndex);
     await insertTeams(client, normalized.teams);
-    await insertSeats(client, normalized.seats);
-    await insertCards(client, normalized.cards);
-    await insertStartingCards(client, normalized.startingCards);
+    await insertSeats(client, normalized.seats, pilotBucket);
+    await insertCards(client, normalized.cards, normalized.format, pilotBucket);
+    await insertStartingCards(client, normalized.startingCards, normalized.format, pilotBucket);
+    await queueRollups(client, normalized.id);
     return { kind: 'created', submissionId, gameId: normalized.id };
   }
 
@@ -425,6 +473,7 @@ export class PgTelemetryRepository {
         receivedAt: args.receivedAt,
         sourceId: args.sourceId,
       });
+      if (!duplicate) await countInvalidSubmission(client);
       await client.query('COMMIT');
       if (duplicate) return { kind: 'duplicate', submissionId: duplicate.id, gameId: duplicate.game_id };
       return { kind: 'invalid', submissionId, errors: args.errors };
@@ -543,8 +592,17 @@ export class PgTelemetryRepository {
 
   async deckStats(filters: DeckStatsFilters): Promise<DeckStatsResponse> {
     const pilotFilter = filters.pilots.length > 0 ? filters.pilots : null;
+    const rollup = await this.useRollups();
     const summary = await this.pool.query<{ total_games: number; avg_turns: number | null }>(
-      `
+      rollup ? `
+        WITH ${bucketsCte(2)}
+        SELECT
+          COALESCE(SUM(r.games), 0)::int AS total_games,
+          (SUM(r.turns_sum)::numeric / NULLIF(SUM(r.turns_n), 0))::float8 AS avg_turns
+        FROM stats_game_rollup r
+        WHERE ($1::text IS NULL OR r.format = $1)
+          AND r.pilot_bucket IN (SELECT id FROM buckets)
+      ` : `
         WITH filtered_games AS (
           SELECT g.*
           FROM games g
@@ -559,7 +617,7 @@ export class PgTelemetryRepository {
     const totalGames = Number(summary.rows[0]?.total_games ?? 0);
     const avgTurns = summary.rows[0]?.avg_turns ?? null;
 
-    const decks = await this.deckRows(filters.format, pilotFilter, totalGames);
+    const decks = await this.deckRows(rollup, filters.format, pilotFilter, totalGames);
 
     return {
       totalGames,
@@ -1010,6 +1068,7 @@ export class PgTelemetryRepository {
   /** Submission contribution by source name under the active dashboard filters. */
   async sourceStats(filters: DeckStatsFilters): Promise<SourceStatsResponse> {
     const pilotFilter = filters.pilots.length > 0 ? filters.pilots : null;
+    const rollup = await this.useRollups();
     const result = await this.pool.query<{
       source: string | null;
       credential_id: string | null;
@@ -1017,7 +1076,29 @@ export class PgTelemetryRepository {
       submissions: number | string;
       last_received_at: Date | null;
     }>(
-      `
+      rollup ? `
+        WITH ${bucketsCte(2)}, by_key AS (
+          SELECT
+            COALESCE(NULLIF(r.source, ''), 'unknown') AS source,
+            r.auth_key_id,
+            SUM(r.games) AS submissions,
+            MAX(r.last_received_at) AS last_received_at
+          FROM stats_game_rollup r
+          WHERE ($1::text IS NULL OR r.format = $1)
+            AND r.pilot_bucket IN (SELECT id FROM buckets)
+          GROUP BY 1, 2
+        )
+        SELECT
+          k.source,
+          sc.id AS credential_id,
+          sc.label AS credential_label,
+          SUM(k.submissions)::int AS submissions,
+          MAX(k.last_received_at) AS last_received_at
+        FROM by_key k
+        LEFT JOIN source_credentials sc ON sc.id = k.auth_key_id
+        GROUP BY k.source, sc.id, sc.label
+        ORDER BY source ASC, submissions DESC, credential_label ASC NULLS LAST
+      ` : `
         SELECT
           COALESCE(NULLIF(g.source, ''), 'unknown') AS source,
           sc.id AS credential_id,
@@ -1229,6 +1310,7 @@ export class PgTelemetryRepository {
     const heroOpponentPilots = filters.opponentPilots?.length ? filters.opponentPilots : null;
     const heroStatsPilot = heroOpponentPilots ? matchupHeroPilot : null;
     const matchupPilotFilter = pilotFilter;
+    const rollup = await this.useRollups();
 
     // Wave 1: everything independent of totalGames, fetched concurrently.
     const [summary, submissions, formats, pilots, matchups, synergy] = await Promise.all([
@@ -1238,7 +1320,17 @@ export class PgTelemetryRepository {
         first_player_games: number;
         first_player_wins: number;
       }>(
-        `
+        rollup ? `
+          WITH ${bucketsCte(2, 3, 4)}
+          SELECT
+            COALESCE(SUM(r.games), 0)::int AS total_games,
+            (SUM(r.turns_sum)::numeric / NULLIF(SUM(r.turns_n), 0))::float8 AS avg_turns,
+            COALESCE(SUM(r.first_player_games), 0)::int AS first_player_games,
+            COALESCE(SUM(r.first_player_wins), 0)::int AS first_player_wins
+          FROM stats_game_rollup r
+          WHERE ($1::text IS NULL OR r.format = $1)
+            AND r.pilot_bucket IN (SELECT id FROM buckets)
+        ` : `
           WITH selected_games AS (
             SELECT g.*
             FROM games g
@@ -1256,17 +1348,22 @@ export class PgTelemetryRepository {
         [filters.format, pilotFilter, heroStatsPilot, heroOpponentPilots],
       ),
       this.pool.query<{ total_submissions: number; invalid_submissions: number }>(
-        `
+        rollup ? `
+          SELECT
+            COALESCE(SUM(submissions), 0)::int AS total_submissions,
+            COALESCE(SUM(submissions) FILTER (WHERE validation_status = 'invalid'), 0)::int AS invalid_submissions
+          FROM stats_submission_rollup
+        ` : `
           SELECT
             COUNT(*)::int AS total_submissions,
             COUNT(*) FILTER (WHERE validation_status = 'invalid')::int AS invalid_submissions
           FROM game_submissions
         `,
       ),
-      this.formatRows(pilotFilter),
-      this.pilotRows(filters.format),
-      this.matchupRows(filters.format, matchupPilotFilter, matchupHeroPilot, matchupOpponentPilot),
-      this.synergyRows(filters.format, pilotFilter),
+      this.formatRows(rollup, pilotFilter),
+      this.pilotRows(rollup, filters.format),
+      this.matchupRows(rollup, filters.format, matchupPilotFilter, matchupHeroPilot, matchupOpponentPilot),
+      this.synergyRows(rollup, filters.format, pilotFilter),
     ]);
 
     const totalGames = Number(summary.rows[0]?.total_games ?? 0);
@@ -1276,8 +1373,8 @@ export class PgTelemetryRepository {
 
     // Wave 2: these need totalGames (pick rate / map share), fetched concurrently.
     const [maps, decks] = await Promise.all([
-      this.mapRows(filters.format, pilotFilter, totalGames),
-      this.deckRows(filters.format, pilotFilter, totalGames, heroStatsPilot, heroOpponentPilots),
+      this.mapRows(rollup, filters.format, pilotFilter, totalGames),
+      this.deckRows(rollup, filters.format, pilotFilter, totalGames, heroStatsPilot, heroOpponentPilots),
     ]);
 
     return {
@@ -1303,6 +1400,7 @@ export class PgTelemetryRepository {
   }
 
   private async deckRows(
+    rollup: boolean,
     format: string | null,
     pilotFilter: string[] | null,
     totalGames: number,
@@ -1318,7 +1416,27 @@ export class PgTelemetryRepository {
       games: number;
       wins: number;
     }>(
-      `
+      rollup ? `
+        WITH ${bucketsCte(2)}, seats AS (
+          SELECT r.*
+          FROM stats_deck_rollup r
+          WHERE ($1::text IS NULL OR r.format = $1)
+            AND r.pilot_bucket IN (SELECT id FROM buckets)
+            AND ($3::text IS NULL OR r.pilot = $3)
+            AND ($4::text[] IS NULL OR r.opp_pilots && $4::text[])
+        )
+        SELECT
+          ${modeSql('seats', 'deck_id', 'deck')} AS deck,
+          d.deck_id,
+          ${modeSql('seats', 'deck_id', 'deck_version')} AS deck_version,
+          MAX(d.hero_id) FILTER (WHERE d.hero_id IS NOT NULL) AS hero_id,
+          MAX(d.hero_name) FILTER (WHERE d.hero_name IS NOT NULL) AS hero_name,
+          SUM(d.games)::int AS games,
+          SUM(d.wins)::int AS wins
+        FROM seats d
+        GROUP BY d.deck_id
+        ORDER BY games DESC, d.deck_id ASC
+      ` : `
         WITH filtered_games AS (
           SELECT g.*
           FROM games g
@@ -1351,7 +1469,7 @@ export class PgTelemetryRepository {
     );
 
     const [profiles, compositions] = await Promise.all([
-      this.deckProfileMap(format, pilotFilter),
+      this.deckProfileMap(rollup, format, pilotFilter),
       this.deckCompositionMap(),
     ]);
 
@@ -1408,9 +1526,20 @@ export class PgTelemetryRepository {
   }
 
   /** Per-deck play-mix profile derived from game_cards, keyed by full deck id (`<deck>@<version>`). */
-  private async deckProfileMap(format: string | null, pilotFilter: string[] | null): Promise<Map<string, DeckProfile>> {
+  private async deckProfileMap(
+    rollup: boolean,
+    format: string | null,
+    pilotFilter: string[] | null,
+  ): Promise<Map<string, DeckProfile>> {
     const rows = await this.pool.query<{ deck: string; context_bucket: CardContextBucket; plays: number }>(
-      `
+      rollup ? `
+        WITH ${bucketsCte(2)}
+        SELECT r.deck, r.context_bucket, SUM(r.plays)::int AS plays
+        FROM stats_card_context_rollup r
+        WHERE ($1::text IS NULL OR r.format = $1)
+          AND r.pilot_bucket IN (SELECT id FROM buckets)
+        GROUP BY r.deck, r.context_bucket
+      ` : `
         WITH filtered_games AS (
           SELECT g.*
           FROM games g
@@ -1438,7 +1567,7 @@ export class PgTelemetryRepository {
     return profiles;
   }
 
-  private async formatRows(pilotFilter: string[] | null): Promise<DashboardStatsResponse['formats']> {
+  private async formatRows(rollup: boolean, pilotFilter: string[] | null): Promise<DashboardStatsResponse['formats']> {
     const rows = await this.pool.query<{
       format: string;
       label: string | null;
@@ -1448,7 +1577,30 @@ export class PgTelemetryRepository {
       boss_games: number;
       boss_wins: number;
     }>(
-      `
+      rollup ? `
+        WITH ${bucketsCte(1)}, by_format AS (
+          SELECT
+            r.format,
+            COALESCE(MAX(r.format_label) FILTER (WHERE r.format_label IS NOT NULL), r.format) AS label,
+            SUM(r.games) AS games,
+            (SUM(r.turns_sum)::numeric / NULLIF(SUM(r.turns_n), 0))::float8 AS avg_turns,
+            COALESCE(SUM(r.games) FILTER (WHERE r.boss IS NOT NULL), 0) AS boss_games,
+            COALESCE(SUM(r.team0_wins) FILTER (WHERE r.boss IS NOT NULL), 0) AS boss_wins
+          FROM stats_game_rollup r
+          WHERE r.pilot_bucket IN (SELECT id FROM buckets)
+          GROUP BY r.format
+        )
+        SELECT
+          format,
+          label,
+          games::int AS games,
+          (games::float8 / NULLIF(SUM(games) OVER (), 0))::float8 AS share,
+          avg_turns,
+          boss_games::int AS boss_games,
+          boss_wins::int AS boss_wins
+        FROM by_format
+        ORDER BY games DESC, format ASC
+      ` : `
         WITH filtered_games AS (
           SELECT g.*
           FROM games g
@@ -1469,7 +1621,7 @@ export class PgTelemetryRepository {
       [pilotFilter],
     );
 
-    const breakdown = await this.bossBreakdown(pilotFilter);
+    const breakdown = await this.bossBreakdown(rollup, pilotFilter);
 
     return rows.rows.map((row) => {
       const bossGames = Number(row.boss_games);
@@ -1489,9 +1641,20 @@ export class PgTelemetryRepository {
   }
 
   /** Boss-side (teams[0]) win rate split by boss category, keyed by format. */
-  private async bossBreakdown(pilotFilter: string[] | null): Promise<Map<string, DashboardStatsResponse['formats'][number]['bosses']>> {
+  private async bossBreakdown(
+    rollup: boolean,
+    pilotFilter: string[] | null,
+  ): Promise<Map<string, DashboardStatsResponse['formats'][number]['bosses']>> {
     const rows = await this.pool.query<{ format: string; boss: string; games: number; wins: number }>(
-      `
+      rollup ? `
+        WITH ${bucketsCte(1)}
+        SELECT r.format, r.boss, SUM(r.games)::int AS games, SUM(r.team0_wins)::int AS wins
+        FROM stats_game_rollup r
+        WHERE r.boss IS NOT NULL
+          AND r.pilot_bucket IN (SELECT id FROM buckets)
+        GROUP BY r.format, r.boss
+        ORDER BY games DESC, boss ASC
+      ` : `
         WITH filtered_games AS (
           SELECT g.*
           FROM games g
@@ -1520,13 +1683,30 @@ export class PgTelemetryRepository {
     return byFormat;
   }
 
-  private async mapRows(format: string | null, pilotFilter: string[] | null, totalGames: number): Promise<DashboardStatsResponse['maps']> {
+  private async mapRows(
+    rollup: boolean,
+    format: string | null,
+    pilotFilter: string[] | null,
+    totalGames: number,
+  ): Promise<DashboardStatsResponse['maps']> {
     const rows = await this.pool.query<{
       map: string;
       map_version: string | null;
       games: number;
     }>(
-      `
+      rollup ? `
+        WITH ${bucketsCte(2)}
+        SELECT
+          r.map,
+          MAX(r.map_version) FILTER (WHERE r.map_version IS NOT NULL) AS map_version,
+          SUM(r.games)::int AS games
+        FROM stats_game_rollup r
+        WHERE ($1::text IS NULL OR r.format = $1)
+          AND r.pilot_bucket IN (SELECT id FROM buckets)
+        GROUP BY r.map
+        ORDER BY games DESC, map ASC
+        LIMIT 12
+      ` : `
         WITH selected_games AS (
           SELECT g.*
           FROM games g
@@ -1552,14 +1732,37 @@ export class PgTelemetryRepository {
     }));
   }
 
-  private async pilotRows(format: string | null): Promise<DashboardStatsResponse['pilots']> {
+  private async pilotRows(rollup: boolean, format: string | null): Promise<DashboardStatsResponse['pilots']> {
     const rows = await this.pool.query<{
       pilot: string;
       pilot_kind: 'human' | 'bot' | 'unknown';
       seats: number;
       games: number;
     }>(
-      `
+      // A pilot's games are those whose bucket holds one of its seats; the
+      // bucket lists each (pilot, kind) once per opposing shape, hence DISTINCT.
+      rollup ? `
+        WITH seat_counts AS (
+          SELECT r.pilot, r.pilot_kind, SUM(r.games) AS seats
+          FROM stats_deck_rollup r
+          WHERE ($1::text IS NULL OR r.format = $1)
+          GROUP BY r.pilot, r.pilot_kind
+        ), game_counts AS (
+          SELECT seat.pilot, seat.pilot_kind, SUM(r.games) AS games
+          FROM stats_game_rollup r
+          JOIN pilot_buckets b ON b.id = r.pilot_bucket
+          CROSS JOIN LATERAL (
+            SELECT DISTINCT shape->>0 AS pilot, shape->>1 AS pilot_kind
+            FROM jsonb_array_elements(b.seats) AS shapes(shape)
+          ) seat
+          WHERE ($1::text IS NULL OR r.format = $1)
+          GROUP BY seat.pilot, seat.pilot_kind
+        )
+        SELECT s.pilot, s.pilot_kind, s.seats::int AS seats, g.games::int AS games
+        FROM seat_counts s
+        JOIN game_counts g ON g.pilot = s.pilot AND g.pilot_kind = s.pilot_kind
+        ORDER BY seats DESC, s.pilot ASC
+      ` : `
         SELECT s.pilot, s.pilot_kind, COUNT(*)::int AS seats, COUNT(DISTINCT s.game_id)::int AS games
         FROM game_seats s
         JOIN games g ON g.id = s.game_id
@@ -1578,6 +1781,7 @@ export class PgTelemetryRepository {
   }
 
   private async matchupRows(
+    rollup: boolean,
     format: string | null,
     pilotFilter: string[] | null,
     heroPilot: string | null = null,
@@ -1596,7 +1800,30 @@ export class PgTelemetryRepository {
       avg_final_health: number | null;
       avg_cards_left: number | null;
     }>(
-      `
+      // The matrix is keyed by deck id only, so the rollup read skips the
+      // deck-string MODE() the raw query computes and the mapping ignores.
+      rollup ? `
+        WITH ${bucketsCte(2)}
+        SELECT
+          r.row_deck_id AS row_deck,
+          r.row_deck_id,
+          r.col_deck_id AS col_deck,
+          r.col_deck_id,
+          SUM(r.games)::int AS games,
+          SUM(r.wins)::int AS wins,
+          (SUM(r.turns_sum)::numeric / NULLIF(SUM(r.turns_n), 0))::float8 AS avg_turns,
+          (SUM(r.win_turns_sum)::numeric / NULLIF(SUM(r.win_turns_n), 0))::float8 AS avg_win_turns,
+          (SUM(r.loss_turns_sum)::numeric / NULLIF(SUM(r.loss_turns_n), 0))::float8 AS avg_loss_turns,
+          (SUM(r.final_health_sum)::numeric / NULLIF(SUM(r.final_health_n), 0))::float8 AS avg_final_health,
+          (SUM(r.deck_count_sum)::numeric / NULLIF(SUM(r.deck_count_n), 0))::float8 AS avg_cards_left
+        FROM stats_matchup_rollup r
+        WHERE ($1::text IS NULL OR r.format = $1)
+          AND r.pilot_bucket IN (SELECT id FROM buckets)
+          AND ($3::text IS NULL OR r.row_pilot = $3)
+          AND ($4::text IS NULL OR r.col_pilot = $4)
+        GROUP BY r.row_deck_id, r.col_deck_id
+        ORDER BY games DESC, r.row_deck_id ASC, r.col_deck_id ASC
+      ` : `
         WITH duel_games AS (
           SELECT g.*
           FROM games g
@@ -1661,7 +1888,11 @@ export class PgTelemetryRepository {
     });
   }
 
-  private async synergyRows(format: string | null, pilotFilter: string[] | null): Promise<DashboardStatsResponse['synergy']> {
+  private async synergyRows(
+    rollup: boolean,
+    format: string | null,
+    pilotFilter: string[] | null,
+  ): Promise<DashboardStatsResponse['synergy']> {
     const rows = await this.pool.query<{
       deck_a: string;
       deck_a_id: string;
@@ -1671,7 +1902,34 @@ export class PgTelemetryRepository {
       wins: number;
       expected_win_rate: number | null;
     }>(
-      `
+      rollup ? `
+        WITH ${bucketsCte(2)}, seat_stats AS (
+          SELECT r.deck_id, SUM(r.games)::float8 AS games, SUM(r.wins)::float8 AS wins
+          FROM stats_deck_rollup r
+          WHERE r.format IN ('team-2v2', '2v2')
+            AND ($1::text IS NULL OR r.format = $1)
+            AND r.pilot_bucket IN (SELECT id FROM buckets)
+          GROUP BY r.deck_id
+        ), pairs AS (
+          SELECT r.*
+          FROM stats_pair_rollup r
+          WHERE ($1::text IS NULL OR r.format = $1)
+            AND r.pilot_bucket IN (SELECT id FROM buckets)
+        )
+        SELECT
+          ${modeSql('pairs', ['deck_a_id', 'deck_b_id'], 'deck_a', 'p')} AS deck_a,
+          p.deck_a_id,
+          ${modeSql('pairs', ['deck_a_id', 'deck_b_id'], 'deck_b', 'p')} AS deck_b,
+          p.deck_b_id,
+          SUM(p.games)::int AS games,
+          SUM(p.wins)::int AS wins,
+          ((COALESCE(MAX(sa.wins) / NULLIF(MAX(sa.games), 0), 0.5) + COALESCE(MAX(sb.wins) / NULLIF(MAX(sb.games), 0), 0.5)) / 2)::float8 AS expected_win_rate
+        FROM pairs p
+        LEFT JOIN seat_stats sa ON sa.deck_id = p.deck_a_id
+        LEFT JOIN seat_stats sb ON sb.deck_id = p.deck_b_id
+        GROUP BY p.deck_a_id, p.deck_b_id
+        ORDER BY games DESC, deck_a_id ASC, deck_b_id ASC
+      ` : `
         WITH twos AS (
           SELECT g.*
           FROM games g
@@ -1748,9 +2006,21 @@ export class PgTelemetryRepository {
     const heroPilot = filters.heroPilot ?? null;
     const opponentPilot = filters.opponentPilot ?? null;
     const { deckId, deckVersion } = splitDeckId(deck);
+    const rollup = await this.useRollups();
+    // Rollups carry no per-game seat relations, so a scenario filter (a fixed
+    // opponent, partner or pilot pairing) reads the raw tables for the parts
+    // it narrows.
+    const scenario = opponent !== null || partner !== null || heroPilot !== null || opponentPilot !== null;
+    const fromRollups = rollup && !scenario;
 
-    const totals = await this.pool.query<{ total_games: number }>(
-      `
+    const totalsQuery = this.pool.query<{ total_games: number }>(
+      fromRollups ? `
+        WITH ${bucketsCte(2)}
+        SELECT COALESCE(SUM(r.games), 0)::int AS total_games
+        FROM stats_game_rollup r
+        WHERE ($1::text IS NULL OR r.format = $1)
+          AND r.pilot_bucket IN (SELECT id FROM buckets)
+      ` : `
         WITH selected_games AS (
           SELECT g.* FROM games g
           WHERE ($1::text IS NULL OR g.format = $1)
@@ -1759,11 +2029,10 @@ export class PgTelemetryRepository {
         )
         SELECT COUNT(*)::int AS total_games FROM selected_games
       `,
-      [filters.format, pilotFilter, deck, opponent, partner, heroPilot, opponentPilot],
+      fromRollups ? [filters.format, pilotFilter] : [filters.format, pilotFilter, deck, opponent, partner, heroPilot, opponentPilot],
     );
-    const totalGames = Number(totals.rows[0]?.total_games ?? 0);
 
-    const baseSel = await this.pool.query<{
+    const baseQuery = this.pool.query<{
       deck_version: string | null;
       hero_id: string | null;
       hero_name: string | null;
@@ -1781,7 +2050,30 @@ export class PgTelemetryRepository {
       second_games: number;
       second_wins: number;
     }>(
-      `
+      fromRollups ? `
+        WITH ${bucketsCte(2)}
+        SELECT
+          MAX(r.deck_version) AS deck_version,
+          MAX(r.hero_id) FILTER (WHERE r.hero_id IS NOT NULL) AS hero_id,
+          MAX(r.hero_name) FILTER (WHERE r.hero_name IS NOT NULL) AS hero_name,
+          COALESCE(SUM(r.games), 0)::int AS games,
+          COALESCE(SUM(r.wins), 0)::int AS wins,
+          (SUM(r.final_health_sum)::numeric / NULLIF(SUM(r.final_health_n), 0))::float8 AS avg_final_health,
+          (SUM(r.win_final_health_sum)::numeric / NULLIF(SUM(r.win_final_health_n), 0))::float8 AS avg_win_final_health,
+          (SUM(r.deck_count_sum)::numeric / NULLIF(SUM(r.deck_count_n), 0))::float8 AS avg_cards_left,
+          (SUM(r.win_deck_count_sum)::numeric / NULLIF(SUM(r.win_deck_count_n), 0))::float8 AS avg_win_cards_left,
+          (SUM(r.loss_deck_count_sum)::numeric / NULLIF(SUM(r.loss_deck_count_n), 0))::float8 AS avg_loss_cards_left,
+          (SUM(r.win_turns_sum)::numeric / NULLIF(SUM(r.win_turns_n), 0))::float8 AS avg_win_turns,
+          (SUM(r.loss_turns_sum)::numeric / NULLIF(SUM(r.loss_turns_n), 0))::float8 AS avg_loss_turns,
+          COALESCE(SUM(r.first_games), 0)::int AS first_games,
+          COALESCE(SUM(r.first_wins), 0)::int AS first_wins,
+          COALESCE(SUM(r.second_games), 0)::int AS second_games,
+          COALESCE(SUM(r.second_wins), 0)::int AS second_wins
+        FROM stats_deck_rollup r
+        WHERE r.deck = $3
+          AND ($1::text IS NULL OR r.format = $1)
+          AND r.pilot_bucket IN (SELECT id FROM buckets)
+      ` : `
         WITH selected_games AS (
           SELECT g.* FROM games g
           WHERE ($1::text IS NULL OR g.format = $1)
@@ -1809,8 +2101,41 @@ export class PgTelemetryRepository {
         JOIN selected_games g ON g.id = s.game_id
         WHERE s.deck = $3
       `,
-      [filters.format, pilotFilter, deck, opponent, partner, heroPilot, opponentPilot],
+      fromRollups ? [filters.format, pilotFilter, deck] : [filters.format, pilotFilter, deck, opponent, partner, heroPilot, opponentPilot],
     );
+
+    const broadBaseQuery = this.pool.query<{ games: number; wins: number }>(
+      fromRollups ? `
+        WITH ${bucketsCte(1)}
+        SELECT COALESCE(SUM(r.games), 0)::int AS games, COALESCE(SUM(r.wins), 0)::int AS wins
+        FROM stats_deck_rollup r
+        WHERE r.deck = $2
+          AND ($3::text IS NULL OR r.format = $3)
+          AND r.pilot_bucket IN (SELECT id FROM buckets)
+      ` : `
+        WITH broad_games AS (SELECT g.* FROM games g WHERE ${pilotFilterSql(1)} AND ($3::text IS NULL OR g.format = $3) AND ${deckScenarioFilterSql(2, 4, 5, 6, 7)})
+        SELECT COUNT(*)::int AS games, COUNT(*) FILTER (WHERE s.won)::int AS wins
+        FROM game_seats s JOIN broad_games g ON g.id = s.game_id
+        WHERE s.deck = $2
+      `,
+      fromRollups ? [pilotFilter, deck, filters.format] : [pilotFilter, deck, filters.format, opponent, partner, heroPilot, opponentPilot],
+    );
+
+    // Every part is independent of the others, so they run concurrently.
+    const [totals, baseSel, profiles, compositions, formats, maps, matchups, twoVTwo, cards, startingCards, broadBase] = await Promise.all([
+      totalsQuery,
+      baseQuery,
+      this.deckProfileMap(rollup, filters.format, pilotFilter),
+      this.deckCompositionMap(),
+      this.deckFormatRows(rollup, deck, pilotFilter),
+      this.deckMapRows(fromRollups, deck, pilotFilter, filters.format, opponent, partner, heroPilot, opponentPilot),
+      this.deckMatchupRows(rollup, deck, pilotFilter),
+      this.deckTwoVTwoRows(rollup, deck, pilotFilter),
+      this.deckCardRows(fromRollups, deck, pilotFilter, filters.format, opponent, partner, heroPilot, opponentPilot),
+      this.deckStartingCardRows(fromRollups, deck, pilotFilter, filters.format, opponent, partner, heroPilot, opponentPilot),
+      broadBaseQuery,
+    ]);
+    const totalGames = Number(totals.rows[0]?.total_games ?? 0);
     const base = baseSel.rows[0];
     const selGames = Number(base?.games ?? 0);
     const selWins = Number(base?.wins ?? 0);
@@ -1822,29 +2147,6 @@ export class PgTelemetryRepository {
       first: split(Number(base?.first_games ?? 0), Number(base?.first_wins ?? 0)),
       second: split(Number(base?.second_games ?? 0), Number(base?.second_wins ?? 0)),
     };
-
-    const [profiles, compositions] = await Promise.all([
-      this.deckProfileMap(filters.format, pilotFilter),
-      this.deckCompositionMap(),
-    ]);
-
-    const [formats, maps, matchups, twoVTwo, cards, startingCards, broadBase] = await Promise.all([
-      this.deckFormatRows(deck, pilotFilter),
-      this.deckMapRows(deck, pilotFilter, filters.format, opponent, partner, heroPilot, opponentPilot),
-      this.deckMatchupRows(deck, pilotFilter),
-      this.deckTwoVTwoRows(deck, pilotFilter),
-      this.deckCardRows(deck, pilotFilter, filters.format, opponent, partner, heroPilot, opponentPilot),
-      this.deckStartingCardRows(deck, pilotFilter, filters.format, opponent, partner, heroPilot, opponentPilot),
-      this.pool.query<{ games: number; wins: number }>(
-        `
-          WITH broad_games AS (SELECT g.* FROM games g WHERE ${pilotFilterSql(1)} AND ($3::text IS NULL OR g.format = $3) AND ${deckScenarioFilterSql(2, 4, 5, 6, 7)})
-          SELECT COUNT(*)::int AS games, COUNT(*) FILTER (WHERE s.won)::int AS wins
-          FROM game_seats s JOIN broad_games g ON g.id = s.game_id
-          WHERE s.deck = $2
-        `,
-        [pilotFilter, deck, filters.format, opponent, partner, heroPilot, opponentPilot],
-      ),
-    ]);
 
     const broadGames = Number(broadBase.rows[0]?.games ?? 0);
     const broadWins = Number(broadBase.rows[0]?.wins ?? 0);
@@ -1891,7 +2193,11 @@ export class PgTelemetryRepository {
     };
   }
 
-  private async deckFormatRows(deck: string, pilotFilter: string[] | null): Promise<DeckDetailResponse['formats']> {
+  private async deckFormatRows(
+    rollup: boolean,
+    deck: string,
+    pilotFilter: string[] | null,
+  ): Promise<DeckDetailResponse['formats']> {
     const rows = await this.pool.query<{
       format: string;
       label: string | null;
@@ -1909,7 +2215,30 @@ export class PgTelemetryRepository {
       second_games: number;
       second_wins: number;
     }>(
-      `
+      rollup ? `
+        WITH ${bucketsCte(1)}
+        SELECT
+          r.format,
+          COALESCE(MAX(r.format_label) FILTER (WHERE r.format_label IS NOT NULL), r.format) AS label,
+          SUM(r.games)::int AS games,
+          SUM(r.wins)::int AS wins,
+          (SUM(r.final_health_sum)::numeric / NULLIF(SUM(r.final_health_n), 0))::float8 AS avg_final_health,
+          (SUM(r.win_final_health_sum)::numeric / NULLIF(SUM(r.win_final_health_n), 0))::float8 AS avg_win_final_health,
+          (SUM(r.deck_count_sum)::numeric / NULLIF(SUM(r.deck_count_n), 0))::float8 AS avg_cards_left,
+          (SUM(r.win_deck_count_sum)::numeric / NULLIF(SUM(r.win_deck_count_n), 0))::float8 AS avg_win_cards_left,
+          (SUM(r.loss_deck_count_sum)::numeric / NULLIF(SUM(r.loss_deck_count_n), 0))::float8 AS avg_loss_cards_left,
+          (SUM(r.win_turns_sum)::numeric / NULLIF(SUM(r.win_turns_n), 0))::float8 AS avg_win_turns,
+          (SUM(r.loss_turns_sum)::numeric / NULLIF(SUM(r.loss_turns_n), 0))::float8 AS avg_loss_turns,
+          SUM(r.first_games)::int AS first_games,
+          SUM(r.first_wins)::int AS first_wins,
+          SUM(r.second_games)::int AS second_games,
+          SUM(r.second_wins)::int AS second_wins
+        FROM stats_deck_rollup r
+        WHERE r.deck = $2
+          AND r.pilot_bucket IN (SELECT id FROM buckets)
+        GROUP BY r.format
+        ORDER BY games DESC, r.format ASC
+      ` : `
         WITH broad_games AS (SELECT g.* FROM games g WHERE ${pilotFilterSql(1)})
         SELECT
           g.format,
@@ -1960,6 +2289,7 @@ export class PgTelemetryRepository {
   }
 
   private async deckMapRows(
+    rollup: boolean,
     deck: string,
     pilotFilter: string[] | null,
     format: string | null = null,
@@ -1969,7 +2299,20 @@ export class PgTelemetryRepository {
     opponentPilot: string | null = null,
   ): Promise<DeckDetailResponse['maps']> {
     const rows = await this.pool.query<{ map: string; map_version: string | null; games: number; wins: number }>(
-      `
+      rollup ? `
+        WITH ${bucketsCte(1)}
+        SELECT
+          r.map,
+          MAX(r.map_version) FILTER (WHERE r.map_version IS NOT NULL) AS map_version,
+          SUM(r.games)::int AS games,
+          SUM(r.wins)::int AS wins
+        FROM stats_deck_map_rollup r
+        WHERE r.deck = $2
+          AND ($3::text IS NULL OR r.format = $3)
+          AND r.pilot_bucket IN (SELECT id FROM buckets)
+        GROUP BY r.map
+        ORDER BY games DESC, r.map ASC
+      ` : `
         WITH broad_games AS (SELECT g.* FROM games g WHERE ${pilotFilterSql(1)} AND ($3::text IS NULL OR g.format = $3) AND ${deckScenarioFilterSql(2, 4, 5, 6, 7)})
         SELECT
           g.map,
@@ -1981,7 +2324,7 @@ export class PgTelemetryRepository {
         GROUP BY g.map
         ORDER BY games DESC, g.map ASC
       `,
-      [pilotFilter, deck, format, opponent, partner, heroPilot, opponentPilot],
+      rollup ? [pilotFilter, deck, format] : [pilotFilter, deck, format, opponent, partner, heroPilot, opponentPilot],
     );
     return rows.rows.map((row) => {
       const games = Number(row.games);
@@ -1990,7 +2333,11 @@ export class PgTelemetryRepository {
     });
   }
 
-  private async deckMatchupRows(deck: string, pilotFilter: string[] | null): Promise<DeckDetailResponse['matchups']> {
+  private async deckMatchupRows(
+    rollup: boolean,
+    deck: string,
+    pilotFilter: string[] | null,
+  ): Promise<DeckDetailResponse['matchups']> {
     const rows = await this.pool.query<{
       opp_deck: string;
       opp_deck_id: string;
@@ -1999,7 +2346,24 @@ export class PgTelemetryRepository {
       games: number;
       wins: number;
     }>(
-      `
+      rollup ? `
+        WITH ${bucketsCte(1)}, faced AS (
+          SELECT r.*
+          FROM stats_matchup_rollup r
+          WHERE r.row_deck = $2
+            AND r.pilot_bucket IN (SELECT id FROM buckets)
+        )
+        SELECT
+          ${modeSql('faced', 'col_deck_id', 'col_deck', 'd')} AS opp_deck,
+          d.col_deck_id AS opp_deck_id,
+          MAX(d.col_hero_name) AS hero_name,
+          MAX(d.col_hero_id) AS hero_id,
+          SUM(d.games)::int AS games,
+          SUM(d.wins)::int AS wins
+        FROM faced d
+        GROUP BY d.col_deck_id
+        ORDER BY games DESC, d.col_deck_id ASC
+      ` : `
         WITH duel_games AS (
           SELECT g.* FROM games g
           WHERE g.format IN ('duel', '1v1') AND ${pilotFilterSql(1)}
@@ -2041,10 +2405,21 @@ export class PgTelemetryRepository {
     });
   }
 
-  private async deckTwoVTwoRows(deck: string, pilotFilter: string[] | null): Promise<DeckDetailResponse['twoVTwo']> {
+  private async deckTwoVTwoRows(
+    rollup: boolean,
+    deck: string,
+    pilotFilter: string[] | null,
+  ): Promise<DeckDetailResponse['twoVTwo']> {
     const [overall, partners] = await Promise.all([
       this.pool.query<{ games: number; wins: number }>(
-        `
+        rollup ? `
+          WITH ${bucketsCte(1)}
+          SELECT COALESCE(SUM(r.games), 0)::int AS games, COALESCE(SUM(r.wins), 0)::int AS wins
+          FROM stats_deck_rollup r
+          WHERE r.deck = $2
+            AND r.format IN ('team-2v2', '2v2')
+            AND r.pilot_bucket IN (SELECT id FROM buckets)
+        ` : `
           WITH twos AS (
             SELECT g.*
             FROM games g
@@ -2068,7 +2443,37 @@ export class PgTelemetryRepository {
         expected_win_rate: number | null;
         adjusted_delta: number | null;
       }>(
-        `
+        // Each opposing pair's strength is over every 2v2 game in the filter;
+        // a partner's expectation is its games' average of 1 - that strength.
+        rollup ? `
+          WITH ${bucketsCte(1)}, pair_strength AS (
+            SELECT
+              r.deck_a_id,
+              r.deck_b_id,
+              (SUM(r.wins)::float8 + 5) / (SUM(r.games)::float8 + 10) AS strength
+            FROM stats_pair_rollup r
+            WHERE r.pilot_bucket IN (SELECT id FROM buckets)
+            GROUP BY r.deck_a_id, r.deck_b_id
+          ), partnered AS (
+            SELECT r.*, COALESCE(1 - ps.strength, 0.5) AS expected_win_rate
+            FROM stats_partner_rollup r
+            LEFT JOIN pair_strength ps ON ps.deck_a_id = r.opp_deck_a_id AND ps.deck_b_id = r.opp_deck_b_id
+            WHERE r.deck = $2
+              AND r.pilot_bucket IN (SELECT id FROM buckets)
+          )
+          SELECT
+            ${modeSql('partnered', 'partner_deck_id', 'partner_deck', 'd')} AS partner_deck,
+            d.partner_deck_id,
+            MAX(d.partner_hero_name) FILTER (WHERE d.partner_hero_name IS NOT NULL) AS hero_name,
+            MAX(d.partner_hero_id) FILTER (WHERE d.partner_hero_id IS NOT NULL) AS hero_id,
+            SUM(d.games)::int AS games,
+            SUM(d.wins)::int AS wins,
+            (SUM(d.games * d.expected_win_rate) / SUM(d.games))::float8 AS expected_win_rate,
+            ((SUM(d.wins) - SUM(d.games * d.expected_win_rate)) / SUM(d.games))::float8 AS adjusted_delta
+          FROM partnered d
+          GROUP BY d.partner_deck_id
+          ORDER BY games DESC, d.partner_deck_id ASC
+        ` : `
           WITH twos AS (
             SELECT g.*
             FROM games g
@@ -2162,6 +2567,7 @@ export class PgTelemetryRepository {
   }
 
   private async deckCardRows(
+    rollup: boolean,
     deck: string,
     pilotFilter: string[] | null,
     format: string | null = null,
@@ -2177,7 +2583,33 @@ export class PgTelemetryRepository {
       games_with: number;
       wins_with: number;
     }>(
-      `
+      rollup ? `
+        WITH ${bucketsCte(1)}, contexts AS (
+          SELECT r.card, r.context_bucket, SUM(r.plays) AS plays
+          FROM stats_card_context_rollup r
+          WHERE r.deck = $2
+            AND ($3::text IS NULL OR r.format = $3)
+            AND r.pilot_bucket IN (SELECT id FROM buckets)
+          GROUP BY r.card, r.context_bucket
+        ), seats AS (
+          SELECT r.card, SUM(r.games_with) AS games_with, SUM(r.wins_with) AS wins_with
+          FROM stats_card_rollup r
+          WHERE r.deck = $2
+            AND ($3::text IS NULL OR r.format = $3)
+            AND r.pilot_bucket IN (SELECT id FROM buckets)
+          GROUP BY r.card
+        )
+        SELECT
+          d.card,
+          ${modeSql('contexts', 'card', 'context_bucket', 'd', 'plays')} AS bucket,
+          SUM(d.plays)::int AS plays,
+          MAX(seats.games_with)::int AS games_with,
+          MAX(seats.wins_with)::int AS wins_with
+        FROM contexts d
+        JOIN seats ON seats.card = d.card
+        GROUP BY d.card
+        ORDER BY plays DESC, d.card ASC
+      ` : `
         WITH broad_games AS (SELECT g.* FROM games g WHERE ${pilotFilterSql(1)} AND ($3::text IS NULL OR g.format = $3) AND ${deckScenarioFilterSql(2, 4, 5, 6, 7)})
         SELECT
           c.card,
@@ -2191,7 +2623,7 @@ export class PgTelemetryRepository {
         GROUP BY c.card
         ORDER BY plays DESC, c.card ASC
       `,
-      [pilotFilter, deck, format, opponent, partner, heroPilot, opponentPilot],
+      rollup ? [pilotFilter, deck, format] : [pilotFilter, deck, format, opponent, partner, heroPilot, opponentPilot],
     );
     return rows.rows.map((row) => {
       const gamesWith = Number(row.games_with);
@@ -2208,6 +2640,7 @@ export class PgTelemetryRepository {
   }
 
   private async deckStartingCardRows(
+    rollup: boolean,
     deck: string,
     pilotFilter: string[] | null,
     format: string | null = null,
@@ -2222,7 +2655,20 @@ export class PgTelemetryRepository {
       games_with: number;
       wins_with: number;
     }>(
-      `
+      rollup ? `
+        WITH ${bucketsCte(1)}
+        SELECT
+          r.card,
+          SUM(r.starts)::int AS starts,
+          SUM(r.games_with)::int AS games_with,
+          SUM(r.wins_with)::int AS wins_with
+        FROM stats_starting_card_rollup r
+        WHERE r.deck = $2
+          AND ($3::text IS NULL OR r.format = $3)
+          AND r.pilot_bucket IN (SELECT id FROM buckets)
+        GROUP BY r.card
+        ORDER BY starts DESC, r.card ASC
+      ` : `
         WITH broad_games AS (SELECT g.* FROM games g WHERE ${pilotFilterSql(1)} AND ($3::text IS NULL OR g.format = $3) AND ${deckScenarioFilterSql(2, 4, 5, 6, 7)})
         SELECT
           c.card,
@@ -2235,7 +2681,7 @@ export class PgTelemetryRepository {
         GROUP BY c.card
         ORDER BY starts DESC, c.card ASC
       `,
-      [pilotFilter, deck, format, opponent, partner, heroPilot, opponentPilot],
+      rollup ? [pilotFilter, deck, format] : [pilotFilter, deck, format, opponent, partner, heroPilot, opponentPilot],
     );
     return rows.rows.map((row) => {
       const gamesWith = Number(row.games_with);
@@ -2382,9 +2828,11 @@ export class PgTelemetryRepository {
       const affectedGameIds = gamesInfo.rows.map((r) => r.id);
       const affectedSubmissionIds = gamesInfo.rows.map((r) => r.submission_id);
 
-      // Step 2: Delete games (cascades to game_teams, game_seats, game_cards)
+      // Step 2: Delete games (cascades to game_teams, game_seats, game_cards),
+      // taking their contribution out of the rollups first.
       let deletedGames = 0;
       if (affectedGameIds.length > 0) {
+        await subtractRollups(client, affectedGameIds);
         const del = await client.query(`DELETE FROM games WHERE id = ANY($1)`, [affectedGameIds]);
         deletedGames = del.rowCount ?? 0;
 
@@ -2485,12 +2933,33 @@ function splitDeckId(deck: string): { deckId: string; deckVersion: string | null
   return { deckId: deck.slice(0, at), deckVersion: deck.slice(at + 1) };
 }
 
-function pilotFilterSql(paramIndex = 2): string {
-  // Pilot matching is prefix-based: allowlist entry 'bot:hard' matches
-  // 'bot:hard', 'bot:hard(64,2s)', 'bot:hard(64,5s)', etc.
-  // An exact pilot_kind match is also accepted (e.g. 'bot' matches any bot seat).
-  // Legacy must: entries remain supported for existing API consumers.
-  return `($${paramIndex}::text[] IS NULL OR (
+/**
+ * The pilot allowlist in `$paramIndex`, as a predicate over games `g`. A game
+ * written by pre-018 code during a rolling deploy has no bucket until the
+ * backfill runs; those get the per-game seat check instead. It is an
+ * uncorrelated set built once per query from the `games_unbucketed_idx`
+ * partial index (empty once backfilled): a per-row fallback inflates the
+ * estimated cost enough to trigger JIT, which alone took over a second.
+ */
+export function pilotFilterSql(paramIndex = 2): string {
+  return `($${paramIndex}::text[] IS NULL
+            OR g.pilot_bucket IN (
+              SELECT b.id FROM pilot_buckets b WHERE ${pilotBucketMatchSql(paramIndex)}
+            )
+            OR g.id IN (
+              SELECT u.id FROM games u WHERE u.pilot_bucket IS NULL AND ${seatPilotFilterSql(paramIndex)}
+            ))`;
+}
+
+/**
+ * The pilot allowlist evaluated against the seats of unbucketed game `u`
+ * directly (the pre-#87 form). The `u.pilot_bucket IS NULL` inside each
+ * subquery is deliberate: the extra outer reference stops the planner from
+ * turning them into hashed subplans over every seat, so they cost an index
+ * probe per unbucketed game.
+ */
+function seatPilotFilterSql(paramIndex: number): string {
+  return `(
               (
                 NOT EXISTS (
                   SELECT 1 FROM unnest($${paramIndex}::text[]) AS allowed(pilot)
@@ -2499,7 +2968,8 @@ function pilotFilterSql(paramIndex = 2): string {
                 OR NOT EXISTS (
                   SELECT 1
                   FROM game_seats s2
-                  WHERE s2.game_id = g.id
+                  WHERE s2.game_id = u.id
+                    AND u.pilot_bucket IS NULL
                     AND NOT EXISTS (
                       SELECT 1 FROM unnest($${paramIndex}::text[]) AS allowed(pilot)
                       WHERE allowed.pilot NOT LIKE 'must:%'
@@ -2514,11 +2984,78 @@ function pilotFilterSql(paramIndex = 2): string {
                   AND NOT EXISTS (
                     SELECT 1
                     FROM game_seats s3
-                    WHERE s3.game_id = g.id
+                    WHERE s3.game_id = u.id
+                      AND u.pilot_bucket IS NULL
                       AND (s3.pilot LIKE substring(required.pilot from 6) || '%' OR s3.pilot_kind = substring(required.pilot from 6))
                   )
               )
+            )`;
+}
+
+/**
+ * The pilot allowlist, as a predicate over one pilot bucket `b` (#87). It used
+ * to run per game against game_seats; a bucket holds the game's distinct
+ * (pilot, pilot_kind) seats, so the same test runs once per bucket instead.
+ *
+ * Pilot matching is prefix-based: allowlist entry 'bot:hard' matches
+ * 'bot:hard', 'bot:hard(64,2s)', 'bot:hard(64,5s)', etc.
+ * An exact pilot_kind match is also accepted (e.g. 'bot' matches any bot seat).
+ * Legacy must: entries remain supported for existing API consumers.
+ */
+function pilotBucketMatchSql(paramIndex: number): string {
+  return `($${paramIndex}::text[] IS NULL OR (
+              (
+                NOT EXISTS (
+                  SELECT 1 FROM unnest($${paramIndex}::text[]) AS allowed(pilot)
+                  WHERE allowed.pilot NOT LIKE 'must:%'
+                )
+                OR NOT EXISTS (
+                  SELECT 1
+                  FROM jsonb_array_elements(b.seats) AS seat(shape)
+                  WHERE NOT EXISTS (
+                    SELECT 1 FROM unnest($${paramIndex}::text[]) AS allowed(pilot)
+                    WHERE allowed.pilot NOT LIKE 'must:%'
+                      AND (seat.shape->>0 LIKE allowed.pilot || '%' OR seat.shape->>1 = allowed.pilot)
+                  )
+                )
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM unnest($${paramIndex}::text[]) AS required(pilot)
+                WHERE required.pilot LIKE 'must:%'
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements(b.seats) AS seat(shape)
+                    WHERE seat.shape->>0 LIKE substring(required.pilot from 6) || '%'
+                       OR seat.shape->>1 = substring(required.pilot from 6)
+                  )
+              )
             ))`;
+}
+
+/** heroOpponentGameFilterSql, as a predicate over one pilot bucket `b`. */
+function heroOpponentBucketSql(heroPilotParam: number, opponentPilotsParam: number): string {
+  return `($${heroPilotParam}::text IS NULL OR $${opponentPilotsParam}::text[] IS NULL OR EXISTS (
+              SELECT 1
+              FROM jsonb_array_elements(b.seats) AS seat(shape)
+              WHERE seat.shape->>0 = $${heroPilotParam}
+                AND EXISTS (
+                  SELECT 1
+                  FROM jsonb_array_elements_text(seat.shape->2) AS opponent(pilot)
+                  WHERE opponent.pilot = ANY($${opponentPilotsParam}::text[])
+                )
+            ))`;
+}
+
+/** CTE `buckets(id)`: the pilot buckets a rollup read keeps. */
+function bucketsCte(pilotsParam: number, heroPilotParam?: number, opponentPilotsParam?: number): string {
+  const hero = heroPilotParam && opponentPilotsParam
+    ? `AND ${heroOpponentBucketSql(heroPilotParam, opponentPilotsParam)}`
+    : '';
+  return `buckets AS (
+            SELECT b.id FROM pilot_buckets b
+            WHERE ${pilotBucketMatchSql(pilotsParam)} ${hero}
+          )`;
 }
 
 function heroOpponentGameFilterSql(heroPilotParam = 3, opponentPilotsParam = 4): string {
@@ -2639,6 +3176,7 @@ async function insertGame(
   receivedAt: Date,
   game: NormalizedGame,
   payload: GameSubmission,
+  pilotBucket: number,
   campaignId?: string | null,
   campaignGameIndex?: number | null,
 ): Promise<void> {
@@ -2649,13 +3187,13 @@ async function insertGame(
         format_label, boss, map, map_version, winner_team, draw, end_condition, turns,
         duration_seconds, first_player_team, engine_schema_version, engine_dsl_version,
         protocol_version, content_version, replay_hash, state_hash, payload,
-        campaign_id, campaign_game_index
+        campaign_id, campaign_game_index, pilot_bucket
       )
       VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8,
         $9, $10, $11, $12, $13, $14, $15, $16,
         $17, $18, $19, $20, $21, $22, $23, $24, $25::jsonb,
-        $26, $27
+        $26, $27, $28
       )
     `,
     [
@@ -2686,6 +3224,7 @@ async function insertGame(
       JSON.stringify(payload),
       campaignId ?? null,
       campaignGameIndex ?? null,
+      pilotBucket,
     ],
   );
 }
@@ -2702,7 +3241,7 @@ async function insertTeams(client: PoolClient, teams: NormalizedTeam[]): Promise
   }
 }
 
-async function insertSeats(client: PoolClient, seats: NormalizedSeat[]): Promise<void> {
+async function insertSeats(client: PoolClient, seats: NormalizedSeat[], pilotBucket: number): Promise<void> {
   for (const seat of seats) {
     await client.query(
       `
@@ -2710,13 +3249,13 @@ async function insertSeats(client: PoolClient, seats: NormalizedSeat[]): Promise
           game_id, team_index, seat_index, runtime_player_id, deck, deck_id, deck_version,
           hero_id, hero_name, pilot, pilot_kind, bot_id, bot_difficulty, bot_version,
           bot_execution, deck_rules_hash, player_id, first_player, won, final_health, final_deck_count,
-          final_hand_count, final_discard_count
+          final_hand_count, final_discard_count, pilot_bucket
         )
         VALUES (
           $1, $2, $3, $4, $5, $6, $7,
           $8, $9, $10, $11, $12, $13, $14,
           $15::jsonb, $16, $17, $18, $19, $20, $21,
-          $22, $23
+          $22, $23, $24
         )
       `,
       [
@@ -2743,20 +3282,26 @@ async function insertSeats(client: PoolClient, seats: NormalizedSeat[]): Promise
         seat.finalDeckCount,
         seat.finalHandCount,
         seat.finalDiscardCount,
+        pilotBucket,
       ],
     );
   }
 }
 
 
-async function insertStartingCards(client: PoolClient, cards: NormalizedStartingCard[]): Promise<void> {
+async function insertStartingCards(
+  client: PoolClient,
+  cards: NormalizedStartingCard[],
+  format: string,
+  pilotBucket: number,
+): Promise<void> {
   for (const card of cards) {
     await client.query(
       `
         INSERT INTO game_starting_cards (
-          game_id, team_index, seat_index, card_index, deck, deck_id, card, seat_won
+          game_id, team_index, seat_index, card_index, deck, deck_id, card, seat_won, format, pilot_bucket
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       `,
       [
         card.gameId,
@@ -2767,20 +3312,22 @@ async function insertStartingCards(client: PoolClient, cards: NormalizedStarting
         card.deckId,
         card.card,
         card.seatWon,
+        format,
+        pilotBucket,
       ],
     );
   }
 }
 
-async function insertCards(client: PoolClient, cards: NormalizedCard[]): Promise<void> {
+async function insertCards(client: PoolClient, cards: NormalizedCard[], format: string, pilotBucket: number): Promise<void> {
   for (const card of cards) {
     await client.query(
       `
         INSERT INTO game_cards (
           game_id, event_index, team_index, seat_index, deck, deck_id,
-          card, turn, context, context_bucket, seat_won
+          card, turn, context, context_bucket, seat_won, format, pilot_bucket
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       `,
       [
         card.gameId,
@@ -2794,6 +3341,8 @@ async function insertCards(client: PoolClient, cards: NormalizedCard[]): Promise
         card.context,
         card.contextBucket,
         card.seatWon,
+        format,
+        pilotBucket,
       ],
     );
   }
@@ -2805,4 +3354,21 @@ function sourceFromPayload(payload: unknown): string | null {
     if (typeof source === 'string') return source;
   }
   return null;
+}
+
+/**
+ * MODE() over rollup rows: the `value` with the most games among the `source`
+ * rows sharing the outer row's group keys, ties to the smallest value — which
+ * is how MODE() WITHIN GROUP (ORDER BY value) breaks them.
+ */
+function modeSql(source: string, groupKeys: string | string[], value: string, outer = 'd', weight = 'games'): string {
+  const keys = Array.isArray(groupKeys) ? groupKeys : [groupKeys];
+  return `(
+            SELECT m.${value}
+            FROM ${source} m
+            WHERE ${keys.map((key) => `m.${key} = ${outer}.${key}`).join(' AND ')}
+            GROUP BY m.${value}
+            ORDER BY SUM(m.${weight}) DESC, m.${value} ASC
+            LIMIT 1
+          )`;
 }
