@@ -89,14 +89,20 @@ let allPilots = [];
 let matrixFocus = null; // full deck id of the focused row on the Matchups tab, or null for the grid
 let matrixMetric = 'wr'; // 'wr' | 'games' — what the matrix cells display
 let matrixSampleTarget = 50; // games needed for full-confidence color in 'games' mode
-// Very short client cache so toggling filters back and forth is instant without
-// hammering the (multi-query) dashboard endpoint. Data still refreshes within TTL.
-const dashCache = new Map();
-const DASH_TTL_MS = 15000;
-const DECK_DETAIL_TTL_MS = 60000;
+// Client cache so toggling tabs and filters back and forth reuses payloads per
+// filter key without hammering the (multi-query) stats endpoints. Fresh for
+// DASH_TTL_MS (the server caches as long); up to STALE_MAX_MS an older payload
+// still renders immediately while a background fetch revalidates it.
+const jsonCache = new Map(); // url -> { at, json, text, pending }
+const DASH_TTL_MS = 60000;
+const STALE_MAX_MS = 10 * 60 * 1000;
+const DECK_DETAIL_TTL_MS = 120000;
 const deckDetailCache = new Map();
+// Above the early-paint renderIndependentTab() call, which reads it (TDZ).
+let sandboxWindowHours = 168;
 
 renderTabs();
+renderIndependentTab();
 loadDashboard().catch(showError);
 
 document.addEventListener('keydown', (event) => {
@@ -311,20 +317,62 @@ async function fetchDeckDetail(deck, extra = {}, allowNotFound = false) {
 }
 
 // ---------- data loading ----------
+function hasCachedJson(url) {
+  const entry = jsonCache.get(url);
+  return Boolean(entry?.json) && Date.now() - entry.at < STALE_MAX_MS;
+}
+
+// Stale-while-revalidate: a fresh payload resolves straight from the cache; a
+// stale one resolves immediately too and refetches in the background, calling
+// onRevalidated only when the payload actually changed. Concurrent callers for
+// one url share a single request.
+function cachedJson(url, onRevalidated = null) {
+  const entry = jsonCache.get(url);
+  const age = entry?.json ? Date.now() - entry.at : Infinity;
+  if (age < DASH_TTL_MS) return Promise.resolve(entry.json);
+  if (age < STALE_MAX_MS) {
+    revalidateJson(url)
+      .then((changed) => { if (changed && onRevalidated) onRevalidated(); })
+      .catch(() => {}); // keep showing the stale payload
+    return Promise.resolve(entry.json);
+  }
+  return revalidateJson(url).then(() => jsonCache.get(url).json);
+}
+
+function revalidateJson(url) {
+  const entry = jsonCache.get(url);
+  if (entry?.pending) return entry.pending;
+  const pending = fetchJson(url).then((json) => {
+    const text = JSON.stringify(json);
+    jsonCache.set(url, { at: Date.now(), json, text });
+    return !entry?.json || entry.text !== text;
+  }, (error) => {
+    if (entry?.json) jsonCache.set(url, { at: entry.at, json: entry.json, text: entry.text });
+    else jsonCache.delete(url);
+    throw error;
+  });
+  jsonCache.set(url, { ...entry, pending });
+  return pending;
+}
+
+// Tabs that do not read the dashboard payload paint without waiting on it; the
+// dashboard load re-renders them from the (by then warm) cache.
+function renderIndependentTab() {
+  if (state.format !== DEFAULT_FORMAT || state.deck) return;
+  if (state.tab === 'sandbox') renderSandbox();
+  else if (state.tab === 'submissions') renderSubmissions();
+}
+
 async function loadDashboard() {
   const requestId = ++dashboardLoadSequence;
-  setStatus('Loading telemetry…');
   const bootstrappingDefaultPilots = !state.hasExplicitExclusions && allPilots.length === 0;
   const params = statsQuery();
   const key = params.toString();
-  const cached = dashCache.get(key);
-  let json;
-  if (cached && Date.now() - cached.at < DASH_TTL_MS) {
-    json = cached.json;
-  } else {
-    json = await fetchJson(`/v1/stats/dashboard${key ? `?${key}` : ''}`);
-    dashCache.set(key, { at: Date.now(), json });
-  }
+  const url = `/v1/stats/dashboard${key ? `?${key}` : ''}`;
+  if (!hasCachedJson(url)) setStatus('Loading telemetry…');
+  const json = await cachedJson(url, () => {
+    if (requestId === dashboardLoadSequence) loadDashboard().catch(showError);
+  });
   if (requestId !== dashboardLoadSequence) return;
   const previousPilots = allPilots;
   allPilots = (json.pilots || []).map((row) => row.pilot);
@@ -1214,8 +1262,6 @@ function formatCard(row) {
 }
 
 // ---------- pilot comparisons ----------
-const pilotComparisonCache = new Map();
-
 function initializePilotComparison() {
   const comparison = state.pilotComparison || (state.pilotComparison = {});
   const choose = (preferred, excluded = new Set()) => preferred.find((pilot) => allPilots.includes(pilot) && !excluded.has(pilot))
@@ -1287,12 +1333,9 @@ async function fetchPilotComparison(comparison) {
   });
   if (comparison.hero) params.set('hero', comparison.hero);
   if (comparison.opponent) params.set('opponent', comparison.opponent);
-  const key = params.toString();
-  const cached = pilotComparisonCache.get(key);
-  if (cached && Date.now() - cached.at < DASH_TTL_MS) return cached.json;
-  const json = await fetchJson(`/v1/stats/pilot-comparison?${key}`);
-  pilotComparisonCache.set(key, { at: Date.now(), json });
-  return json;
+  return cachedJson(`/v1/stats/pilot-comparison?${params}`, () => {
+    if (state.tab === 'pilot-comparisons' && !state.deck && current) renderPilotComparisons(current);
+  });
 }
 
 function pilotComparisonTable(detail) {
@@ -1373,7 +1416,6 @@ function pilotGapBar(delta, row, detail) {
 }
 
 // ---------- scenario explorer ----------
-const scenarioCache = new Map();
 
 async function renderScenario(data) {
   const decks = [...(data.decks || [])].sort((a, b) => a.label.localeCompare(b.label));
@@ -1436,12 +1478,9 @@ async function fetchScenario(scenario) {
   if (scenario.enemyB) params.set('enemyB', scenario.enemyB);
   const pilots = pilotQueryValues();
   if (pilots.length) params.set('pilots', pilots.join(','));
-  const key = params.toString();
-  const cached = scenarioCache.get(key);
-  if (cached && Date.now() - cached.at < DASH_TTL_MS) return cached.json;
-  const json = await fetchJson(`/v1/stats/scenario?${key}`);
-  scenarioCache.set(key, { at: Date.now(), json });
-  return json;
+  return cachedJson(`/v1/stats/scenario?${params}`, () => {
+    if (state.tab === 'scenario' && !state.deck && current) renderScenario(current);
+  });
 }
 
 function scenarioTable(detail, scenario) {
@@ -1557,13 +1596,12 @@ function submissionTabButton(key, label) {
   return `<button class="subtab${state.subtab === key ? ' active' : ''}" data-subtab="${key}" role="tab" aria-selected="${state.subtab === key}" type="button">${esc(label)}</button>`;
 }
 
-let sandboxWindowHours = 168;
-
 async function renderSandbox() {
-  els.view.innerHTML = card(empty('Loading sandbox activity…'), 'panel');
+  const url = `/v1/stats/sandbox?windowHours=${sandboxWindowHours}`;
+  if (!hasCachedJson(url)) els.view.innerHTML = card(empty('Loading sandbox activity…'), 'panel');
   let data;
   try {
-    data = await fetchJson(`/v1/stats/sandbox?windowHours=${sandboxWindowHours}`);
+    data = await cachedJson(url, () => { if (state.tab === 'sandbox' && !state.deck) renderSandbox(); });
   } catch (error) {
     els.view.innerHTML = card(empty('Failed to load sandbox stats: ' + (error.message || '')), 'panel');
     return;
@@ -1648,20 +1686,20 @@ function sandboxHourOfWeek(cells) {
 
 async function renderRecent() {
   const target = els.view.querySelector('[data-submissions-panel="recent"]') || els.view;
-  target.innerHTML = card(empty('Loading recent games…'), 'panel');
+  const params = statsQuery();
+  const listParams = new URLSearchParams(params);
+  listParams.set('limit', '50');
+  // Hourly chart is unfiltered (format-only, no pilot filter) so it shows all submissions
+  const hourlyParams = new URLSearchParams();
+  if (state.format) hourlyParams.set('format', state.format);
+  const listUrl = `/v1/stats/recent?${listParams}`;
+  const hourlyUrl = `/v1/stats/recent/hourly${hourlyParams.toString() ? `?${hourlyParams}` : ''}`;
+  if (!hasCachedJson(listUrl) || !hasCachedJson(hourlyUrl)) target.innerHTML = card(empty('Loading recent games…'), 'panel');
+  const rerender = () => { if (state.tab === 'submissions' && state.subtab === 'recent' && !state.deck) renderSubmissions(); };
   let data;
   let hourly;
   try {
-    const params = statsQuery();
-    const listParams = new URLSearchParams(params);
-    listParams.set('limit', '50');
-    // Hourly chart is unfiltered (format-only, no pilot filter) so it shows all submissions
-    const hourlyParams = new URLSearchParams();
-    if (state.format) hourlyParams.set('format', state.format);
-    [data, hourly] = await Promise.all([
-      fetchJson(`/v1/stats/recent?${listParams}`),
-      fetchJson(`/v1/stats/recent/hourly${hourlyParams.toString() ? `?${hourlyParams}` : ''}`),
-    ]);
+    [data, hourly] = await Promise.all([cachedJson(listUrl, rerender), cachedJson(hourlyUrl, rerender)]);
   } catch (error) {
     target.innerHTML = card(empty('Failed to load recent games: ' + (error.message || '')), 'panel');
     return;
@@ -1741,13 +1779,14 @@ function hourLabel(iso) {
 
 async function renderSources() {
   const target = els.view.querySelector('[data-submissions-panel="sources"]') || els.view;
-  target.innerHTML = card(empty('Loading sources…'), 'panel');
+  // Sources are unfiltered (format-only, no pilot filter) so they show all submissions
+  const sourceParams = new URLSearchParams();
+  if (state.format) sourceParams.set('format', state.format);
+  const url = `/v1/stats/sources${sourceParams.toString() ? `?${sourceParams}` : ''}`;
+  if (!hasCachedJson(url)) target.innerHTML = card(empty('Loading sources…'), 'panel');
   let data;
   try {
-    // Sources are unfiltered (format-only, no pilot filter) so they show all submissions
-    const sourceParams = new URLSearchParams();
-    if (state.format) sourceParams.set('format', state.format);
-    data = await fetchJson(`/v1/stats/sources${sourceParams.toString() ? `?${sourceParams}` : ''}`);
+    data = await cachedJson(url, () => { if (state.tab === 'submissions' && state.subtab === 'sources' && !state.deck) renderSubmissions(); });
   } catch (error) {
     target.innerHTML = card(empty('Failed to load sources: ' + (error.message || '')), 'panel');
     return;
