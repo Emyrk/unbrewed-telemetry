@@ -28,6 +28,7 @@ import {
 import { parseBearer, verifySecret, hasScope, ALL_SCOPES, type Scope } from './bearer-auth.js';
 import { SANDBOX_DEFAULT_WINDOW_HOURS, SANDBOX_MAX_WINDOW_HOURS } from '../stats/sandbox.js';
 import { serveDashboardAsset } from './static.js';
+import { StatsCache, etagMatches, statsCacheKey } from './stats-cache.js';
 
 const RECENT_HOURLY_CACHE_MS = 5 * 60 * 1000;
 
@@ -38,6 +39,9 @@ interface RecentHourlyCacheEntry {
 }
 
 const recentHourlyCache = new Map<string, RecentHourlyCacheEntry>();
+
+/** Bound on distinct filter combinations held by the stats response cache. */
+const STATS_CACHE_MAX_ENTRIES = 500;
 
 export interface AppConfig {
   telemetrySecret: string;
@@ -53,6 +57,11 @@ export interface AppConfig {
   secureCookies: boolean;
   /** Shared secret for the server-to-server accounts read API (#52). */
   accountsReadToken: string;
+  /**
+   * TTL for the aggregate stats response cache (#86). Unset or 0 stores nothing
+   * (concurrent loads are still shared); `main.ts` sets it from `STATS_CACHE_TTL_MS`.
+   */
+  statsCacheTtlMs?: number;
 }
 
 export interface AppDeps {
@@ -70,8 +79,13 @@ interface BearerContext {
 }
 
 export function createApp({ repo, cpRepo, config }: AppDeps): (req: IncomingMessage, res: ServerResponse) => void {
+  const statsCache = new StatsCache({
+    ttlMs: config.statsCacheTtlMs ?? 0,
+    maxEntries: STATS_CACHE_MAX_ENTRIES,
+    nowMs: () => config.now().getTime(),
+  });
   return (req, res) => {
-    void handleRequest(req, res, repo, cpRepo, config).catch((error) => {
+    void handleRequest(req, res, repo, cpRepo, config, statsCache).catch((error) => {
       console.error('[telemetry] unhandled request error', error);
       sendJson(res, 500, { ok: false, code: 'SERVER_ERROR', message: 'Internal server error' });
     });
@@ -84,6 +98,7 @@ async function handleRequest(
   repo: PgTelemetryRepository,
   cpRepo: ControlPlaneRepository,
   config: AppConfig,
+  statsCache: StatsCache,
 ): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://localhost');
 
@@ -122,7 +137,7 @@ async function handleRequest(
   }
 
   if (req.method === 'GET' && url.pathname === '/v1/stats/dashboard') {
-    await handleDashboardStats(url, res, repo, config);
+    await handleDashboardStats(req, url, res, repo, config, statsCache);
     return;
   }
 
@@ -132,17 +147,17 @@ async function handleRequest(
   }
 
   if (req.method === 'GET' && url.pathname === '/v1/stats/decks') {
-    await handleDeckStats(url, res, repo);
+    await handleDeckStats(req, url, res, repo, statsCache);
     return;
   }
 
   if (req.method === 'GET' && url.pathname === '/v1/stats/deck') {
-    await handleDeckDetail(url, res, repo);
+    await handleDeckDetail(req, url, res, repo, statsCache);
     return;
   }
 
   if (req.method === 'GET' && url.pathname === '/v1/stats/synergy') {
-    await handleSynergyMatchups(url, res, repo);
+    await handleSynergyMatchups(req, url, res, repo, statsCache);
     return;
   }
 
@@ -152,17 +167,17 @@ async function handleRequest(
   }
 
   if (req.method === 'GET' && url.pathname === '/v1/stats/pilot-comparison') {
-    await handlePilotComparison(url, res, repo);
+    await handlePilotComparison(req, url, res, repo, statsCache);
     return;
   }
 
   if (req.method === 'GET' && url.pathname === '/v1/stats/scenario') {
-    await handleScenarioExplorer(url, res, repo);
+    await handleScenarioExplorer(req, url, res, repo, statsCache);
     return;
   }
 
   if (req.method === 'GET' && url.pathname === '/v1/stats/sources') {
-    await handleSourceStats(url, res, repo);
+    await handleSourceStats(req, url, res, repo, statsCache);
     return;
   }
 
@@ -193,17 +208,17 @@ async function handleRequest(
 
   // ---- Accounts read API (server-to-server, ACCOUNTS_READ_TOKEN) ----
   if (req.method === 'GET' && url.pathname === '/accounts/leaderboard') {
-    await handleAccountsLeaderboard(req, url, res, repo, config);
+    await handleAccountsLeaderboard(req, url, res, repo, config, statsCache);
     return;
   }
 
   if (req.method === 'GET' && url.pathname === '/accounts/community') {
-    await handleAccountsCommunity(req, url, res, repo, config);
+    await handleAccountsCommunity(req, url, res, repo, config, statsCache);
     return;
   }
 
   if (req.method === 'GET' && url.pathname.startsWith('/accounts/heroes/')) {
-    await handleAccountsHero(req, url, res, repo, config);
+    await handleAccountsHero(req, url, res, repo, config, statsCache);
     return;
   }
 
@@ -679,7 +694,13 @@ async function handleBotExecutionStats(url: URL, res: ServerResponse, repo: PgTe
   sendJson(res, 200, { ok: true, ...result });
 }
 
-async function handlePilotComparison(url: URL, res: ServerResponse, repo: PgTelemetryRepository): Promise<void> {
+async function handlePilotComparison(
+  req: IncomingMessage,
+  url: URL,
+  res: ServerResponse,
+  repo: PgTelemetryRepository,
+  statsCache: StatsCache,
+): Promise<void> {
   const pilotA = blankToNull(url.searchParams.get('pilotA'));
   const pilotB = blankToNull(url.searchParams.get('pilotB'));
   const opponentPilot = blankToNull(url.searchParams.get('opponentPilot'));
@@ -695,19 +716,24 @@ async function handlePilotComparison(url: URL, res: ServerResponse, repo: PgTele
     sendJson(res, 400, { ok: false, code: 'SAME_PILOT', message: 'pilotA and pilotB must be different' });
     return;
   }
-  const result = await repo.pilotComparison({
+  await sendCachedStats(req, url, res, statsCache, 'public', async () => ok200(await repo.pilotComparison({
     pilotA,
     pilotB,
     hero: blankToNull(url.searchParams.get('hero')),
     opponentPilot,
     opponent: blankToNull(url.searchParams.get('opponent')),
-  });
-  sendJson(res, 200, { ok: true, ...result });
+  })));
 }
 
-async function handleScenarioExplorer(url: URL, res: ServerResponse, repo: PgTelemetryRepository): Promise<void> {
+async function handleScenarioExplorer(
+  req: IncomingMessage,
+  url: URL,
+  res: ServerResponse,
+  repo: PgTelemetryRepository,
+  statsCache: StatsCache,
+): Promise<void> {
   const filters = statsFiltersFromUrl(url);
-  const result = await repo.scenarioExplorer({
+  await sendCachedStats(req, url, res, statsCache, 'public', async () => ok200(await repo.scenarioExplorer({
     format: filters.format,
     map: blankToNull(url.searchParams.get('map')),
     deck: blankToNull(url.searchParams.get('deck')),
@@ -715,13 +741,18 @@ async function handleScenarioExplorer(url: URL, res: ServerResponse, repo: PgTel
     enemyA: blankToNull(url.searchParams.get('enemyA')),
     enemyB: blankToNull(url.searchParams.get('enemyB')),
     pilots: filters.pilots,
-  });
-  sendJson(res, 200, { ok: true, ...result });
+  })));
 }
 
-async function handleSourceStats(url: URL, res: ServerResponse, repo: PgTelemetryRepository): Promise<void> {
-  const result = await repo.sourceStats(statsFiltersFromUrl(url));
-  sendJson(res, 200, { ok: true, ...result });
+async function handleSourceStats(
+  req: IncomingMessage,
+  url: URL,
+  res: ServerResponse,
+  repo: PgTelemetryRepository,
+  statsCache: StatsCache,
+): Promise<void> {
+  const filters = statsFiltersFromUrl(url);
+  await sendCachedStats(req, url, res, statsCache, 'public', async () => ok200(await repo.sourceStats(filters)));
 }
 
 async function handleRecentHourly(
@@ -758,26 +789,33 @@ async function handleRecentGames(url: URL, res: ServerResponse, repo: PgTelemetr
   sendJson(res, 200, { ok: true, ...result });
 }
 
-async function handleSynergyMatchups(url: URL, res: ServerResponse, repo: PgTelemetryRepository): Promise<void> {
+async function handleSynergyMatchups(
+  req: IncomingMessage,
+  url: URL,
+  res: ServerResponse,
+  repo: PgTelemetryRepository,
+  statsCache: StatsCache,
+): Promise<void> {
   const deckA = blankToNull(url.searchParams.get('deckA'));
   const deckB = blankToNull(url.searchParams.get('deckB'));
   if (!deckA || !deckB) {
     sendJson(res, 400, { ok: false, code: 'MISSING_PAIR', message: 'deckA and deckB query parameters are required' });
     return;
   }
-  const result = await repo.synergyPairMatchups(deckA, deckB, statsFiltersFromUrl(url));
-  sendJson(res, 200, { ok: true, ...result });
+  const filters = statsFiltersFromUrl(url);
+  await sendCachedStats(req, url, res, statsCache, 'public', async () => ok200(await repo.synergyPairMatchups(deckA, deckB, filters)));
 }
 
 async function handleDashboardStats(
+  req: IncomingMessage,
   url: URL,
   res: ServerResponse,
   repo: PgTelemetryRepository,
   config: AppConfig,
+  statsCache: StatsCache,
 ): Promise<void> {
   const filters = statsFiltersFromUrl(url);
-  const stats = await repo.dashboardStats(filters, config.now());
-  sendJson(res, 200, { ok: true, ...stats });
+  await sendCachedStats(req, url, res, statsCache, 'public', async () => ok200(await repo.dashboardStats(filters, config.now())));
 }
 
 /** Sandbox usage (#84). Same (public, aggregate-only) access as the dashboard. */
@@ -801,23 +839,37 @@ async function handleSandboxStats(
   sendJson(res, 200, { ok: true, ...stats });
 }
 
-async function handleDeckStats(url: URL, res: ServerResponse, repo: PgTelemetryRepository): Promise<void> {
-  const stats = await repo.deckStats(statsFiltersFromUrl(url));
-  sendJson(res, 200, { ok: true, ...stats });
+async function handleDeckStats(
+  req: IncomingMessage,
+  url: URL,
+  res: ServerResponse,
+  repo: PgTelemetryRepository,
+  statsCache: StatsCache,
+): Promise<void> {
+  const filters = statsFiltersFromUrl(url);
+  await sendCachedStats(req, url, res, statsCache, 'public', async () => ok200(await repo.deckStats(filters)));
 }
 
-async function handleDeckDetail(url: URL, res: ServerResponse, repo: PgTelemetryRepository): Promise<void> {
+async function handleDeckDetail(
+  req: IncomingMessage,
+  url: URL,
+  res: ServerResponse,
+  repo: PgTelemetryRepository,
+  statsCache: StatsCache,
+): Promise<void> {
   const deck = blankToNull(url.searchParams.get('deck'));
   if (!deck) {
     sendJson(res, 400, { ok: false, code: 'MISSING_DECK', message: 'deck query parameter is required' });
     return;
   }
-  const detail = await repo.deckDetail(deck, statsFiltersFromUrl(url));
-  if (!detail.found) {
-    sendJson(res, 404, { ok: false, code: 'DECK_NOT_FOUND', message: 'No games for this deck under the current filters' });
-    return;
-  }
-  sendJson(res, 200, { ok: true, ...detail });
+  const filters = statsFiltersFromUrl(url);
+  await sendCachedStats(req, url, res, statsCache, 'public', async () => {
+    const detail = await repo.deckDetail(deck, filters);
+    if (!detail.found) {
+      return { status: 404, payload: { ok: false, code: 'DECK_NOT_FOUND', message: 'No games for this deck under the current filters' } };
+    }
+    return ok200(detail);
+  });
 }
 
 function statsFiltersFromUrl(url: URL): {
@@ -895,6 +947,56 @@ function cacheHeaders(ttlMs: number): Record<string, string> {
   return {
     'cache-control': `public, max-age=${Math.floor(ttlMs / 1000)}, stale-while-revalidate=${Math.floor(ttlMs / 1000)}`,
   };
+}
+
+function ok200(result: object): { status: number; payload: unknown } {
+  return { status: 200, payload: { ok: true, ...result } };
+}
+
+/**
+ * Serve an aggregate stats response through the per-app TTL cache (#86) with a
+ * weak ETag, answering a matching `If-None-Match` with 304. Callers validate and
+ * authenticate first, so only the expensive load sits behind the cache. Accounts
+ * routes pass `private`: they are bearer-authenticated and must not sit in a
+ * shared cache. Non-200 loads (a deck 404) are sent `no-store` and never cached.
+ */
+async function sendCachedStats(
+  req: IncomingMessage,
+  url: URL,
+  res: ServerResponse,
+  statsCache: StatsCache,
+  visibility: 'public' | 'private',
+  load: () => Promise<{ status: number; payload: unknown }>,
+): Promise<void> {
+  const { response, hit } = await statsCache.get(statsCacheKey(url), load);
+  const cacheStatus = { 'x-stats-cache': hit ? 'hit' : 'miss' };
+  if (response.status !== 200) {
+    res.writeHead(response.status, {
+      'content-type': 'application/json; charset=utf-8',
+      'content-length': Buffer.byteLength(response.body),
+      'cache-control': 'no-store',
+      ...cacheStatus,
+    });
+    res.end(response.body);
+    return;
+  }
+  const seconds = Math.floor(statsCache.ttlMs / 1000);
+  const headers = {
+    'cache-control': `${visibility}, max-age=${seconds}, stale-while-revalidate=${seconds}`,
+    etag: response.etag,
+    ...cacheStatus,
+  };
+  if (etagMatches(header(req, 'if-none-match') ?? undefined, response.etag)) {
+    res.writeHead(304, headers);
+    res.end();
+    return;
+  }
+  res.writeHead(200, {
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': Buffer.byteLength(response.body),
+    ...headers,
+  });
+  res.end(response.body);
 }
 
 type BodyResult =
@@ -1031,6 +1133,7 @@ async function handleAccountsLeaderboard(
   res: ServerResponse,
   repo: PgTelemetryRepository,
   config: AppConfig,
+  statsCache: StatsCache,
 ): Promise<void> {
   const auth = verifyAccountsReadAuth(req.headers, config.accountsReadToken);
   if (!auth.ok) {
@@ -1054,7 +1157,10 @@ async function handleAccountsLeaderboard(
     }
   }
 
-  sendJson(res, 200, { ok: true, players: await repo.leaderboard({ limit, since }) });
+  await sendCachedStats(req, url, res, statsCache, 'private', async () => ({
+    status: 200,
+    payload: { ok: true, players: await repo.leaderboard({ limit, since }) },
+  }));
 }
 
 /**
@@ -1085,6 +1191,7 @@ async function handleAccountsCommunity(
   res: ServerResponse,
   repo: PgTelemetryRepository,
   config: AppConfig,
+  statsCache: StatsCache,
 ): Promise<void> {
   const auth = verifyAccountsReadAuth(req.headers, config.accountsReadToken);
   if (!auth.ok) {
@@ -1098,7 +1205,7 @@ async function handleAccountsCommunity(
     return;
   }
 
-  sendJson(res, 200, { ok: true, ...(await repo.community({ window, now: config.now() })) });
+  await sendCachedStats(req, url, res, statsCache, 'private', async () => ok200(await repo.community({ window, now: config.now() })));
 }
 
 /**
@@ -1114,6 +1221,7 @@ async function handleAccountsHero(
   res: ServerResponse,
   repo: PgTelemetryRepository,
   config: AppConfig,
+  statsCache: StatsCache,
 ): Promise<void> {
   const auth = verifyAccountsReadAuth(req.headers, config.accountsReadToken);
   if (!auth.ok) {
@@ -1145,7 +1253,7 @@ async function handleAccountsHero(
     return;
   }
 
-  sendJson(res, 200, { ok: true, ...(await repo.heroCommunity(heroId, { window, now: config.now() })) });
+  await sendCachedStats(req, url, res, statsCache, 'private', async () => ok200(await repo.heroCommunity(heroId, { window, now: config.now() })));
 }
 
 /**

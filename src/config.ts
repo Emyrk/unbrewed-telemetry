@@ -44,6 +44,8 @@ export interface Config {
   bodyLimitBytes: number;
   /** `POST /v1/replays` body cap (`MAX_REPLAY_BODY_BYTES`), 2 MB by default. */
   replayBodyLimitBytes: number;
+  /** Server-side TTL for the aggregate stats routes (`STATS_CACHE_TTL_MS`), 60 s by default. */
+  statsCacheTtlMs: number;
   runMigrationsOnStart: boolean;
   discordClientId: string;
   discordClientSecret: string;
@@ -82,6 +84,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     allowUnauthenticatedIngest,
     bodyLimitBytes: intFromEnv(env.MAX_BODY_BYTES, 1024 * 1024),
     replayBodyLimitBytes: intFromEnv(env.MAX_REPLAY_BODY_BYTES, 2 * 1024 * 1024),
+    statsCacheTtlMs: intFromEnv(env.STATS_CACHE_TTL_MS, 60 * 1000),
     runMigrationsOnStart: boolFromEnv(env.RUN_MIGRATIONS_ON_START, false),
     discordClientId: env.DISCORD_CLIENT_ID ?? '',
     discordClientSecret: env.DISCORD_CLIENT_SECRET ?? '',
