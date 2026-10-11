@@ -87,10 +87,16 @@ describeDb('seed-sim-campaign idempotency', () => {
       `INSERT INTO game_submissions (id, idempotency_key, payload, validation_status)
        VALUES ('sub-3', 'idem-3', '{}'::jsonb, 'valid')`,
     );
+    // A seatless game's pilot bucket is the empty shape (migration 018).
     await pool.query(
-      `INSERT INTO games (id, submission_id, schema_version, received_at, source, format, map,
-                          winner_team, payload, campaign_id, campaign_game_index)
-       VALUES ('done-3', 'sub-3', 1, now(), 'test', 'duel', 'mended-drum', 0, '{}'::jsonb, $1, 3)`,
+      `WITH bucket AS (
+         INSERT INTO pilot_buckets (seats) VALUES ('[]') ON CONFLICT (seats) DO UPDATE SET seats = EXCLUDED.seats
+         RETURNING id
+       )
+       INSERT INTO games (id, submission_id, schema_version, received_at, source, format, map,
+                          winner_team, payload, campaign_id, campaign_game_index, pilot_bucket)
+       SELECT 'done-3', 'sub-3', 1, now(), 'test', 'duel', 'mended-drum', 0, '{}'::jsonb, $1, 3, bucket.id
+       FROM bucket`,
       [campaignId],
     );
     await pool.query('DELETE FROM sim_jobs WHERE campaign_id = $1 AND game_index = 3', [campaignId]);
