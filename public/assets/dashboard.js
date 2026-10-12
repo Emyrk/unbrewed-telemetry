@@ -1596,6 +1596,40 @@ function submissionTabButton(key, label) {
   return `<button class="subtab${state.subtab === key ? ' active' : ''}" data-subtab="${key}" role="tab" aria-selected="${state.subtab === key}" type="button">${esc(label)}</button>`;
 }
 
+const SANDBOX_DECK_SITES = {
+  'unmatched-club': { label: 'the-unmatched.club', hosts: ['the-unmatched.club', 'www.the-unmatched.club'] },
+  'unmatched-cards': { label: 'unmatched.cards', hosts: ['unmatched.cards', 'www.unmatched.cards'] },
+  labs: { label: 'Unmatched Labs', hosts: ['unmatchedlabs.com', 'www.unmatchedlabs.com'] },
+};
+
+// A deck name as a link to its source page, or plain text when the source or
+// URL is unknown (or does not parse / live on that source's site).
+function sandboxDeckName(row) {
+  const name = esc(row.heroName);
+  const site = SANDBOX_DECK_SITES[row.deckSource];
+  if (!site || !row.deckUrl) return name;
+  let url;
+  try { url = new URL(row.deckUrl); } catch { return name; }
+  if (url.protocol !== 'https:' || !site.hosts.includes(url.hostname)) return name;
+  return `<a href="${esc(url.href)}" target="_blank" rel="noopener noreferrer" title="Open on ${esc(site.label)}">${name}</a>`;
+}
+
+function sandboxFandecks(rows, windowLabel) {
+  return `
+    <div class="card panel">
+      <div class="section-head">
+        <div class="section-title">Fandecks in use</div>
+        <div class="kicker">${number(rows.length)} decks · human players · ${esc(windowLabel)}</div>
+      </div>
+      ${rows.length ? `
+        <div class="sandbox-fandecks">
+          <div class="sandbox-fandeck head"><span>Deck</span><span>Source</span><span>Games</span></div>
+          ${rows.map((row) => `<div class="sandbox-fandeck"><span>${sandboxDeckName(row)}</span><span>${esc((SANDBOX_DECK_SITES[row.deckSource] || { label: row.deckSource }).label)}</span><strong>${number(row.games)}</strong></div>`).join('')}
+        </div>`
+        : empty('No fandecks with a known source in this window.')}
+    </div>`;
+}
+
 async function renderSandbox() {
   const url = `/v1/stats/sandbox?windowHours=${sandboxWindowHours}`;
   if (!hasCachedJson(url)) els.view.innerHTML = card(empty('Loading sandbox activity…'), 'panel');
@@ -1632,10 +1666,11 @@ async function renderSandbox() {
           <div class="kicker">Distinct players · ${esc(windowLabel)}</div>
         </div>
         <div class="list tight">${(data.topHeroes || []).length
-          ? data.topHeroes.map((row) => `<div class="sandbox-hero"><span>${esc(row.heroName)}</span><strong>${number(row.players)}</strong></div>`).join('')
+          ? data.topHeroes.map((row) => `<div class="sandbox-hero"><span>${sandboxDeckName(row)}</span><strong>${number(row.players)}</strong></div>`).join('')
           : empty('No heroes seen in this window.')}</div>
       </div>
-    </div>`;
+    </div>
+    ${sandboxFandecks(data.fandecks || [], windowLabel)}`;
   els.view.querySelectorAll('[data-sandbox-window]').forEach((button) => {
     button.addEventListener('click', () => {
       sandboxWindowHours = Number(button.dataset.sandboxWindow);
