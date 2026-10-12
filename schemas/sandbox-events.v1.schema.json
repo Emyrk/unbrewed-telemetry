@@ -66,6 +66,17 @@
           "maxLength": 128,
           "description": "Sent once per (room, player, hero), the first time that player's blob carries pool.hero.name."
         },
+        "deckSource": {
+          "enum": ["unmatched-club", "unmatched-cards", "labs"],
+          "description": "hero_seen only, optional: the site the hero's deck was imported from (the-unmatched.club, unmatched.cards, Unmatched Labs). Sent together with deckUrl; omitted when the source is unknown."
+        },
+        "deckUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://",
+          "maxLength": 512,
+          "description": "hero_seen only, optional: the deck's page on deckSource, built by the producer from p2p's deck-import logic. The validator requires the host to belong to deckSource."
+        },
         "reason": {
           "enum": ["inactive", "shutdown"],
           "description": "Why the room closed: inactive (12h GC) or shutdown (relay SIGTERM)."

@@ -732,6 +732,9 @@ export interface QueueWaitStatsResponse {
  */
 export type SandboxEventType = 'room_opened' | 'player_joined' | 'player_left' | 'hero_seen' | 'room_closed';
 
+/** The sites p2p's deck import takes a deck from. */
+export type SandboxDeckSource = 'unmatched-club' | 'unmatched-cards' | 'labs';
+
 export type SandboxCloseReason = 'inactive' | 'shutdown';
 
 export interface SandboxEvent {
@@ -747,6 +750,10 @@ export interface SandboxEvent {
   connections?: number;
   /** hero_seen only. */
   heroName?: string;
+  /** hero_seen only, optional; always sent with `deckUrl`. */
+  deckSource?: SandboxDeckSource;
+  /** hero_seen only, optional: the deck's page on `deckSource`. */
+  deckUrl?: string;
   /** room_closed only (as are the four counters below). */
   reason?: SandboxCloseReason;
   lifetimeMs?: number;
@@ -791,5 +798,21 @@ export interface SandboxStatsResponse {
   daily: SandboxDailyRow[];
   /** Always 7×24 rows, zero-filled, dow-major. */
   hourOfWeek: SandboxHourOfWeekRow[];
-  topHeroes: Array<{ heroName: string; players: number }>;
+  /**
+   * Top 10 by distinct players. `deckSource`/`deckUrl` are present only when
+   * every sighting of that hero name agrees on one deck page.
+   */
+  topHeroes: Array<{ heroName: string; players: number; deckSource?: SandboxDeckSource; deckUrl?: string }>;
+  /**
+   * Every sandbox hero with a known deck source in the window, not truncated.
+   * `games` counts distinct game rooms (≥2 players joined) it appeared in.
+   * Sandbox has no bot pilots, so every count is human play.
+   */
+  fandecks: Array<{
+    heroName: string;
+    deckSource: SandboxDeckSource;
+    deckUrl: string;
+    games: number;
+    players: number;
+  }>;
 }

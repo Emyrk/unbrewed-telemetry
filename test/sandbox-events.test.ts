@@ -67,6 +67,25 @@ describe('sandbox events schema', () => {
     expect(validateSandboxEvents({ schemaVersion: 2, events: [opened('r')] }).ok).toBe(false);
   });
 
+  it('accepts a deck source with a URL on that site and refuses the rest', () => {
+    const hero = (extra: Record<string, unknown>) =>
+      validateSandboxEvents({ events: [ev({ type: 'hero_seen', playerHash: PLAYER_A, heroName: 'Medusa', ...extra })] });
+    const club = 'https://www.the-unmatched.club/c/heroes/cecil-palmer.13514';
+    expect(hero({ deckSource: 'unmatched-club', deckUrl: club })).toEqual({ ok: true, errors: [] });
+    expect(hero({ deckSource: 'unmatched-cards', deckUrl: 'https://unmatched.cards/decks/pk1x' }).ok).toBe(true);
+    expect(hero({ deckSource: 'labs', deckUrl: 'https://www.unmatchedlabs.com/shared/abc12345?character=char_x' }).ok).toBe(true);
+
+    expect(hero({ deckSource: 'labs', deckUrl: club }).errors).toEqual(['/events/0/deckUrl: host must belong to labs']);
+    expect(hero({ deckSource: 'labs' }).errors).toEqual(['/events/0/deckUrl: required with deckSource']);
+    expect(hero({ deckUrl: club }).errors).toEqual(['/events/0/deckSource: required with deckUrl']);
+    expect(hero({ deckSource: 'labs', deckUrl: 'javascript:alert(1)' }).ok).toBe(false);
+    expect(hero({ deckSource: 'labs', deckUrl: 'http://unmatchedlabs.com/shared/x' }).ok).toBe(false);
+    expect(hero({ deckSource: 'elsewhere', deckUrl: club }).ok).toBe(false);
+    expect(
+      validateSandboxEvents({ events: [{ ...joined('r', PLAYER_A), deckSource: 'labs', deckUrl: club }] }).errors,
+    ).toContain('/events/0/deckSource: not carried by player_joined events');
+  });
+
   it('enforces the per-type fields', () => {
     const join = validateSandboxEvents({ events: [ev({ type: 'player_joined', playerHash: PLAYER_A })] });
     expect(join.errors).toEqual(['/events/0/connections: required on player_joined events']);
@@ -308,6 +327,46 @@ describeDb('sandbox events with postgres', () => {
     expect(body.hourOfWeek.reduce((sum, row) => sum + row.joins, 0)).toBe(7);
   });
 
+  it('lists every fandeck with its source link and game count, untruncated', async () => {
+    const club = 'https://www.the-unmatched.club/c/heroes/cecil-palmer.13514';
+    const cards = 'https://unmatched.cards/decks/pk1x';
+    const seen = (roomId: string, playerHash: string, heroName: string, deck?: { deckSource: 'unmatched-club' | 'unmatched-cards'; deckUrl: string }) =>
+      ev({ type: 'hero_seen', roomId, playerHash, heroName, ...deck });
+    const events = [
+      opened('g1'), joined('g1', PLAYER_A), joined('g1', PLAYER_B, 2),
+      opened('g2'), joined('g2', PLAYER_A), joined('g2', PLAYER_B, 2),
+      // g3 is one person alone: not a game, so its sighting adds no game.
+      opened('g3'), joined('g3', PLAYER_C),
+      seen('g1', PLAYER_A, 'Cecil', { deckSource: 'unmatched-club', deckUrl: club }),
+      seen('g2', PLAYER_A, 'Cecil', { deckSource: 'unmatched-club', deckUrl: club }),
+      seen('g2', PLAYER_B, 'Cecil', { deckSource: 'unmatched-club', deckUrl: club }),
+      seen('g1', PLAYER_B, 'Pikachu', { deckSource: 'unmatched-cards', deckUrl: cards }),
+      seen('g3', PLAYER_C, 'Pikachu', { deckSource: 'unmatched-cards', deckUrl: cards }),
+      // Unknown source: in topHeroes as plain text, absent from fandecks.
+      seen('g1', PLAYER_A, 'Medusa'),
+      seen('g2', PLAYER_B, 'Medusa'),
+    ];
+    // More than the top-10 cut: every fandeck must still be listed.
+    for (let i = 0; i < 12; i += 1) {
+      events.push(seen('g1', PLAYER_A, `Extra ${String(i).padStart(2, '0')}`, {
+        deckSource: 'unmatched-cards', deckUrl: `https://unmatched.cards/decks/x${i}`,
+      }));
+    }
+    await insertAt(1, events);
+
+    const body = await (await stats(24)).json() as SandboxStatsResponse;
+    expect(body.fandecks).toHaveLength(14);
+    expect(body.fandecks.slice(0, 2)).toEqual([
+      { heroName: 'Cecil', deckSource: 'unmatched-club', deckUrl: club, games: 2, players: 2 },
+      { heroName: 'Pikachu', deckSource: 'unmatched-cards', deckUrl: cards, games: 1, players: 2 },
+    ]);
+    expect(body.fandecks.map((row) => row.heroName)).not.toContain('Medusa');
+    expect(body.topHeroes.find((row) => row.heroName === 'Cecil'))
+      .toEqual({ heroName: 'Cecil', players: 2, deckSource: 'unmatched-club', deckUrl: club });
+    expect(body.topHeroes.find((row) => row.heroName === 'Medusa'))
+      .toEqual({ heroName: 'Medusa', players: 2 });
+  });
+
   it('marks players seen before the window as returning', async () => {
     // Ten days ago: A and B played. Outside a 168h window.
     await insertAt(240, [opened('old'), joined('old', PLAYER_A), joined('old', PLAYER_B, 2)]);
@@ -332,7 +391,7 @@ describeDb('sandbox events with postgres', () => {
     const body = await (await stats()).json() as SandboxStatsResponse;
     expect(body).toMatchObject({
       roomsOpened: 0, games: 0, uniquePlayers: 0, returningPlayers: 0,
-      peakConnections: null, daily: [], topHeroes: [],
+      peakConnections: null, daily: [], topHeroes: [], fandecks: [],
     });
     expect(body.hourOfWeek.every((row) => row.joins === 0)).toBe(true);
 
