@@ -886,4 +886,6 @@ export interface HomeSummaryResponse {
   decks: { mode: 'decks' | 'vs'; deck: string | null; rows: HomeDeckRow[] };
   matrix: { minGames: number; decks: string[]; cells: HomeMatrixCell[]; hiddenCells: number };
   maps: HomeMapRow[];
+  /** Games per UTC day, the 30 days ending on now's date, oldest first; scope and pins apply, the window does not. */
+  timeline: Array<{ day: string; games: number }>;
 }

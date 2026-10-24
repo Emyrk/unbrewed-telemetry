@@ -68,9 +68,9 @@ describeDb('telemetry api with postgres', () => {
     const root = await fetch(`${baseUrl}/`);
     expect(root.status).toBe(200);
     expect(root.headers.get('content-type')).toContain('text/html');
-    expect(await root.text()).toContain('Deck Balance Tracker');
+    expect(await root.text()).toContain('When people play');
 
-    const page = await fetch(`${baseUrl}/dashboard`);
+    const page = await fetch(`${baseUrl}/legacy`);
     expect(page.status).toBe(200);
     expect(page.headers.get('content-type')).toContain('text/html');
     expect(await page.text()).toContain('Deck Balance Tracker');

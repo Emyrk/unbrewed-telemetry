@@ -54,11 +54,16 @@ import { wilson } from './wilson.js';
  *   45–55%.
  * - Auto-widen: an empty 7d window is rerun at 30d; if that has games it is
  *   served with `widened: true`.
+ * - Timeline (#98, the landing's date brush): games per UTC day over the 30
+ *   days ending on now's date, under the lens's scope and pins but not its
+ *   window, zero-filled oldest first.
  */
 
 export const BOT_CURRENT_DAYS = 14;
 export const MATRIX_MIN_GAMES = 3;
 export const FLAG_MIN_GAMES = 30;
+export const TIMELINE_DAYS = 30;
+const DAY_MS = 86_400_000;
 const FLAG_BAND = { lo: 0.45, hi: 0.55 };
 
 export function balanceFlag(wins: number, n: number): BalanceFlag {
@@ -95,6 +100,13 @@ interface SummaryRow {
   matrix_decks: string[];
   matrix: Array<{ deck: string; vs: string; games: number; wins: number }>;
   maps: Array<{ map: string; games: number; fp_games: number; fp_wins: number }>;
+  timeline: Array<{ day: string; games: number }>;
+}
+
+/** The whole UTC days the timeline covers: the last `TIMELINE_DAYS`, ending on now's date. */
+export function timelineWindow(now: Date): LensWindow {
+  const tomorrow = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) + DAY_MS;
+  return { from: new Date(tomorrow - TIMELINE_DAYS * DAY_MS), to: new Date(tomorrow) };
 }
 
 export type Query = <R>(text: string, values: unknown[]) => Promise<R[]>;
@@ -188,6 +200,12 @@ export function homeSummarySql(lens: Lens, window: LensWindow, now: Date): { tex
                count(*) FILTER (WHERE first_player_team IS NOT NULL AND NOT draw
                                   AND winner_team = first_player_team) AS fp_wins
         FROM lens_games GROUP BY map
+      ),
+      timeline_rows AS (
+        SELECT to_char(${GAME_AT_SQL} AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, count(*)::int AS games
+        FROM games g
+        WHERE ${lensWhereSql(lens, timelineWindow(now), lens.scope, p)}
+        GROUP BY 1
       )
     SELECT
       json_build_object(${kpis('lens_games', 'lens_seats')},
@@ -221,7 +239,8 @@ export function homeSummarySql(lens: Lens, window: LensWindow, now: Date): { tex
       COALESCE((SELECT json_agg(d) FROM deck_rows d), '[]'::json) AS decks,
       COALESCE((SELECT json_agg(DISTINCT deck_id ORDER BY deck_id) FROM lens_seats), '[]'::json) AS matrix_decks,
       COALESCE((SELECT json_agg(m ORDER BY m.deck, m.vs) FROM matrix_cells m), '[]'::json) AS matrix,
-      COALESCE((SELECT json_agg(m ORDER BY m.games DESC, m.map) FROM map_rows m), '[]'::json) AS maps
+      COALESCE((SELECT json_agg(m ORDER BY m.games DESC, m.map) FROM map_rows m), '[]'::json) AS maps,
+      COALESCE((SELECT json_agg(t) FROM timeline_rows t), '[]'::json) AS timeline
   `;
   return { text, values: p.values };
 }
@@ -275,6 +294,12 @@ export async function homeSummary(query: Query, lens: Lens, now: Date): Promise<
     }
   }
   const previous = previousWindow(window);
+  const perDay = new Map(row.timeline.map((day) => [day.day, day.games]));
+  const timelineFrom = timelineWindow(now).from.getTime();
+  const timeline = Array.from({ length: TIMELINE_DAYS }, (_, i) => {
+    const day = new Date(timelineFrom + i * DAY_MS).toISOString().slice(0, 10);
+    return { day, games: perDay.get(day) ?? 0 };
+  });
 
   const cells: HomeMatrixCell[] = row.matrix
     .filter((cell) => cell.games >= MATRIX_MIN_GAMES)
@@ -330,5 +355,6 @@ export async function homeSummary(query: Query, lens: Lens, now: Date): Promise<
       firstPlayerWins: map.fp_wins,
       firstPlayerEdge: map.fp_games > 0 ? map.fp_wins / map.fp_games : null,
     })),
+    timeline,
   };
 }

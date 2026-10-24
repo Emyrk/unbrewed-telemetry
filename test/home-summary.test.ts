@@ -311,6 +311,21 @@ describeDb('GET /api/home/summary (#97)', () => {
     expect(day.kpis.games).toBe(0);
   });
 
+  it('serves a 30-day timeline under the scope and pins but not the window (#98)', async () => {
+    const body = await summary('range=24h');
+    expect(body.timeline).toHaveLength(30);
+    expect(body.timeline[0]!.day).toBe('2026-06-21');
+    expect(body.timeline[29]!.day).toBe('2026-07-20');
+    // Every human game but the day-40 one, whatever the range.
+    expect(body.timeline.reduce((sum, d) => sum + d.games, 0)).toBe(35);
+    expect(body.timeline.find((d) => d.day === '2026-06-30')!.games).toBe(1);
+
+    const pinned = await summary('deck=taranis');
+    expect(pinned.timeline.filter((d) => d.games > 0)).toEqual([{ day: '2026-07-18', games: 2 }]);
+    const all = await summary('deck=taranis&scope=all');
+    expect(all.timeline.find((d) => d.day === '2026-07-16')!.games).toBe(1);
+  });
+
   it('answers a bad lens value with 400 naming the key', async () => {
     const response = await fetch(`${baseUrl}/api/home/summary?range=1y`);
     expect(response.status).toBe(400);

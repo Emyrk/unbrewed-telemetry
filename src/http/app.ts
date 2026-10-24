@@ -29,7 +29,7 @@ import { parseBearer, verifySecret, hasScope, ALL_SCOPES, type Scope } from './b
 import { parseLens } from '../stats/lens.js';
 import { ACTIVITY_SCOPES, type ActivityScope } from '../stats/home-activity.js';
 import { SANDBOX_DEFAULT_WINDOW_HOURS, SANDBOX_MAX_WINDOW_HOURS } from '../stats/sandbox.js';
-import { serveDashboardAsset } from './static.js';
+import { serveDashboardAsset, serveStaticRedirect } from './static.js';
 import { StatsCache, etagMatches, statsCacheKey } from './stats-cache.js';
 
 const RECENT_HOURLY_CACHE_MS = 5 * 60 * 1000;
@@ -105,6 +105,10 @@ async function handleRequest(
   const url = new URL(req.url ?? '/', 'http://localhost');
 
   if (req.method === 'GET' && await serveDashboardAsset(url.pathname, res)) {
+    return;
+  }
+
+  if (req.method === 'GET' && serveStaticRedirect(url, res)) {
     return;
   }
 
