@@ -1,3 +1,5 @@
+import { scopeSql } from './lens.js';
+
 /**
  * "When people play" (#96): games bucketed by UTC day-of-week and hour over a
  * fixed trailing window. Global by design — no deck/format/map/range lens, only
@@ -16,24 +18,24 @@ export const ACTIVITY_SCOPES = ['human', 'all'] as const;
 export type ActivityScope = (typeof ACTIVITY_SCOPES)[number];
 
 /**
- * `$1` is the window cutoff, `$2` is whether to include everything (scope=all).
- * Default scope is human games (any seat with pilot_kind = 'human') outside
- * sim campaigns; scope=all adds bot-only and campaign games. The end time is
- * `COALESCE(ended_at, received_at)`, always bucketed in UTC regardless of the
- * session time zone.
+ * `$1` is the window cutoff. The scope predicate is the shared lens one
+ * (`scopeSql`): live games only (`LIVE_GAME_SQL`, in both scopes, so lab and
+ * campaign sims never appear), and for `human` at least one human seat. `all`
+ * adds live bot-only games. The end time is `COALESCE(ended_at, received_at)`,
+ * always bucketed in UTC regardless of the session time zone.
  */
-export const HOME_ACTIVITY_SQL = `
+export function homeActivitySql(scope: ActivityScope): string {
+  return `
   SELECT extract(dow FROM t)::int AS dow, extract(hour FROM t)::int AS hour, count(*)::int AS n
   FROM (
     SELECT (COALESCE(g.ended_at, g.received_at) AT TIME ZONE 'UTC') AS t
     FROM games g
     WHERE COALESCE(g.ended_at, g.received_at) >= $1
-      AND ($2::boolean
-        OR (g.campaign_id IS NULL
-            AND EXISTS (SELECT 1 FROM game_seats s WHERE s.game_id = g.id AND s.pilot_kind = 'human')))
+      AND ${scopeSql(scope)}
   ) x
   GROUP BY 1, 2
 `;
+}
 
 export interface ActivityCellRow { dow: number; hour: number; n: number }
 export interface ActivitySlot { dow: number; hour: number; n: number }

@@ -79,8 +79,8 @@ describeDb('GET /api/home/activity (#96)', () => {
     await pool.end();
   });
 
-  async function ingest(id: string, endedAt: string, pilots: [string, string], campaignId: string | null = null): Promise<void> {
-    const base = sampleGame({ gameId: id, stateHash: id, endedAt });
+  async function ingest(id: string, endedAt: string, pilots: [string, string], campaignId: string | null = null, source = 'engine'): Promise<void> {
+    const base = sampleGame({ gameId: id, stateHash: id, endedAt, source });
     const game: GameSubmission = {
       ...base,
       teams: base.teams.map((team, i) => ({
@@ -113,9 +113,11 @@ describeDb('GET /api/home/activity (#96)', () => {
     await ingest('sun-0059', '2026-10-25T00:59:59.000Z', ['bot:hard', 'human']);
     await ingest('sun-0100', '2026-10-25T01:00:00.000Z', ['human', 'bot:hard']);
     await ingest('sun-0130', '2026-10-25T01:30:00.000Z', ['human', 'bot:hard']);
+    // A lab-source bot-only game with no campaign: never counted, even in scope=all.
+    await ingest('lab-mon', '2026-10-26T08:00:00.000Z', ['bot:hard', 'bot:easy'], null, 'ai-lab');
     // Bot-only and sim games: only scope=all sees them.
     await ingest('bots-mon', '2026-10-26T09:00:00.000Z', ['bot:hard', 'bot:easy']);
-    await ingest('sim-mon', '2026-10-26T10:00:00.000Z', ['human', 'bot:hard'], 'c1');
+    await ingest('sim-mon', '2026-10-26T10:00:00.000Z', ['human', 'bot:hard'], 'c1', 'sim-fleet');
     // Window edge: 28 days before `now` is in, a minute earlier is out.
     await ingest('edge-in', '2026-09-28T12:00:00.000Z', ['human', 'bot:hard']);
     await ingest('edge-out', '2026-09-28T11:59:00.000Z', ['human', 'bot:hard']);
@@ -136,12 +138,13 @@ describeDb('GET /api/home/activity (#96)', () => {
     ]);
   });
 
-  it('excludes sim and bot-only games by default, includes them with scope=all', async () => {
+  it('excludes bot-only games by default, includes live ones with scope=all; lab and sim never', async () => {
     await seed();
     const all = await activity('?scope=all');
-    expect(all.total).toBe(8);
+    expect(all.total).toBe(7);
+    expect(all.grid[1][8]).toBe(0); // lab-source bot-only game never appears
     expect(all.grid[1][9]).toBe(1); // bot-only Monday 09:00
-    expect(all.grid[1][10]).toBe(1); // sim Monday 10:00
+    expect(all.grid[1][10]).toBe(0); // sim (non-live source) Monday 10:00
     const human = await activity('?scope=human');
     expect(human.grid[1][9]).toBe(0);
     expect(human.grid[1][10]).toBe(0);
