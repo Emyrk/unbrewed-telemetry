@@ -11,6 +11,7 @@ import {
   windowCutoff,
   type QueueWaitStatsRow,
 } from '../stats/queue-wait.js';
+import { ACTIVITY_DAYS, HOME_ACTIVITY_SQL, homeActivity, type ActivityCellRow, type ActivityScope } from '../stats/home-activity.js';
 import { SANDBOX_STATS_SQL, sandboxStats, type SandboxStatsRow } from '../stats/sandbox.js';
 import { homeSummary } from '../stats/home-summary.js';
 import type { Lens } from '../stats/lens.js';
@@ -416,6 +417,13 @@ export class PgTelemetryRepository {
   /** Dashboard landing summary (#97) for one lens; the query lives in `src/stats/home-summary.ts`. */
   async homeSummary(lens: Lens, now: Date): Promise<HomeSummaryResponse> {
     return homeSummary(async (text, values) => (await this.pool.query(text, values)).rows, lens, now);
+  }
+
+  /** "When people play" (#96): fixed trailing 28 days, global, scope only. */
+  async homeActivity(scope: ActivityScope, now = new Date()) {
+    const cutoff = new Date(now.getTime() - ACTIVITY_DAYS * 24 * 3600 * 1000);
+    const { rows } = await this.pool.query<ActivityCellRow>(HOME_ACTIVITY_SQL, [cutoff, scope === 'all']);
+    return homeActivity(rows, scope, now);
   }
 
   async ingestValid(args: IngestArgs): Promise<IngestCreated | IngestDuplicate> {
