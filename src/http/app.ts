@@ -27,6 +27,7 @@ import {
 } from '../db/accounts.js';
 import { parseBearer, verifySecret, hasScope, ALL_SCOPES, type Scope } from './bearer-auth.js';
 import { parseLens } from '../stats/lens.js';
+import { ACTIVITY_SCOPES, type ActivityScope } from '../stats/home-activity.js';
 import { SANDBOX_DEFAULT_WINDOW_HOURS, SANDBOX_MAX_WINDOW_HOURS } from '../stats/sandbox.js';
 import { serveDashboardAsset } from './static.js';
 import { StatsCache, etagMatches, statsCacheKey } from './stats-cache.js';
@@ -144,6 +145,11 @@ async function handleRequest(
 
   if (req.method === 'GET' && url.pathname === '/api/home/summary') {
     await handleHomeSummary(req, url, res, repo, config, statsCache);
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/home/activity') {
+    await handleHomeActivity(req, url, res, repo, config, statsCache);
     return;
   }
 
@@ -863,6 +869,27 @@ async function handleSandboxStats(
   }
   const stats = await repo.sandboxStats({ windowHours }, config.now());
   sendJson(res, 200, { ok: true, ...stats });
+}
+
+async function handleHomeActivity(
+  req: IncomingMessage,
+  url: URL,
+  res: ServerResponse,
+  repo: PgTelemetryRepository,
+  config: AppConfig,
+  statsCache: StatsCache,
+): Promise<void> {
+  const raw = url.searchParams.get('scope')?.trim() || 'human';
+  if (!(ACTIVITY_SCOPES as readonly string[]).includes(raw)) {
+    sendJson(res, 400, { ok: false, code: 'BAD_SCOPE', message: `scope must be one of ${ACTIVITY_SCOPES.join(', ')}` });
+    return;
+  }
+  const scope = raw as ActivityScope;
+  // Global metric: every other query parameter is ignored, and the cache key
+  // is the scope alone so lens params do not fragment it.
+  const keyUrl = new URL(url.pathname, url);
+  keyUrl.searchParams.set('scope', scope);
+  await sendCachedStats(req, keyUrl, res, statsCache, 'public', async () => ok200(await repo.homeActivity(scope, config.now())));
 }
 
 async function handleDeckStats(
