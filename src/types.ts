@@ -793,3 +793,97 @@ export interface SandboxStatsResponse {
   hourOfWeek: SandboxHourOfWeekRow[];
   topHeroes: Array<{ heroName: string; players: number }>;
 }
+
+/** A win rate with its 95% Wilson band, all as fractions (0–1); null when n is 0. */
+export interface HomeRate {
+  winRate: number | null;
+  lo: number | null;
+  hi: number | null;
+}
+
+/** OVER/UNDER only when n >= 30 and the 95% Wilson band clears 45–55%. */
+export type BalanceFlag = 'OVER' | 'UNDER' | null;
+
+export interface HomeKpis {
+  games: number;
+  /** Distinct `player_id`s on human seats. */
+  uniqueHumans: number;
+  /** Human seats (the pinned player's only, when one is pinned) in games with a bot seat. */
+  humanSeatsVsBots: number;
+  humanWinsVsBots: number;
+  humanWinRateVsBots: number | null;
+  medianTurns: number | null;
+  medianDurationSeconds: number | null;
+  /** Games ending in a concession: forfeit, timeout or disconnect. */
+  endedEarly: number;
+  /** Games with no human seat; always 0 in the human scope. */
+  botOnlyGames: number;
+}
+
+export interface HomeBotRow extends HomeRate {
+  botId: string;
+  botVersion: string | null;
+  /** Lens games with a seat on this bot version. */
+  games: number;
+  /** Human seats in those games; the rate is theirs. */
+  humanSeats: number;
+  humanWins: number;
+}
+
+export interface HomeDeckRow extends HomeRate {
+  deck: string;
+  games: number;
+  wins: number;
+  flag: BalanceFlag;
+}
+
+export interface HomeMatrixCell {
+  deck: string;
+  vs: string;
+  games: number;
+  wins: number;
+  winRate: number;
+}
+
+export interface HomeMapRow {
+  map: string;
+  games: number;
+  /** Games that reported a first player. */
+  firstPlayerGames: number;
+  /** Of those, games the first player's team won. */
+  firstPlayerWins: number;
+  firstPlayerEdge: number | null;
+}
+
+export interface HomeSummaryResponse {
+  generatedAt: string;
+  lens: {
+    scope: 'human' | 'all';
+    range: '24h' | '7d' | '30d' | null;
+    from: string | null;
+    to: string | null;
+    deck: string | null;
+    vs: string | null;
+    bot: string | null;
+    ver: string | null;
+    map: string | null;
+    format: string | null;
+    player: string | null;
+  };
+  /** The window actually served; `range` is 30d when widened. */
+  window: { range: '24h' | '7d' | '30d' | null; from: string; to: string; previousFrom: string; previousTo: string };
+  /** The 7d window was empty and the 30d one was not, so 30d is served. */
+  widened: boolean;
+  kpis: HomeKpis & { newHumans: number };
+  previous: HomeKpis;
+  /** Human scope only: live bot-only games the lens would otherwise match. */
+  hiddenBotGames: number;
+  bots: {
+    /** Latest version per bot_id that has a game in the last 14 days. */
+    current: HomeBotRow[];
+    retired: { versions: number; games: number; rows: HomeBotRow[] };
+  };
+  decks: { mode: 'decks' | 'vs'; deck: string | null; rows: HomeDeckRow[] };
+  matrix: { minGames: number; decks: string[]; cells: HomeMatrixCell[]; hiddenCells: number };
+  maps: HomeMapRow[];
+}

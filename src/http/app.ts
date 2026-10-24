@@ -26,6 +26,7 @@ import {
   decodePlayerGamesCursor,
 } from '../db/accounts.js';
 import { parseBearer, verifySecret, hasScope, ALL_SCOPES, type Scope } from './bearer-auth.js';
+import { parseLens } from '../stats/lens.js';
 import { SANDBOX_DEFAULT_WINDOW_HOURS, SANDBOX_MAX_WINDOW_HOURS } from '../stats/sandbox.js';
 import { serveDashboardAsset } from './static.js';
 import { StatsCache, etagMatches, statsCacheKey } from './stats-cache.js';
@@ -138,6 +139,11 @@ async function handleRequest(
 
   if (req.method === 'GET' && url.pathname === '/v1/stats/dashboard') {
     await handleDashboardStats(req, url, res, repo, config, statsCache);
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/home/summary') {
+    await handleHomeSummary(req, url, res, repo, config, statsCache);
     return;
   }
 
@@ -816,6 +822,26 @@ async function handleDashboardStats(
 ): Promise<void> {
   const filters = statsFiltersFromUrl(url);
   await sendCachedStats(req, url, res, statsCache, 'public', async () => ok200(await repo.dashboardStats(filters, config.now())));
+}
+
+/**
+ * Dashboard landing summary (#97). The lens is validated before the cache
+ * lookup, so a bad value is a 400 naming its key and is never cached.
+ */
+async function handleHomeSummary(
+  req: IncomingMessage,
+  url: URL,
+  res: ServerResponse,
+  repo: PgTelemetryRepository,
+  config: AppConfig,
+  statsCache: StatsCache,
+): Promise<void> {
+  const parsed = parseLens(url.searchParams);
+  if (!parsed.ok) {
+    sendJson(res, 400, { ok: false, code: 'BAD_LENS', key: parsed.key, message: parsed.message });
+    return;
+  }
+  await sendCachedStats(req, url, res, statsCache, 'public', async () => ok200(await repo.homeSummary(parsed.lens, config.now())));
 }
 
 /** Sandbox usage (#84). Same (public, aggregate-only) access as the dashboard. */
