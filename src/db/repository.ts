@@ -12,6 +12,8 @@ import {
   type QueueWaitStatsRow,
 } from '../stats/queue-wait.js';
 import { SANDBOX_STATS_SQL, sandboxStats, type SandboxStatsRow } from '../stats/sandbox.js';
+import { homeSummary } from '../stats/home-summary.js';
+import type { Lens } from '../stats/lens.js';
 import {
   community,
   heroCommunity,
@@ -57,6 +59,7 @@ import type {
   QueueEvent,
   QueueWaitStatsResponse,
   SandboxEvent,
+  HomeSummaryResponse,
   SandboxStatsResponse,
   RecentGame,
   RecentGamesResponse,
@@ -408,6 +411,11 @@ export class PgTelemetryRepository {
     const cutoff = windowCutoff(generatedAt, options.windowHours);
     const { rows } = await this.pool.query<SandboxStatsRow>(SANDBOX_STATS_SQL, [cutoff]);
     return sandboxStats(rows[0]!, options.windowHours, generatedAt);
+  }
+
+  /** Dashboard landing summary (#97) for one lens; the query lives in `src/stats/home-summary.ts`. */
+  async homeSummary(lens: Lens, now: Date): Promise<HomeSummaryResponse> {
+    return homeSummary(async (text, values) => (await this.pool.query(text, values)).rows, lens, now);
   }
 
   async ingestValid(args: IngestArgs): Promise<IngestCreated | IngestDuplicate> {
