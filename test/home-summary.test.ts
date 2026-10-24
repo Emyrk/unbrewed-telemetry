@@ -35,6 +35,7 @@ function game(
   const submission = sampleGame({
     gameId: id,
     stateHash: id,
+    source: 'engine',
     endedAt: new Date(NOW - daysAgo * DAY).toISOString(),
     submittedAt: new Date(NOW - daysAgo * DAY).toISOString(),
     teams: teams.map((seats) => ({ seats })),
@@ -51,8 +52,11 @@ function game(
  * - 30 duels, player-a on appa beats expert v2 on king-kong 27 times (OVER/UNDER).
  * - 2 human-vs-human duels, appa vs taranis, one win each (a matrix cell under 3).
  * - 1 2v2 on soulwood: player-d plus expert v2 against two easy bots (one human, three bots).
- * - 1 bot-only duel, medium vs hard (hidden in the human scope).
- * - 1 sim game, expert v3 mirror (only in scope=all).
+ * - 1 live bot-only duel, medium vs hard (hidden in the human scope).
+ * Live games come from source engine, the first hvh duel from live-server.
+ * - 1 campaign sim (source steven), expert v3 mirror, and 2 lab sims
+ *   (sources ai-lab, nixos:steven:lab) with lab-bot l9 and expert v9: never
+ *   counted, in any scope.
  * - day 10: player-a vs expert v1 (previous period; v1 is played within 14 days but retired by v2).
  * - day 20: player-e vs mc "old" (no game in 14 days: retired).
  * - day 40: player-a vs expert v1 (v1's first appearance).
@@ -63,7 +67,7 @@ async function seed(post: (game: GameSubmission) => Promise<void>, pool: Pool): 
       { map: 'mended-drum', firstPlayerTeam: 0, turns: 10 + i, durationSeconds: 600 }));
   }
   await post(game(2, [[human('appa', 'player-b')], [human('taranis', 'player-c')]], 0,
-    { map: 'mended-drum', firstPlayerTeam: 1, endCondition: 'forfeit' }));
+    { map: 'mended-drum', firstPlayerTeam: 1, endCondition: 'forfeit', source: 'live-server' }));
   await post(game(2.5, [[human('appa', 'player-b')], [human('taranis', 'player-c')]], 1,
     { map: 'mended-drum', firstPlayerTeam: 1 }));
   const teamGame = game(3, [
@@ -73,11 +77,17 @@ async function seed(post: (game: GameSubmission) => Promise<void>, pool: Pool): 
   delete teamGame.firstPlayerTeam;
   await post(teamGame);
   await post(game(4, [[bot('appa', 'medium')], [bot('taranis', 'hard')]], 0, { map: 'mended-drum' }));
-  const sim = game(0.5, [[bot('appa', 'expert', 'v3')], [bot('king-kong', 'expert', 'v3')]], 1, { map: 'mended-drum' });
+  const sim = game(0.5, [[bot('appa', 'expert', 'v3')], [bot('king-kong', 'expert', 'v3')]], 1,
+    { map: 'mended-drum', source: 'steven' });
   await post(sim);
   await pool.query(`INSERT INTO sim_campaigns (id, name, spec, total_games, created_by)
                     VALUES ('camp-1', 'camp', '{}'::jsonb, 1, 'test')`);
   await pool.query(`UPDATE games SET campaign_id = 'camp-1' WHERE id = $1`, [sim.gameId]);
+  // Lab sims: no campaign, no human, not a live source. Never counted, in any scope.
+  await post(game(1.5, [[bot('appa', 'lab-bot', 'l9')], [bot('taranis', 'expert', 'v9')]], 0,
+    { map: 'mended-drum', source: 'ai-lab' }));
+  await post(game(2.2, [[bot('appa', 'lab-bot', 'l9')], [bot('king-kong', 'lab-bot', 'l9')]], 1,
+    { map: 'lab-map', source: 'nixos:steven:lab' }));
   await post(game(10, [[human('appa', 'player-a')], [bot('king-kong', 'expert', 'v1')]], 0, { map: 'mended-drum' }));
   await post(game(20, [[human('appa', 'player-e')], [bot('king-kong', 'mc', 'old')]], 1, { map: 'mended-drum' }));
   await post(game(40, [[human('appa', 'player-a')], [bot('king-kong', 'expert', 'v1')]], 1, { map: 'mended-drum' }));
@@ -167,6 +177,7 @@ describeDb('GET /api/home/summary (#97)', () => {
       endedEarly: 1,
       botOnlyGames: 0,
     });
+    // The live medium-vs-hard duel only; the two lab bot-only games are not live.
     expect(body.hiddenBotGames).toBe(1);
     expect(body.maps.map((m) => m.map)).toEqual(['mended-drum', 'soulwood']);
   });
@@ -176,11 +187,29 @@ describeDb('GET /api/home/summary (#97)', () => {
     expect(body.previous).toMatchObject({ games: 1, uniqueHumans: 1, humanSeatsVsBots: 1, humanWinsVsBots: 1 });
   });
 
-  it('puts bot-only and sim games back in scope=all and hides nothing', async () => {
+  it('puts live bot-only games back in scope=all and hides nothing', async () => {
     const body = await summary('scope=all');
-    expect(body.kpis.games).toBe(35);
-    expect(body.kpis.botOnlyGames).toBe(2);
+    expect(body.kpis.games).toBe(34);
+    expect(body.kpis.botOnlyGames).toBe(1);
     expect(body.hiddenBotGames).toBe(0);
+  });
+
+  it('never counts lab or campaign sims, not even under scope=all', async () => {
+    for (const scope of ['human', 'all']) {
+      const body = await summary(`scope=${scope}&range=30d`);
+      expect(body.maps.map((m) => m.map)).not.toContain('lab-map');
+      const versions = [...body.bots.current, ...body.bots.retired.rows].map((b) => `${b.botId}:${b.botVersion}`);
+      expect(versions).not.toContain('lab-bot:l9');
+      expect(versions).not.toContain('expert:v9');
+      expect(versions).not.toContain('expert:v3');
+      const pinned = await summary(`scope=${scope}&bot=lab-bot`);
+      expect(pinned.kpis.games).toBe(0);
+      expect(pinned.hiddenBotGames).toBe(0);
+      expect(pinned.widened).toBe(false);
+    }
+    const all = await summary('scope=all&range=30d');
+    expect(all.kpis.games).toBe(36);
+    expect(all.bots.retired.versions).toBe(2);
   });
 
   it('keeps the latest version per bot with a game in the last 14 days current and counts the rest retired', async () => {
@@ -192,13 +221,13 @@ describeDb('GET /api/home/summary (#97)', () => {
     // expert v1 (played on day 10, superseded by v2) and mc "old" (day 20).
     expect(body.bots.retired).toEqual({ versions: 2, games: 0, rows: [] });
 
-    // In scope=all the sim's v3 is newest, and medium/hard come from the bot-only game.
+    // scope=all adds medium/hard from the live bot-only game; the sims' expert
+    // v3 and v9, though newer, are not live and never become current.
     const all = await summary('scope=all');
     expect(all.bots.current.map((b) => `${b.botId}:${b.botVersion}`)).toEqual([
-      'easy:null', 'expert:v3', 'hard:null', 'medium:null',
+      'easy:null', 'expert:v2', 'hard:null', 'medium:null',
     ]);
-    expect(all.bots.retired.versions).toBe(3);
-    expect(all.bots.retired.games).toBe(31);
+    expect(all.bots.retired).toEqual({ versions: 2, games: 0, rows: [] });
   });
 
   it('flags decks OVER/UNDER only past n >= 30 with the Wilson band clear of 45–55', async () => {

@@ -4,7 +4,7 @@
  * URL once; `lensGamesCte` turns a lens plus a time window into the one base
  * `lens_games` CTE every panel groups over.
  *
- *   scope=human|all            human (default): games with a human seat, sims excluded
+ *   scope=human|all            live games only (LIVE_SOURCES); human (default): with a human seat
  *   range=24h|7d|30d           trailing window ending now (default 7d), or
  *   from=YYYY-MM-DD&to=…       a UTC day range, both days inclusive
  *   deck, vs                   deck_id; with deck, vs means on the opposing team
@@ -185,16 +185,26 @@ export const HUMAN_GAME_SQL = `(COALESCE(g.pilot_bucket IN (
           ))`;
 
 /**
- * Which games the scope admits. `human`: no sims, at least one human seat.
- * `all`: everything. `hidden-bots` is what `human` leaves out of a window
- * apart from sims: bot-only games, counted on the side.
+ * Live play: games from the live server's sources. `campaign_id IS NULL` is
+ * not enough: the #95 audit found 29,449 non-campaign, bot-only lab sims
+ * (sources `ai-lab`, `steven`, `<host>:<user>:lab`, July 2026) that would
+ * otherwise swamp the ~2k live games. Campaign sims come from worker sources,
+ * so this excludes them too. Every scope applies it.
+ */
+export const LIVE_SOURCES = ['engine', 'live-server'] as const;
+export const LIVE_GAME_SQL = `g.source IN (${LIVE_SOURCES.map((source) => `'${source}'`).join(', ')})`;
+
+/**
+ * Which live games the scope admits. `human`: at least one human seat.
+ * `all`: every live game. `hidden-bots` is what `human` leaves out of a
+ * window: live bot-only games, counted on the side.
  */
 export type ScopeFilter = LensScope | 'hidden-bots';
 
 export function scopeSql(scope: ScopeFilter): string {
-  if (scope === 'all') return 'true';
-  if (scope === 'human') return `g.campaign_id IS NULL AND ${HUMAN_GAME_SQL}`;
-  return `g.campaign_id IS NULL AND NOT ${HUMAN_GAME_SQL}`;
+  if (scope === 'all') return LIVE_GAME_SQL;
+  if (scope === 'human') return `${LIVE_GAME_SQL} AND ${HUMAN_GAME_SQL}`;
+  return `${LIVE_GAME_SQL} AND NOT ${HUMAN_GAME_SQL}`;
 }
 
 /** The lens's pins as predicates over game `g`; only pinned keys add a clause. */

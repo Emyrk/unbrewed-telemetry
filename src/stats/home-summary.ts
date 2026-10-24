@@ -35,9 +35,11 @@ import { wilson } from './wilson.js';
  * the #86 stats cache.
  *
  * Derived rules, each encoded once here:
+ * - Live game: `source` in `LIVE_SOURCES`, in every scope; lab and campaign
+ *   sims never count, not even under scope=all.
  * - Human game: any seat with `pilot_kind = 'human'` (one human vs three bots
- *   counts). The human scope also drops sims; `hiddenBotGames` counts the
- *   non-sim bot-only games it hides.
+ *   counts). `hiddenBotGames` counts the live bot-only games the human scope
+ *   hides.
  * - Current bot version: per `bot_id`, the newest `bot_version` (latest first
  *   game) among versions with a game in the 14 days before now, over games the
  *   scope admits. Every other version seen is retired.

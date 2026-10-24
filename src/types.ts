@@ -876,7 +876,7 @@ export interface HomeSummaryResponse {
   widened: boolean;
   kpis: HomeKpis & { newHumans: number };
   previous: HomeKpis;
-  /** Human scope only: non-sim bot-only games the lens would otherwise match. */
+  /** Human scope only: live bot-only games the lens would otherwise match. */
   hiddenBotGames: number;
   bots: {
     /** Latest version per bot_id that has a game in the last 14 days. */
