@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Unbrewed Telemetry</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Oswald:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/home.css?v=home-1">
+</head>
+<body>
+  <main class="wrap" id="app">
+    <header class="top" id="header"></header>
+
+    <section class="panel lensbar" aria-label="Lens">
+      <div class="lensrow" id="pins"></div>
+      <div class="lensrow"><span class="sub lenskey">Story so far</span><span class="story" id="story"></span></div>
+      <div class="lensrow">
+        <label class="sub lenskey" for="share">Share</label>
+        <input class="share mono" id="share" readonly>
+        <button class="btn ghost" type="button" data-action="copy" id="copy">Copy link</button>
+      </div>
+      <div class="lensrow">
+        <span class="sub lenskey">Last 30 days</span>
+        <div class="timeline" id="timeline" role="group" aria-label="Games per day, last 30 days. Drag across days to pick a date range."></div>
+        <span class="sub tlhint" id="brush-hint"></span>
+      </div>
+    </section>
+
+    <div id="notice"></div>
+
+    <div class="kpis" id="kpis"></div>
+
+    <div class="cols">
+      <div class="col">
+        <section class="panel" id="activity" aria-label="When people play"></section>
+        <section class="panel lensed" id="bots"></section>
+        <section class="panel lensed" id="maps"></section>
+      </div>
+      <div class="col wide">
+        <section class="panel lensed" id="decks"></section>
+        <section class="panel lensed" id="matrix"></section>
+      </div>
+    </div>
+
+    <footer class="legacy" id="legacy"></footer>
+  </main>
+  <script src="/assets/home.js?v=home-1" type="module"></script>
+</body>
+</html>
