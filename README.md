@@ -142,6 +142,26 @@ without it store `NULL` and behave exactly as before. Deploy this ingest change
 and run the migration before producers begin sending the field, because the v1
 schema rejects unknown properties.
 
+#### Quick Play fields
+
+Two optional top-level fields describe how a game's match formed (#107):
+
+```json
+{ "matchedVia": "quick_match", "xpMultiplier": 2 }
+```
+
+- `matchedVia` — how the room's seats were matched: one of `quick_match`,
+  `lobby`, `invite`, `bot`, `tournament`, `rematch`. Stored as
+  `games.matched_via` (`NULL` when omitted).
+- `xpMultiplier` — a number from 1 to 4: the XP multiplier the engine locked in
+  when the game started. Producers omit it when it is 1. Stored as
+  `games.xp_multiplier` (`NOT NULL DEFAULT 1`, so old rows and omitted fields
+  both read as 1).
+
+Both are additive to the v1 schema (no version bump); `additionalProperties`
+stays `false`, so deploy this ingest change and run migration `019` before
+producers start sending them.
+
 ### `POST /v1/decks`
 
 Upserts versioned deck definitions. Use a named bearer credential with `decks:submit` scope. The credential's source name overrides the payload source.
@@ -456,13 +476,13 @@ Server-to-server only, authenticated with `Authorization: Bearer $ACCOUNTS_READ_
 
   ```json
   { "games": [{ "id": "…", "endedAt": "…", "map": "…", "turns": 17, "durationSeconds": 1234,
-                "endCondition": "hero_defeated", "draw": false,
+                "endCondition": "hero_defeated", "draw": false, "matchedVia": "quick_match",
                 "you": { "heroId": "…", "heroName": "…", "won": true, "finalHealth": 6 },
                 "opponents": [{ "heroId": "…", "heroName": "…", "pilot": "bot:hard", "botDifficulty": "hard" }] }],
     "nextBefore": "<cursor|null>" }
   ```
 
-  `you` is the seat whose `player_id` matches; `opponents` is every other seat in the game, teammates included. `limit` defaults to 20 and is capped at 50. `nextBefore` is an **opaque** cursor — pass it back verbatim as `before`; it is `null` when the history is exhausted, and a cursor this API did not issue is a `400 BAD_CURSOR`.
+  `matchedVia` is `games.matched_via` (`"quick_match"`, `"lobby"`, … or `null` on games that predate it, or whose producer did not send it) so a history UI can label quick-play games. `you` is the seat whose `player_id` matches; `opponents` is every other seat in the game, teammates included. `limit` defaults to 20 and is capped at 50. `nextBefore` is an **opaque** cursor — pass it back verbatim as `before`; it is `null` when the history is exhausted, and a cursor this API did not issue is a `400 BAD_CURSOR`.
 
 - `GET /accounts/players/:playerId/stats` returns lifetime aggregates:
 
@@ -482,6 +502,8 @@ Server-to-server only, authenticated with `Authorization: Bearer $ACCOUNTS_READ_
   `clutchWins` and `fastestBotWinTurns` are the two records the accounts service's `clutch` / `speedrunner` badges are thresholds over (JollyGrin/unbrewed-api#26): wins by the player's own seat, not a draw, that ended in a `hero_defeated` kill against a side holding a **hard or expert** bot — `clutchWins` counts the ones finished at exactly 1 HP, `fastestBotWinTurns` is the smallest `turns` among them (null when there are none). Alone in this file they read `game_seats.bot_difficulty` raw rather than the pilot-label tier of #58: the label maps the starved-hard era (`bot:mc(64, 400ms)`) onto `hard`, which is the right call for win rates and the wrong one for "beat a hard bot in five turns". Stamping the column — live since JollyGrin/unbrewed-engine#366, retroactively via #60 — is what makes a game count. The payload also carries the #54 aggregates — `avgDurationSeconds`/`avgTurns`, `streaks`, `recentForm`, `byOpponentHero`, `byMap`, `byOpponentKind`, `firstPlayer`.
 
   `byOpponentKind` splits the bot side **by real tier** (#58): the engine has never stamped `game_seats.bot_difficulty` on the live serving path (NULL on 100% of live bot seats), so the tier is decoded from the seat's `pilot` label, which the engine writes from its running preset — `bot:easy` → easy, `bot:mc(16,…)` → medium, `bot:mc(64,…)`/`bot:mc` → hard, `bot:ismcts(…)`/`bot:expert(…)` → expert. A stamped `bot_difficulty` still wins when present. Labels no rule claims (the `bot:mc(sims-…/eps-…/depth-…)` sim knob-grid sweeps) bucket as `unknown` rather than being guessed at; the mapping lives in `src/db/bot-tier.ts` and is unit-tested. Every split row — `byOpponentKind.human`, each bot tier, and both sides of `firstPlayer` — carries `games`, `wins` and `draws`, so a client can read `losses = games - wins - draws` per slice.
+
+  `byXpMultiplier` (#107) is `[{ multiplier, games, wins, draws }]`: one row per distinct `games.xp_multiplier > 1` among the player's completed **human-opponent** games, multiplier ascending, `[]` when none. It is the `kind = 'human'` branch of the `byOpponentKind` classification (opposing seats only; any bot opponent means the game is not counted here) restricted to multiplied games. **Every game in `byXpMultiplier` is ALSO counted in `byOpponentKind.human`** — the api pays `(multiplier − 1)` extra on top and must not re-count it. Sim/campaign games stay excluded.
 
   `byHero[].byOpponent` (#63) is the cross of `byHero` and `byOpponentKind` — the per-hero, per-opponent-kind wins the cosmetics point system (unbrewed-p2p#610) is priced off. Five fixed keys, always present and zeroed when unplayed, each `{ games, wins }`. The classification is `byOpponentKind`'s, unchanged: opposing seats only, a game with *any* bot opponent is a bot game, a mixed-tier bot side counts once under its alphabetically first tier, and the tier is the stamped `bot_difficulty` or the decoded pilot label. Two kinds of game land in no bucket and so make the buckets sum to less than the row's `games` — a bot side whose label decodes to `unknown` (there is no key to invent one into), and a game with no opposing seat at all (a producer bug, dropped by `byOpponentKind` too).
 
@@ -503,14 +525,15 @@ Server-to-server only, authenticated with `Authorization: Bearer $ACCOUNTS_READ_
   { "players": [{ "playerId": "…", "gamesPlayed": 123, "wins": 45,
                   "byOpponentKind": { "human": { "games": 80, "wins": 30, "draws": 2 },
                                       "bots": [{ "difficulty": "hard", "games": 43, "wins": 15, "draws": 1 }] },
+                  "byXpMultiplier": [{ "multiplier": 2, "games": 9, "wins": 5, "draws": 0 }],
                   "mainHeroId": "medusa", "mainHeroName": "Medusa",
                   "recentForm": ["W", "L", "W", "W", "D"], "currentStreak": 1,
                   "windowGames": 12, "windowWins": 7 }] }
   ```
 
-  XP is computed api-side from tiered weights telemetry does not know, so rows cannot be pre-sorted by it; they come back `gamesPlayed` descending (`playerId` breaks ties) and the caller sorts. `byOpponentKind` is the same block, with the same semantics, that `/stats` returns — a game with *any* bot opponent is a bot game, opposing seats only, bot rows keyed on the tier decoded from the pilot label — and it is what lets the caller price a human win differently from an easy-bot win instead of weighting everything as human. `limit` is an optional safety cap, not a page size: omit it — or send a blank, unparseable, or non-positive value — and every player is returned. A row is by construction identical to what that player's own `/stats` reports as `totalGames`/`wins`/`byOpponentKind`.
+  XP is computed api-side from tiered weights telemetry does not know, so rows cannot be pre-sorted by it; they come back `gamesPlayed` descending (`playerId` breaks ties) and the caller sorts. `byOpponentKind` is the same block, with the same semantics, that `/stats` returns — a game with *any* bot opponent is a bot game, opposing seats only, bot rows keyed on the tier decoded from the pilot label — and it is what lets the caller price a human win differently from an easy-bot win instead of weighting everything as human. `limit` is an optional safety cap, not a page size: omit it — or send a blank, unparseable, or non-positive value — and every player is returned. A row is by construction identical to what that player's own `/stats` reports as `totalGames`/`wins`/`byOpponentKind`/`byXpMultiplier`. `byXpMultiplier` (#107) is the same block, with the same semantics and the same "also counted in `byOpponentKind.human`" rule, as `/stats` — `[]` for a player with no multiplied human games.
 
-  The leaderboard dashboard fields (stats dashboard T2) are always sent and never touch `gamesPlayed`/`wins`/`byOpponentKind`, which the api prices XP from (a test pins those bytes):
+  The leaderboard dashboard fields (stats dashboard T2) are always sent and never touch `gamesPlayed`/`wins`/`byOpponentKind`/`byXpMultiplier`, which the api prices XP from (a test pins those bytes):
 
   - `mainHeroId`/`mainHeroName` — the hero with the most games, ties to most wins, then `heroId` ascending; seats with no hero id never qualify, so both are null only for a player with no hero on record. The name is the one the player's latest game on that hero reported.
   - `recentForm` — the last 5 results, newest first; `currentStreak` — consecutive wins ending on the newest game. Both come from the same SQL as `/stats`'s `recentForm`/`streaks.current` (`resultRunsCtes` in `src/db/accounts.ts`), so `recentForm` is always the first five of the player's own list.

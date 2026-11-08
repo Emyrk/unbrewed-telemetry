@@ -87,6 +87,17 @@
       "minimum": 0,
       "description": "Index into teams of the side that took the first turn."
     },
+    "matchedVia": {
+      "type": "string",
+      "enum": ["quick_match", "lobby", "invite", "bot", "tournament", "rematch"],
+      "description": "How the room's seats were matched."
+    },
+    "xpMultiplier": {
+      "type": "number",
+      "minimum": 1,
+      "maximum": 4,
+      "description": "The XP multiplier the engine locked in when the game started. Producers omit it when it is 1."
+    },
     "engine": { "$ref": "#/$defs/engine" },
     "replayHash": {
       "type": "string",

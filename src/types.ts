@@ -1,3 +1,5 @@
+export type MatchedVia = 'quick_match' | 'lobby' | 'invite' | 'bot' | 'tournament' | 'rematch';
+
 export interface GameSubmission {
   schemaVersion: 1;
   gameId?: string;
@@ -17,6 +19,8 @@ export interface GameSubmission {
   turns?: number;
   durationSeconds?: number;
   firstPlayerTeam?: number;
+  matchedVia?: MatchedVia;
+  xpMultiplier?: number;
   engine?: EngineSubmission;
   replayHash?: string;
   stateHash?: string;
@@ -102,6 +106,9 @@ export interface NormalizedGame {
   turns: number | null;
   durationSeconds: number | null;
   firstPlayerTeam: number | null;
+  matchedVia: string | null;
+  /** XP multiplier locked in at game start; 1 when the producer omitted it. */
+  xpMultiplier: number;
   engineSchemaVersion: number | null;
   engineDslVersion: string | null;
   protocolVersion: number | null;
