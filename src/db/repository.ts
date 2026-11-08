@@ -3187,13 +3187,13 @@ async function insertGame(
         format_label, boss, map, map_version, winner_team, draw, end_condition, turns,
         duration_seconds, first_player_team, engine_schema_version, engine_dsl_version,
         protocol_version, content_version, replay_hash, state_hash, payload,
-        campaign_id, campaign_game_index, pilot_bucket
+        campaign_id, campaign_game_index, pilot_bucket, matched_via, xp_multiplier
       )
       VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8,
         $9, $10, $11, $12, $13, $14, $15, $16,
         $17, $18, $19, $20, $21, $22, $23, $24, $25::jsonb,
-        $26, $27, $28
+        $26, $27, $28, $29, $30
       )
     `,
     [
@@ -3225,6 +3225,8 @@ async function insertGame(
       campaignId ?? null,
       campaignGameIndex ?? null,
       pilotBucket,
+      game.matchedVia,
+      game.xpMultiplier,
     ],
   );
 }

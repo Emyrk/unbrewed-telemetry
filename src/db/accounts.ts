@@ -78,6 +78,8 @@ export interface PlayerGameOpponent {
 export interface PlayerGame {
   id: string;
   endedAt: string;
+  /** How the room's seats were matched (`quick_match`, `lobby`, …); null on older games. */
+  matchedVia: string | null;
   map: string;
   turns: number | null;
   durationSeconds: number | null;
@@ -226,6 +228,19 @@ export interface PlayerOpponentKindStats {
   bots: PlayerBotStat[];
 }
 
+/**
+ * One row per distinct `games.xp_multiplier > 1` among the player's completed
+ * human-opponent games (Quick Play 2x XP, #107). These games are ALSO counted in
+ * `byOpponentKind.human`: the api pays `(multiplier - 1)` extra on top and does
+ * not re-count them. Multiplier ascending; `[]` when none.
+ */
+export interface PlayerXpMultiplierStat {
+  multiplier: number;
+  games: number;
+  wins: number;
+  draws: number;
+}
+
 export interface PlayerFirstPlayerStats {
   first: PlayerSplitStat;
   second: PlayerSplitStat;
@@ -248,6 +263,8 @@ export interface PlayerStats {
   byOpponentHero: PlayerOpponentHeroStat[];
   byMap: PlayerMapStat[];
   byOpponentKind: PlayerOpponentKindStats;
+  /** Multiplied human games, a subset of `byOpponentKind.human` — see {@link PlayerXpMultiplierStat}. */
+  byXpMultiplier: PlayerXpMultiplierStat[];
   firstPlayer: PlayerFirstPlayerStats;
   /**
    * Wins at exactly 1 HP over a hard or expert bot — see
@@ -348,7 +365,7 @@ const PLAYER_GAMES_CTE = `
   SELECT mine.game_id, mine.team_index, mine.won, mine.first_player, mine.final_health,
          mine.hero_id, mine.hero_name,
          g.draw, g.map, g.turns, g.duration_seconds, g.first_player_team, g.end_condition,
-         ${ENDED_AT} AS ended_at
+         g.xp_multiplier, ${ENDED_AT} AS ended_at
   FROM mine
   JOIN games g ON g.id = mine.game_id
   WHERE g.campaign_id IS NULL
@@ -363,7 +380,7 @@ const PLAYER_GAMES_CTE = `
  * teammate contributes none.
  */
 const OPPOSING_SEATS_CTE = `
-  SELECT p.game_id, p.won, p.draw, o.hero_id, o.hero_name, o.pilot_kind,
+  SELECT p.game_id, p.won, p.draw, p.xp_multiplier, o.hero_id, o.hero_name, o.pilot_kind,
          ${botTierSql('o.pilot', 'o.bot_difficulty')} AS bot_tier,
          NULLIF(lower(btrim(o.bot_difficulty)), '') AS stamped_difficulty
   FROM played p
@@ -389,6 +406,7 @@ export async function playerGames(
     duration_seconds: number | null;
     end_condition: string | null;
     draw: boolean;
+    matched_via: string | null;
     team_index: number;
     seat_index: number;
     hero_id: string | null;
@@ -399,7 +417,7 @@ export async function playerGames(
     `
       WITH mine AS (${PLAYER_SEATS_CTE})
       SELECT g.id, ${ENDED_AT} AS ended_at, g.map, g.turns, g.duration_seconds,
-             g.end_condition, g.draw,
+             g.end_condition, g.draw, g.matched_via,
              mine.team_index, mine.seat_index, mine.hero_id, mine.hero_name,
              mine.won, mine.final_health
       FROM mine
@@ -449,6 +467,7 @@ export async function playerGames(
   const games: PlayerGame[] = rows.map((row) => ({
     id: row.id,
     endedAt: row.ended_at.toISOString(),
+    matchedVia: row.matched_via,
     map: row.map,
     turns: row.turns,
     durationSeconds: row.duration_seconds,
@@ -522,6 +541,7 @@ export async function playerStats(
     byOpponentHero,
     byMap,
     byOpponentKind,
+    byXpMultiplier,
     botChallenges,
     heroOpponents,
     calendar,
@@ -534,6 +554,7 @@ export async function playerStats(
       playerByOpponentHero(pool, playerId),
       playerByMap(pool, playerId),
       playerByOpponentKind(pool, playerId),
+      playerByXpMultiplier(pool, playerId),
       playerBotChallenges(pool, playerId),
       playerByHeroOpponent(pool, playerId, minSeconds),
       playerCalendar(pool, playerId, now),
@@ -552,6 +573,7 @@ export async function playerStats(
     byOpponentHero,
     byMap,
     byOpponentKind,
+    byXpMultiplier,
     calendar,
     byHeroOpponentHero,
   };
@@ -1018,6 +1040,54 @@ async function playerByOpponentKind(pool: Pool, playerId: string): Promise<Playe
 }
 
 /**
+ * Multiplied human games (Quick Play 2x XP, #107): one row per distinct
+ * `xp_multiplier > 1`, multiplier ascending.
+ *
+ * Exactly the `kind = 'human'` branch of {@link playerByOpponentKind}'s
+ * `per_game` CTE — opposing seats only, any bot opponent means "not a human
+ * game" and drops out here — filtered to multiplied games. Every such game is
+ * therefore also in `byOpponentKind.human`; unbrewed-api pays the extra
+ * `(multiplier - 1)` on top and does not re-count it.
+ */
+async function playerByXpMultiplier(pool: Pool, playerId: string): Promise<PlayerXpMultiplierStat[]> {
+  const result = await pool.query<{ multiplier: number; games: string; wins: string; draws: string }>(
+    `
+      WITH mine AS (${PLAYER_SEATS_CTE}),
+      played AS (${PLAYER_GAMES_CTE}),
+      opposing AS (${OPPOSING_SEATS_CTE}),
+      per_game AS (
+        SELECT game_id,
+               bool_and(won) AS won,
+               bool_or(draw) AS draw,
+               bool_or(pilot_kind = 'bot') AS any_bot,
+               max(xp_multiplier) AS xp_multiplier
+        FROM opposing
+        GROUP BY game_id
+      )
+      SELECT xp_multiplier AS multiplier,
+             count(*) AS games,
+             count(*) FILTER (WHERE won) AS wins,
+             count(*) FILTER (WHERE draw) AS draws
+      FROM per_game
+      WHERE NOT any_bot AND xp_multiplier > 1
+      GROUP BY xp_multiplier
+      ORDER BY xp_multiplier ASC
+    `,
+    [playerId],
+  );
+  return result.rows.map(xpMultiplierRow);
+}
+
+function xpMultiplierRow(row: { multiplier: number; games: string; wins: string; draws: string }): PlayerXpMultiplierStat {
+  return {
+    multiplier: Number(row.multiplier),
+    games: Number(row.games),
+    wins: Number(row.wins),
+    draws: Number(row.draws),
+  };
+}
+
+/**
  * The cross of `byHero` and `byOpponentKind` (#63): per hero the player piloted,
  * their record against humans and against each bot tier.
  *
@@ -1146,6 +1216,8 @@ export interface LeaderboardPlayer {
   gamesPlayed: number;
   wins: number;
   byOpponentKind: PlayerOpponentKindStats;
+  /** `PlayerStats.byXpMultiplier`, same rule — a subset of `byOpponentKind.human`. */
+  byXpMultiplier: PlayerXpMultiplierStat[];
   /** Hero with the most games; ties to most wins, then heroId asc. Null-hero seats never qualify. */
   mainHeroId: string | null;
   /** That hero's name as the player's most recent game on it reported it. */
@@ -1198,7 +1270,7 @@ const ALL_PLAYER_SEATS_CTE = `
 /** The cross-player twin of `PLAYER_GAMES_CTE`: same completed-game filter. */
 const ALL_PLAYER_GAMES_CTE = `
   SELECT seats.player_id, seats.game_id, seats.team_index, seats.won, seats.hero_id, seats.hero_name,
-         g.draw, ${ENDED_AT} AS ended_at
+         g.draw, g.xp_multiplier, ${ENDED_AT} AS ended_at
   FROM seats
   JOIN games g ON g.id = seats.game_id
   WHERE g.campaign_id IS NULL
@@ -1250,6 +1322,7 @@ export async function leaderboard(
     gamesPlayed: Number(row.games_played),
     wins: Number(row.wins),
     byOpponentKind: { human: { games: 0, wins: 0, draws: 0 }, bots: [] } as PlayerOpponentKindStats,
+    byXpMultiplier: [] as PlayerXpMultiplierStat[],
     mainHeroId: null,
     mainHeroName: null,
     recentForm: [],
@@ -1264,6 +1337,10 @@ export async function leaderboard(
   for (const player of players) {
     const split = splits.get(player.playerId);
     if (split) player.byOpponentKind = split;
+  }
+  const multiplied = await leaderboardXpMultipliers(pool, players.map((player) => player.playerId));
+  for (const player of players) {
+    player.byXpMultiplier = multiplied.get(player.playerId) ?? [];
   }
 
   const since = options.since ?? null;
@@ -1475,6 +1552,65 @@ async function leaderboardOpponentKinds(
       entry.human.wins += wins;
       entry.human.draws += draws;
     }
+  }
+  return stats;
+}
+
+/**
+ * `byXpMultiplier` per player, for the given players — {@link playerByXpMultiplier}
+ * with the player filter lifted into the GROUP BY, so a leaderboard row equals
+ * that player's own `/stats`. A second round trip (not folded into
+ * `leaderboardOpponentKinds`) so the existing XP inputs cannot move with it.
+ */
+async function leaderboardXpMultipliers(
+  pool: Pool,
+  playerIds: string[],
+): Promise<Map<string, PlayerXpMultiplierStat[]>> {
+  const stats = new Map<string, PlayerXpMultiplierStat[]>();
+  if (playerIds.length === 0) return stats;
+
+  const result = await pool.query<{
+    player_id: string;
+    multiplier: number;
+    games: string;
+    wins: string;
+    draws: string;
+  }>(
+    `
+      WITH seats AS (${ALL_PLAYER_SEATS_CTE}),
+      played AS (${ALL_PLAYER_GAMES_CTE}),
+      opposing AS (
+        SELECT p.player_id, p.game_id, p.won, p.draw, p.xp_multiplier, o.pilot_kind
+        FROM played p
+        JOIN game_seats o ON o.game_id = p.game_id AND o.team_index <> p.team_index
+        WHERE p.player_id = ANY($1::text[]) AND p.xp_multiplier > 1
+      ),
+      per_game AS (
+        SELECT player_id, game_id,
+               bool_and(won) AS won,
+               bool_or(draw) AS draw,
+               bool_or(pilot_kind = 'bot') AS any_bot,
+               max(xp_multiplier) AS xp_multiplier
+        FROM opposing
+        GROUP BY player_id, game_id
+      )
+      SELECT player_id,
+             xp_multiplier AS multiplier,
+             count(*) AS games,
+             count(*) FILTER (WHERE won) AS wins,
+             count(*) FILTER (WHERE draw) AS draws
+      FROM per_game
+      WHERE NOT any_bot
+      GROUP BY player_id, xp_multiplier
+      ORDER BY player_id ASC, xp_multiplier ASC
+    `,
+    [playerIds],
+  );
+
+  for (const row of result.rows) {
+    const list = stats.get(row.player_id);
+    if (list) list.push(xpMultiplierRow(row));
+    else stats.set(row.player_id, [xpMultiplierRow(row)]);
   }
   return stats;
 }
