@@ -125,6 +125,35 @@ describe('game submission schema', () => {
   });
 });
 
+describe('Quick Play fields (#107)', () => {
+  it('accepts matchedVia and xpMultiplier and normalizes them', () => {
+    for (const matchedVia of ['quick_match', 'lobby', 'invite', 'bot', 'tournament', 'rematch']) {
+      const game = { ...sampleGame(), matchedVia, xpMultiplier: 2 };
+      expect(validateGameSubmission(game)).toEqual({ ok: true, errors: [] });
+    }
+    const normalized = normalizeSubmission({ ...sampleGame(), matchedVia: 'quick_match', xpMultiplier: 2 } as never, 'idem-1');
+    expect(normalized).toMatchObject({ matchedVia: 'quick_match', xpMultiplier: 2 });
+    expect(validateGameSubmission({ ...sampleGame(), xpMultiplier: 1 }).ok).toBe(true);
+    expect(validateGameSubmission({ ...sampleGame(), xpMultiplier: 4 }).ok).toBe(true);
+  });
+
+  it('rejects an unknown matchedVia and an out-of-range xpMultiplier', () => {
+    const friends = validateGameSubmission({ ...sampleGame(), matchedVia: 'friends' } as never);
+    expect(friends.ok).toBe(false);
+    expect(friends.errors.join('\n')).toContain('/matchedVia');
+    for (const xpMultiplier of [0.5, 5]) {
+      const result = validateGameSubmission({ ...sampleGame(), xpMultiplier });
+      expect(result.ok).toBe(false);
+      expect(result.errors.join('\n')).toContain('/xpMultiplier');
+    }
+  });
+
+  it('stays optional: a submission without either validates, normalizing to null and 1', () => {
+    expect(validateGameSubmission(sampleGame())).toEqual({ ok: true, errors: [] });
+    expect(normalizeSubmission(sampleGame(), 'idem-1')).toMatchObject({ matchedVia: null, xpMultiplier: 1 });
+  });
+});
+
 describe('seat deck rules hash', () => {
   it('stays optional: a submission without it validates and normalizes to null', () => {
     const game = sampleGame();

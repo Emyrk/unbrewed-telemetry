@@ -159,6 +159,8 @@ export function normalizeSubmission(
     turns: nullableNumber(submission.turns),
     durationSeconds: nullableNumber(submission.durationSeconds),
     firstPlayerTeam: nullableNumber(submission.firstPlayerTeam),
+    matchedVia: nullableString(submission.matchedVia),
+    xpMultiplier: submission.xpMultiplier ?? 1,
     engineSchemaVersion: nullableNumber(submission.engine?.schemaVersion),
     engineDslVersion: nullableString(submission.engine?.dslVersion),
     protocolVersion: nullableNumber(submission.engine?.protocolVersion),

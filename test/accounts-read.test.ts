@@ -65,6 +65,8 @@ function game(options: {
   endCondition?: string;
   /** Omit for a producer that never reported who went first. */
   firstPlayerTeam?: number | null;
+  matchedVia?: GameSubmission['matchedVia'];
+  xpMultiplier?: number;
 }): GameSubmission {
   return {
     schemaVersion: 1,
@@ -94,6 +96,8 @@ function game(options: {
     firstPlayerTeam: options.firstPlayerTeam === null ? undefined : options.firstPlayerTeam ?? 0,
     engine: { schemaVersion: 3, dslVersion: '0.18.0', protocolVersion: 12, contentVersion: 'test' },
     stateHash: `state-${options.id}`,
+    ...(options.matchedVia ? { matchedVia: options.matchedVia } : {}),
+    ...(options.xpMultiplier !== undefined ? { xpMultiplier: options.xpMultiplier } : {}),
   } as GameSubmission;
 }
 
@@ -152,6 +156,7 @@ interface StatsBody {
     human: { games: number; wins: number; draws: number };
     bots: Array<{ difficulty: string; games: number; wins: number; draws: number }>;
   };
+  byXpMultiplier: Array<{ multiplier: number; games: number; wins: number; draws: number }>;
   firstPlayer: {
     first: { games: number; wins: number; draws: number };
     second: { games: number; wins: number; draws: number };
@@ -178,6 +183,7 @@ interface LeaderboardBody {
     gamesPlayed: number;
     wins: number;
     byOpponentKind: StatsBody['byOpponentKind'];
+    byXpMultiplier: StatsBody['byXpMultiplier'];
     mainHeroId: string | null;
     mainHeroName: string | null;
     recentForm: Array<'W' | 'L' | 'D'>;
@@ -349,6 +355,7 @@ describeDb('accounts read api', () => {
       byOpponentHero: [],
       byMap: [],
       byOpponentKind: { human: { games: 0, wins: 0, draws: 0 }, bots: [] },
+      byXpMultiplier: [],
       firstPlayer: {
         first: { games: 0, wins: 0, draws: 0 },
         second: { games: 0, wins: 0, draws: 0 },
@@ -850,6 +857,7 @@ describeDb('accounts read api', () => {
           // client reads losses off `games - wins - draws` per row (#58).
           bots: [{ difficulty: 'hard', games: 7, wins: 4, draws: 1 }],
         },
+        byXpMultiplier: [],
         firstPlayer: {
           first: { games: 7, wins: 4, draws: 1 },
           second: { games: 0, wins: 0, draws: 0 },
@@ -1581,6 +1589,7 @@ describeDb('accounts read api', () => {
               human: { games: 2, wins: 1, draws: 0 },
               bots: [{ difficulty: 'hard', games: 2, wins: 2, draws: 0 }],
             },
+            byXpMultiplier: [],
             mainHeroId: 'king-kong',
             mainHeroName: 'King Kong',
             recentForm: ['W', 'W', 'L', 'W'],
@@ -1595,6 +1604,7 @@ describeDb('accounts read api', () => {
               human: { games: 2, wins: 1, draws: 0 },
               bots: [{ difficulty: 'easy', games: 1, wins: 1, draws: 0 }],
             },
+            byXpMultiplier: [],
             mainHeroId: 'medusa',
             mainHeroName: 'Medusa',
             recentForm: ['W', 'W', 'L'],
@@ -1612,6 +1622,7 @@ describeDb('accounts read api', () => {
                 { difficulty: 'hard', games: 1, wins: 0, draws: 0 },
               ],
             },
+            byXpMultiplier: [],
             // The campaign game carrying her id would make this W, W, L.
             mainHeroId: 'bigfoot',
             mainHeroName: 'Bigfoot',
@@ -1648,6 +1659,7 @@ describeDb('accounts read api', () => {
             human: { games: 2, wins: 1, draws: 0 },
             bots: [{ difficulty: 'hard', games: 2, wins: 2, draws: 0 }],
           },
+          byXpMultiplier: [],
           mainHeroId: 'king-kong',
           mainHeroName: 'King Kong',
           recentForm: ['W', 'W', 'L', 'W'],
@@ -1676,7 +1688,7 @@ describeDb('accounts read api', () => {
         '"byOpponentKind":{"human":{"games":0,"wins":0,"draws":0},' +
         '"bots":[{"difficulty":"easy","games":1,"wins":1,"draws":0},' +
         '{"difficulty":"hard","games":1,"wins":0,"draws":0}]}}]';
-      const t2Keys = ['mainHeroId', 'mainHeroName', 'recentForm', 'currentStreak', 'windowGames', 'windowWins'];
+      const t2Keys = ['byXpMultiplier', 'mainHeroId', 'mainHeroName', 'recentForm', 'currentStreak', 'windowGames', 'windowWins'];
       for (const query of ['', '?since=2026-08-03T00:00:00.000Z', '?since=2000-01-01']) {
         const body = JSON.parse(await (await read(`/accounts/leaderboard${query}`)).text()) as {
           players: Array<Record<string, unknown>>;
@@ -2219,6 +2231,113 @@ describeDb('accounts read api', () => {
         crown: null,
         matchups: [],
         byOpponentKind: { human: 0, hardExpert: 0, casual: 0 },
+      });
+    });
+  });
+
+  describe('Quick Play 2x XP (#107)', () => {
+    const humanOpponent = (heroId: string, playerId: string): SeatSpec => ({
+      deck: `${heroId}@1.0.0`, heroId, pilot: 'human', playerId,
+    });
+    const alice: SeatSpec = { deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'human', playerId: ALICE };
+
+    beforeEach(async () => {
+      // (a) a 2x human win
+      await ingest(game({
+        id: 'g-qp-a', endedAt: '2026-08-01T10:00:00.000Z', winner: 0,
+        teams: [[alice], [humanOpponent('medusa', BOB)]], matchedVia: 'quick_match', xpMultiplier: 2,
+      }));
+      // (b) a 2x human loss
+      await ingest(game({
+        id: 'g-qp-b', endedAt: '2026-08-02T10:00:00.000Z', winner: 1,
+        teams: [[alice], [humanOpponent('medusa', BOB)]], matchedVia: 'quick_match', xpMultiplier: 2,
+      }));
+      // (c) a 2x game against a bot — must NOT appear in byXpMultiplier
+      await ingest(game({
+        id: 'g-qp-c', endedAt: '2026-08-03T10:00:00.000Z', winner: 0,
+        teams: [[alice], [{ deck: 'the-mandalorian@1.0.0', heroId: 'the-mandalorian', pilot: 'bot:hard', botDifficulty: 'hard' }]],
+        matchedVia: 'bot', xpMultiplier: 2,
+      }));
+      // (d) a 1x human game
+      await ingest(game({
+        id: 'g-qp-d', endedAt: '2026-08-04T10:00:00.000Z', winner: 0,
+        teams: [[alice], [humanOpponent('medusa', BOB)]], matchedVia: 'lobby',
+      }));
+      // (e) a 3x draw
+      await ingest(game({
+        id: 'g-qp-e', endedAt: '2026-08-05T10:00:00.000Z', winner: null, draw: true,
+        teams: [[alice], [humanOpponent('medusa', CAROL)]], matchedVia: 'invite', xpMultiplier: 3,
+      }));
+      // A pre-feature game: neither field.
+      await ingest(game({
+        id: 'g-qp-old', endedAt: '2026-07-30T10:00:00.000Z', winner: 0,
+        teams: [[alice], [humanOpponent('medusa', BOB)]],
+      }));
+    });
+
+    it('stores matchedVia and defaults the multiplier to 1', async () => {
+      const rows = await pool.query<{ id: string; matched_via: string | null; xp_multiplier: number }>(
+        `SELECT id, matched_via, xp_multiplier FROM games ORDER BY id`,
+      );
+      expect(rows.rows).toEqual([
+        { id: 'g-qp-a', matched_via: 'quick_match', xp_multiplier: 2 },
+        { id: 'g-qp-b', matched_via: 'quick_match', xp_multiplier: 2 },
+        { id: 'g-qp-c', matched_via: 'bot', xp_multiplier: 2 },
+        { id: 'g-qp-d', matched_via: 'lobby', xp_multiplier: 1 },
+        { id: 'g-qp-e', matched_via: 'invite', xp_multiplier: 3 },
+        { id: 'g-qp-old', matched_via: null, xp_multiplier: 1 },
+      ]);
+    });
+
+    it('reports one human-only row per multiplier, ascending, inside byOpponentKind.human', async () => {
+      const body = await stats(ALICE);
+      expect(body.byXpMultiplier).toEqual([
+        { multiplier: 2, games: 2, wins: 1, draws: 0 },
+        { multiplier: 3, games: 1, wins: 0, draws: 1 },
+      ]);
+      // (a), (b), (d), (e) and the pre-feature game; the bot game (c) is a bot game.
+      expect(body.byOpponentKind.human).toEqual({ games: 5, wins: 3, draws: 1 });
+      expect(body.byOpponentKind.bots).toEqual([{ difficulty: 'hard', games: 1, wins: 1, draws: 0 }]);
+    });
+
+    it('reports [] for a player with no multiplied human games', async () => {
+      expect((await stats(DAVE)).byXpMultiplier).toEqual([]);
+      const board = (await (await read('/accounts/leaderboard')).json()) as LeaderboardBody;
+      for (const row of board.players.filter((player) => player.playerId === ALICE || player.playerId === CAROL)) {
+        expect(row.byXpMultiplier).toEqual((await stats(row.playerId)).byXpMultiplier);
+      }
+    });
+
+    it('gives the opponent the same rows from their own seat', async () => {
+      expect((await stats(BOB)).byXpMultiplier).toEqual([{ multiplier: 2, games: 2, wins: 1, draws: 0 }]);
+      expect((await stats(CAROL)).byXpMultiplier).toEqual([{ multiplier: 3, games: 1, wins: 0, draws: 1 }]);
+    });
+
+    it('is identical on the leaderboard row and the player stats', async () => {
+      const board = (await (await read('/accounts/leaderboard')).json()) as LeaderboardBody;
+      for (const playerId of [ALICE, BOB, CAROL]) {
+        const row = board.players.find((player) => player.playerId === playerId);
+        expect(row).toBeDefined();
+        expect(row!.byXpMultiplier).toEqual((await stats(playerId)).byXpMultiplier);
+        expect(row!.byOpponentKind).toEqual((await stats(playerId)).byOpponentKind);
+      }
+      expect(board.players.find((player) => player.playerId === ALICE)!.byXpMultiplier).toEqual([
+        { multiplier: 2, games: 2, wins: 1, draws: 0 },
+        { multiplier: 3, games: 1, wins: 0, draws: 1 },
+      ]);
+    });
+
+    it('exposes matchedVia on every row of the games feed', async () => {
+      const feed = (await (await read(`/accounts/players/${ALICE}/games`)).json()) as {
+        games: Array<{ id: string; matchedVia: string | null }>;
+      };
+      expect(Object.fromEntries(feed.games.map((g) => [g.id, g.matchedVia]))).toEqual({
+        'g-qp-a': 'quick_match',
+        'g-qp-b': 'quick_match',
+        'g-qp-c': 'bot',
+        'g-qp-d': 'lobby',
+        'g-qp-e': 'invite',
+        'g-qp-old': null,
       });
     });
   });
