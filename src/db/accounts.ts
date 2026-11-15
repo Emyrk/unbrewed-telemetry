@@ -58,6 +58,9 @@ export const MIN_HUMAN_WIN_TURNS = 5;
 /** Days the activity calendar covers, today (UTC) included. */
 export const PLAYER_CALENDAR_DAYS = 182;
 
+/** Streak positions `daily.byStreakDay` reports; the last one means "this or later". */
+export const DAILY_STREAK_DAY_CAP = 7;
+
 /** Format ids a 1v1 matchup grid reads: the production id and the mock label. */
 const DUEL_FORMATS = ['duel', '1v1'];
 
@@ -185,6 +188,49 @@ export interface PlayerCalendarDay {
   games: number;
 }
 
+/** How many of the player's active days sat at one position of a day streak. */
+export interface PlayerStreakDayStat {
+  /** 1..{@link DAILY_STREAK_DAY_CAP}; the cap also holds every later position. */
+  day: number;
+  days: number;
+}
+
+/** Consecutive UTC days with at least one finished game. */
+export interface PlayerDayStreak {
+  /** The run ending today or yesterday (UTC); 0 once the last active day is older. */
+  current: number;
+  /** Longest run anywhere in the player's history, uncapped. */
+  best: number;
+}
+
+/**
+ * Daily activity (#110), lifetime — what unbrewed-api pays the daily play bonus
+ * and the first-win-of-the-day bonus from. See {@link dailyCtes} for the rules.
+ */
+export interface DailyStats {
+  /** Distinct UTC days with at least one finished game. */
+  activeDays: number;
+  /** Distinct UTC days with at least one win. A draw is not a win. */
+  winDays: number;
+  /**
+   * Active days bucketed by their position in a run of consecutive active days.
+   * Always {@link DAILY_STREAK_DAY_CAP} rows, `day` 1..7 ascending, zeroed when
+   * empty; `days` sums to `activeDays`.
+   */
+  byStreakDay: PlayerStreakDayStat[];
+  streak: PlayerDayStreak;
+}
+
+/** {@link DailyStats} plus the request's own UTC day. Player stats only. */
+export interface PlayerDailyStats extends DailyStats {
+  today: {
+    /** `YYYY-MM-DD`, the UTC date of the request's `now`. */
+    date: string;
+    games: number;
+    wins: number;
+  };
+}
+
 /** The player's own hero against one opposing hero, duels only. */
 export interface PlayerHeroOpponentHeroStat {
   heroId: string | null;
@@ -278,6 +324,8 @@ export interface PlayerStats {
    * today, only days with games, oldest first.
    */
   calendar: PlayerCalendarDay[];
+  /** Lifetime daily activity and day streak (#110). */
+  daily: PlayerDailyStats;
   /** Own hero x each opposing seat's hero, duel/1v1 games only, games desc. */
   byHeroOpponentHero: PlayerHeroOpponentHeroStat[];
 }
@@ -545,6 +593,7 @@ export async function playerStats(
     botChallenges,
     heroOpponents,
     calendar,
+    daily,
     byHeroOpponentHero,
   ] =
     await Promise.all([
@@ -558,6 +607,7 @@ export async function playerStats(
       playerBotChallenges(pool, playerId),
       playerByHeroOpponent(pool, playerId, minSeconds),
       playerCalendar(pool, playerId, now),
+      playerDaily(pool, playerId, now),
       playerByHeroOpponentHero(pool, playerId),
     ]);
 
@@ -575,6 +625,7 @@ export async function playerStats(
     byOpponentKind,
     byXpMultiplier,
     calendar,
+    daily,
     byHeroOpponentHero,
   };
 }
@@ -898,6 +949,126 @@ async function playerCalendar(pool: Pool, playerId: string, now: Date): Promise<
   );
 
   return result.rows.map((row) => ({ date: row.date, games: Number(row.games) }));
+}
+
+/**
+ * The one definition of a player's daily activity (#110), shared by a player's
+ * own `daily` block and the leaderboard's so the XP the api derives from either
+ * is the same number. Reads a `played` relation with `won`, `draw`, `ended_at`
+ * (plus `key` when partitioned) and defines `daily_positions`: one row per
+ * active UTC day with that day's `games`, `wins` and `pos`, its 1-based
+ * position in its run of consecutive active days.
+ *
+ * - Same game set and day rule as {@link playerCalendar}: the UTC date of
+ *   `COALESCE(ended_at, received_at)`, all formats, every opponent, campaigns
+ *   excluded — but lifetime, not the calendar's 182-day window.
+ * - A win is `won AND NOT draw`, the streak rule: a draw is not a win.
+ * - A day after `now`'s UTC date (a producer with a fast clock) is left out, as
+ *   the calendar leaves it out; it starts counting when that day arrives. That
+ *   keeps "today" the newest day there can be, so `current` is well defined.
+ * - Runs are a gaps-and-islands pass over the distinct days: a date minus its
+ *   row number is constant across consecutive dates, so it labels the run.
+ *
+ * `key` names the partition column (`player_id` for the cross-player read), or
+ * null for a relation that is already one player's. `nowParam` is the bind
+ * parameter holding the request's `now`.
+ */
+function dailyCtes(key: string | null, nowParam: string): string {
+  const by = key ? `${key}, ` : '';
+  const partition = key ? `PARTITION BY ${key} ` : '';
+  return `
+      daily_days AS (
+        SELECT ${by}(ended_at AT TIME ZONE 'UTC')::date AS day,
+               count(*) AS games,
+               count(*) FILTER (WHERE won AND NOT draw) AS wins
+        FROM played
+        WHERE (ended_at AT TIME ZONE 'UTC')::date <= ${dailyTodaySql(nowParam)}
+        GROUP BY ${by}(ended_at AT TIME ZONE 'UTC')::date
+      ),
+      daily_runs AS (
+        SELECT ${by}day, games, wins,
+               day - (row_number() OVER (${partition}ORDER BY day))::int AS run_id
+        FROM daily_days
+      ),
+      daily_positions AS (
+        SELECT ${by}day, games, wins,
+               row_number() OVER (PARTITION BY ${by}run_id ORDER BY day) AS pos
+        FROM daily_runs
+      )`;
+}
+
+/** The UTC date of the request's `now`, as SQL over its bind parameter. */
+function dailyTodaySql(nowParam: string): string {
+  return `(${nowParam}::timestamptz AT TIME ZONE 'UTC')::date`;
+}
+
+/**
+ * The aggregate columns over `daily_positions`, one output row per player.
+ *
+ * `current` is the position of the newest day when that day is today or
+ * yesterday: today's position if the player has played today, else yesterday's
+ * (the streak is still alive until the UTC day ends), else 0.
+ */
+function dailySelectSql(nowParam: string): string {
+  const today = dailyTodaySql(nowParam);
+  const buckets = Array.from(
+    { length: DAILY_STREAK_DAY_CAP },
+    (_, index) => `count(*) FILTER (WHERE LEAST(pos, ${DAILY_STREAK_DAY_CAP}) = ${index + 1})::int`,
+  );
+  return `count(*)::int AS active_days,
+             count(*) FILTER (WHERE wins > 0)::int AS win_days,
+             COALESCE(max(pos), 0)::int AS best,
+             COALESCE(max(pos) FILTER (WHERE day >= ${today} - 1), 0)::int AS current,
+             COALESCE(sum(games) FILTER (WHERE day = ${today}), 0)::int AS today_games,
+             COALESCE(sum(wins) FILTER (WHERE day = ${today}), 0)::int AS today_wins,
+             ARRAY[${buckets.join(', ')}] AS by_streak_day`;
+}
+
+interface DailyRow {
+  active_days: number;
+  win_days: number;
+  best: number;
+  current: number;
+  today_games: number;
+  today_wins: number;
+  by_streak_day: number[];
+}
+
+/** A row of {@link dailySelectSql}, or the all-zero block when there is none. */
+function dailyStats(row: DailyRow | undefined): DailyStats {
+  return {
+    activeDays: row?.active_days ?? 0,
+    winDays: row?.win_days ?? 0,
+    byStreakDay: Array.from({ length: DAILY_STREAK_DAY_CAP }, (_, index) => ({
+      day: index + 1,
+      days: row?.by_streak_day[index] ?? 0,
+    })),
+    streak: { current: row?.current ?? 0, best: row?.best ?? 0 },
+  };
+}
+
+/** The player's `daily` block (#110) — see {@link dailyCtes} for the rules. */
+async function playerDaily(pool: Pool, playerId: string, now: Date): Promise<PlayerDailyStats> {
+  const result = await pool.query<DailyRow>(
+    `
+      WITH mine AS (${PLAYER_SEATS_CTE}),
+      played AS (${PLAYER_GAMES_CTE}),
+      ${dailyCtes(null, '$2')}
+      SELECT ${dailySelectSql('$2')}
+      FROM daily_positions
+    `,
+    [playerId, now],
+  );
+
+  const row = result.rows[0];
+  return {
+    ...dailyStats(row),
+    today: {
+      date: now.toISOString().slice(0, 10),
+      games: row?.today_games ?? 0,
+      wins: row?.today_wins ?? 0,
+    },
+  };
 }
 
 /**
@@ -1226,6 +1397,8 @@ export interface LeaderboardPlayer {
   recentForm: PlayerResult[];
   /** `PlayerStats.streaks.current`, same rule. */
   currentStreak: number;
+  /** `PlayerStats.daily` without `today` (#110), same rules. */
+  daily: DailyStats;
   /** Only with `?since=`: games since then, casual (easy/medium) bot opponents excluded. */
   windowGames?: number;
   /** Only with `?since=`: wins among those `windowGames`. */
@@ -1299,9 +1472,10 @@ const ALL_PLAYER_GAMES_CTE = `
  */
 export async function leaderboard(
   pool: Pool,
-  options: { limit: number | null; since?: Date | null } = { limit: null },
+  options: { limit: number | null; since?: Date | null; now?: Date } = { limit: null },
 ): Promise<LeaderboardPlayer[]> {
   const limit = clampLeaderboardLimit(options.limit);
+  const now = options.now ?? new Date();
   const result = await pool.query<{ player_id: string; games_played: string; wins: string }>(
     `
       WITH seats AS (${ALL_PLAYER_SEATS_CTE}),
@@ -1327,6 +1501,7 @@ export async function leaderboard(
     mainHeroName: null,
     recentForm: [],
     currentStreak: 0,
+    daily: dailyStats(undefined),
   }));
 
   // Second round trip rather than one wide query: the split needs a different
@@ -1353,7 +1528,46 @@ export async function leaderboard(
       player.windowWins ??= 0;
     }
   }
+
+  const daily = await leaderboardDaily(pool, players.map((player) => player.playerId), now);
+  for (const player of players) {
+    const block = daily.get(player.playerId);
+    if (block) player.daily = block;
+  }
   return players;
+}
+
+/**
+ * `daily` per player (#110), for the given players — {@link playerDaily} with
+ * the player filter lifted into the partition, through the same
+ * {@link dailyCtes}, so a leaderboard row equals that player's own `/stats`
+ * block less `today`. Its own round trip, like its neighbours, so the XP inputs
+ * already on the row cannot move with it.
+ */
+async function leaderboardDaily(
+  pool: Pool,
+  playerIds: string[],
+  now: Date,
+): Promise<Map<string, DailyStats>> {
+  const stats = new Map<string, DailyStats>();
+  if (playerIds.length === 0) return stats;
+
+  const result = await pool.query<DailyRow & { player_id: string }>(
+    `
+      WITH all_seats AS (${ALL_PLAYER_SEATS_CTE}),
+      seats AS (SELECT * FROM all_seats WHERE player_id = ANY($1::text[])),
+      played AS (${ALL_PLAYER_GAMES_CTE}),
+      ${dailyCtes('player_id', '$2')}
+      SELECT player_id,
+             ${dailySelectSql('$2')}
+      FROM daily_positions
+      GROUP BY player_id
+    `,
+    [playerIds, now],
+  );
+
+  for (const row of result.rows) stats.set(row.player_id, dailyStats(row));
+  return stats;
 }
 
 type LeaderboardRowExtras = Pick<

@@ -208,7 +208,9 @@ export class PgTelemetryRepository {
    * Accounts read API (#56): games/wins for every player with a completed game.
    * `since` adds the `windowGames`/`windowWins` pair to every row.
    */
-  async leaderboard(options: { limit: number | null; since?: Date | null }): Promise<LeaderboardPlayer[]> {
+  async leaderboard(
+    options: { limit: number | null; since?: Date | null; now?: Date },
+  ): Promise<LeaderboardPlayer[]> {
     return leaderboard(this.pool, options);
   }
 

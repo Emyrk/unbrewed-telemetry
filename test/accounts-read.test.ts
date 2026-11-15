@@ -164,6 +164,7 @@ interface StatsBody {
   clutchWins: number;
   fastestBotWinTurns: number | null;
   calendar: Array<{ date: string; games: number }>;
+  daily: DailyBody & { today: { date: string; games: number; wins: number } };
   byHeroOpponentHero: Array<{
     heroId: string | null;
     heroName: string | null;
@@ -173,6 +174,19 @@ interface StatsBody {
     wins: number;
     draws: number;
   }>;
+}
+
+/** The `daily` block (#110) as a leaderboard row carries it: no `today`. */
+interface DailyBody {
+  activeDays: number;
+  winDays: number;
+  byStreakDay: Array<{ day: number; days: number }>;
+  streak: { current: number; best: number };
+}
+
+/** `byStreakDay` from its seven counts, day 1 first. */
+function streakDays(days: number[]): DailyBody['byStreakDay'] {
+  return [0, 1, 2, 3, 4, 5, 6].map((index) => ({ day: index + 1, days: days[index] ?? 0 }));
 }
 
 /** The leaderboard payload unbrewed-api ranks by XP (#56). */
@@ -188,6 +202,7 @@ interface LeaderboardBody {
     mainHeroName: string | null;
     recentForm: Array<'W' | 'L' | 'D'>;
     currentStreak: number;
+    daily: DailyBody;
     windowGames?: number;
     windowWins?: number;
   }>;
@@ -363,6 +378,13 @@ describeDb('accounts read api', () => {
       clutchWins: 0,
       fastestBotWinTurns: null,
       calendar: [],
+      daily: {
+        activeDays: 0,
+        winDays: 0,
+        byStreakDay: streakDays([]),
+        streak: { current: 0, best: 0 },
+        today: { date: '2026-08-06', games: 0, wins: 0 },
+      },
       byHeroOpponentHero: [],
     });
   });
@@ -868,6 +890,15 @@ describeDb('accounts read api', () => {
         fastestBotWinTurns: 10,
         // `now` is 2026-08-06 noon: the day-7 game is a future day, off the calendar.
         calendar: [1, 2, 3, 4, 5, 6].map((day) => ({ date: `2026-08-0${day}`, games: 1 })),
+        // Six consecutive days up to today; the day-7 game is not a day yet.
+        // Wins on days 1, 3 and 5 — the day-4 draw is not a win day.
+        daily: {
+          activeDays: 6,
+          winDays: 3,
+          byStreakDay: streakDays([1, 1, 1, 1, 1, 1]),
+          streak: { current: 6, best: 6 },
+          today: { date: '2026-08-06', games: 1, wins: 0 },
+        },
         byHeroOpponentHero: [
           {
             heroId: 'king-kong', heroName: 'King Kong',
@@ -1594,6 +1625,8 @@ describeDb('accounts read api', () => {
             mainHeroName: 'King Kong',
             recentForm: ['W', 'W', 'L', 'W'],
             currentStreak: 2,
+            // Aug 1-4, then nothing: the day streak died before `now` (Aug 6).
+            daily: { activeDays: 4, winDays: 3, byStreakDay: streakDays([1, 1, 1, 1]), streak: { current: 0, best: 4 } },
           },
           // Bob: the two games against Alice, plus an easy-bot win.
           {
@@ -1609,6 +1642,8 @@ describeDb('accounts read api', () => {
             mainHeroName: 'Medusa',
             recentForm: ['W', 'W', 'L'],
             currentStreak: 2,
+            // Aug 1-2, then today on its own.
+            daily: { activeDays: 3, winDays: 2, byStreakDay: streakDays([2, 1]), streak: { current: 1, best: 2 } },
           },
           // Carol: never faced a human — the mixed bot side files under 'easy'.
           {
@@ -1628,6 +1663,7 @@ describeDb('accounts read api', () => {
             mainHeroName: 'Bigfoot',
             recentForm: ['W', 'L'],
             currentStreak: 1,
+            daily: { activeDays: 2, winDays: 1, byStreakDay: streakDays([1, 1]), streak: { current: 2, best: 2 } },
           },
         ],
       });
@@ -1664,6 +1700,7 @@ describeDb('accounts read api', () => {
           mainHeroName: 'King Kong',
           recentForm: ['W', 'W', 'L', 'W'],
           currentStreak: 2,
+          daily: { activeDays: 4, winDays: 3, byStreakDay: streakDays([1, 1, 1, 1]), streak: { current: 0, best: 4 } },
         },
       ]);
       // A blank, unparseable, or non-positive limit is "no cap", not zero rows.
@@ -1688,7 +1725,7 @@ describeDb('accounts read api', () => {
         '"byOpponentKind":{"human":{"games":0,"wins":0,"draws":0},' +
         '"bots":[{"difficulty":"easy","games":1,"wins":1,"draws":0},' +
         '{"difficulty":"hard","games":1,"wins":0,"draws":0}]}}]';
-      const t2Keys = ['byXpMultiplier', 'mainHeroId', 'mainHeroName', 'recentForm', 'currentStreak', 'windowGames', 'windowWins'];
+      const t2Keys = ['byXpMultiplier', 'mainHeroId', 'mainHeroName', 'recentForm', 'currentStreak', 'daily', 'windowGames', 'windowWins'];
       for (const query of ['', '?since=2026-08-03T00:00:00.000Z', '?since=2000-01-01']) {
         const body = JSON.parse(await (await read(`/accounts/leaderboard${query}`)).text()) as {
           players: Array<Record<string, unknown>>;
@@ -2404,6 +2441,117 @@ describeDb('accounts read api', () => {
         casual: 0,
         humanVsExpert: { games: 1, wins: 1 },
       });
+    });
+  });
+
+  // Daily play / first-win-of-the-day inputs (#110). `now` is 2026-08-06T12:00Z.
+  describe('daily block (#110)', () => {
+    const BOT: SeatSpec = { deck: 'medusa@1.0.0', heroId: 'medusa', pilot: 'bot:hard', botDifficulty: 'hard' };
+
+    /** One Alice-vs-hard-bot duel ending at `endedAt`. */
+    async function played(id: string, endedAt: string, result: 'W' | 'L' | 'D'): Promise<void> {
+      await ingest(game({
+        id,
+        endedAt,
+        teams: [[{ deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'human', playerId: ALICE }], [BOT]],
+        winner: result === 'D' ? null : result === 'W' ? 0 : 1,
+        draw: result === 'D',
+      }));
+    }
+
+    beforeEach(async () => {
+      // A nine-day run, Jul 10-18: positions 1..9, so three days land in the
+      // "7 or later" bucket. Wins on the first three days only.
+      for (let day = 10; day <= 18; day += 1) {
+        await played(`g-daily-run-${day}`, `2026-07-${day}T15:00:00.000Z`, day <= 12 ? 'W' : 'L');
+      }
+      // Broken streak: Jul 19-24 idle, then one day with two games (one win).
+      await played('g-daily-double-1', '2026-07-25T08:00:00.000Z', 'L');
+      await played('g-daily-double-2', '2026-07-25T20:00:00.000Z', 'W');
+      // Either side of UTC midnight: 1 ms apart, two different days.
+      await played('g-daily-before-midnight', '2026-08-03T23:59:59.999Z', 'W');
+      await played('g-daily-after-midnight', '2026-08-04T00:00:00.000Z', 'L');
+      // A day whose only game is a draw: active, not a win day.
+      await played('g-daily-draw', '2026-08-05T10:00:00.000Z', 'D');
+      // Today: a loss, then a win.
+      await played('g-daily-today-1', '2026-08-06T09:00:00.000Z', 'L');
+      await played('g-daily-today-2', '2026-08-06T10:00:00.000Z', 'W');
+      // Stamped three days ahead of `now`: no day at all until that day arrives.
+      await played('g-daily-future', '2026-08-09T10:00:00.000Z', 'W');
+      // A campaign seat carrying Alice's id on an otherwise idle day: never hers.
+      const campaign = await cpRepo.createCampaign({
+        name: 'daily-exclusion-test',
+        spec: { note: 'test' },
+        baseSeed: 11,
+        games: [{ spec: { step: 'test' } }],
+        createdBy: 'test',
+      });
+      await ingest(game({
+        id: 'g-daily-campaign',
+        endedAt: '2026-07-19T10:00:00.000Z',
+        teams: [
+          [{ deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'bot:ismcts', playerId: ALICE }],
+          [{ deck: 'the-mandalorian@1.0.0', heroId: 'the-mandalorian', pilot: 'bot:mc' }],
+        ],
+        winner: 0,
+      }), campaign.id);
+    });
+
+    const LIFETIME: DailyBody = {
+      // 9 (the run) + 1 (the double day) + 4 (Aug 3-6).
+      activeDays: 14,
+      // Jul 10-12, Jul 25, Aug 3, Aug 6. The draw day and the loss days are not.
+      winDays: 6,
+      // Three runs start (day 1); two reach days 2-4; only the long run goes on,
+      // and its days 7, 8 and 9 share the last bucket.
+      byStreakDay: streakDays([3, 2, 2, 2, 1, 1, 3]),
+      streak: { current: 4, best: 9 },
+    };
+
+    it('reports lifetime active days, win days, streak buckets and today', async () => {
+      const body = await stats(ALICE);
+      expect(body.daily).toEqual({ ...LIFETIME, today: { date: '2026-08-06', games: 2, wins: 1 } });
+      // The whole history is still in the totals — the future game included.
+      expect(body.totalGames).toBe(17);
+    });
+
+    it('keeps the current streak alive through yesterday and ends it after', async () => {
+      // Aug 7, nothing played yet: Aug 6 is yesterday, the run of 4 still stands.
+      const nextDay = await repo.playerStats(ALICE, { now: new Date('2026-08-07T00:30:00.000Z') });
+      expect(nextDay.daily).toEqual({ ...LIFETIME, today: { date: '2026-08-07', games: 0, wins: 0 } });
+
+      // Aug 8, first instant: the last active day is two days ago.
+      const lapsed = await repo.playerStats(ALICE, { now: new Date('2026-08-08T00:00:00.000Z') });
+      expect(lapsed.daily).toEqual({
+        ...LIFETIME,
+        streak: { current: 0, best: 9 },
+        today: { date: '2026-08-08', games: 0, wins: 0 },
+      });
+
+      // Aug 9: the game stamped for that day now counts and starts a new run.
+      const arrived = await repo.playerStats(ALICE, { now: new Date('2026-08-09T12:00:00.000Z') });
+      expect(arrived.daily).toEqual({
+        activeDays: 15,
+        winDays: 7,
+        byStreakDay: streakDays([4, 2, 2, 2, 1, 1, 3]),
+        streak: { current: 1, best: 9 },
+        today: { date: '2026-08-09', games: 1, wins: 1 },
+      });
+    });
+
+    it('puts the same block on the leaderboard row, without today', async () => {
+      const body = (await (await read('/accounts/leaderboard')).json()) as LeaderboardBody;
+      expect(body.players.map((row) => row.playerId)).toEqual([ALICE]);
+      expect(body.players[0]!.daily).toEqual(LIFETIME);
+      expect(body.players[0]!.daily).not.toHaveProperty('today');
+
+      // Same `now` dependence as the player's own block.
+      for (const at of ['2026-08-07T00:30:00.000Z', '2026-08-08T00:00:00.000Z', '2026-08-09T12:00:00.000Z']) {
+        const now = new Date(at);
+        const { today: _today, ...own } = (await repo.playerStats(ALICE, { now })).daily;
+        const [row] = await repo.leaderboard({ limit: null, now });
+        expect(row!.daily).toEqual(own);
+      }
     });
   });
 });

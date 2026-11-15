@@ -1159,7 +1159,7 @@ async function handleAccountsLeaderboard(
 
   await sendCachedStats(req, url, res, statsCache, 'private', async () => ({
     status: 200,
-    payload: { ok: true, players: await repo.leaderboard({ limit, since }) },
+    payload: { ok: true, players: await repo.leaderboard({ limit, since, now: config.now() }) },
   }));
 }
 
