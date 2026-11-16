@@ -922,8 +922,11 @@ async function handleSandboxStats(
 }
 
 /**
- * Per-puzzle aggregates (#114). Public and aggregate-only, like the dashboard;
- * takes no parameters. Definitions live in `src/stats/puzzles.ts`.
+ * Per-puzzle aggregates (#114). Public and aggregate-only, like the dashboard.
+ * Definitions live in `src/stats/puzzles.ts`. The route takes no parameters, so
+ * it is cached under its path alone: a query string is ignored, and
+ * `?x=<random>` cannot force the aggregate to run or push real entries out of
+ * the shared cache (#116).
  */
 async function handlePuzzleStats(
   req: IncomingMessage,
@@ -933,7 +936,15 @@ async function handlePuzzleStats(
   config: AppConfig,
   statsCache: StatsCache,
 ): Promise<void> {
-  await sendCachedStats(req, url, res, statsCache, 'public', async () => ok200(await repo.puzzleStats(config.now())));
+  await sendCachedStats(
+    req,
+    url,
+    res,
+    statsCache,
+    'public',
+    async () => ok200(await repo.puzzleStats(config.now())),
+    url.pathname,
+  );
 }
 
 async function handleDeckStats(
@@ -1064,8 +1075,9 @@ async function sendCachedStats(
   statsCache: StatsCache,
   visibility: 'public' | 'private',
   load: () => Promise<{ status: number; payload: unknown }>,
+  key: string = statsCacheKey(url),
 ): Promise<void> {
-  const { response, hit } = await statsCache.get(statsCacheKey(url), load);
+  const { response, hit } = await statsCache.get(key, load);
   const cacheStatus = { 'x-stats-cache': hit ? 'hit' : 'miss' };
   if (response.status !== 200) {
     res.writeHead(response.status, {

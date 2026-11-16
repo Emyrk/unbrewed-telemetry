@@ -470,7 +470,7 @@ A full example is in `examples/sample-puzzle-attempt.json`:
 | `try_number` | 1-based index of this try within one sitting. |
 | `started_at`, `ended_at`, `duration_ms` | ISO date-times and the elapsed milliseconds; `ended_at` must not be before `started_at`. |
 | `actions` | At most 200, in order: `{ t_ms, actor, action }` with `actor` `solver` or `responder`. May be empty. |
-| `hint_used`, `solution_shown` | Booleans. |
+| `hint_used`, `solution_shown` | Booleans. `solution_shown: true` with `result: "solved"` is refused: an attempt that was shown the solution is not a solve (the engine sends it as `failed`). |
 | `analytics_id`, `account_id` | Both required, each a string or `null`: a guest's anonymous PostHog id, a signed-in player's account id. |
 | `engine` | `protocol_version` (integer) required; `content_version`, `dsl_version` optional. |
 | `source` | Producer id, stored as sent. |
@@ -482,14 +482,18 @@ action JSON verbatim and is stored untouched. A new attempt returns
 `attempt_id` returns `200` with `"duplicate": true` and writes nothing, even if
 the body differs. Bad signature `401`, wrong content type `415`, oversized body
 `413`, bad JSON or a schema violation `400`. A string holding a NUL character
-or a lone surrogate, and a timestamp Postgres cannot store (a leap second,
-year 0000), are also `400`. **Run `npm run db:migrate` before deploying this
+or a lone surrogate, a timestamp Postgres cannot store (a leap second,
+year 0000), an `action` nested more than 32 levels deep (the action object
+being level 1) and `result: "solved"` with `solution_shown: true` are also
+`400`. **Run `npm run db:migrate` before deploying this
 code.**
 
 ### `GET /v1/stats/puzzles`
 
 Public per-puzzle aggregates over `puzzle_attempts`, served through the stats
-response cache like the dashboard. No parameters, no ids in the response.
+response cache like the dashboard. No parameters, no ids in the response. The
+cache entry is keyed on the path alone, so a query string is ignored and cannot
+be used to bypass the cache.
 
 ```json
 {
@@ -498,6 +502,7 @@ response cache like the dashboard. No parameters, no ids in the response.
   "puzzles": [
     {
       "puzzleId": "kong-lethal-01",
+      "puzzleVersion": 2,
       "attempts": 8,
       "solvedAttempts": 4,
       "distinctPlayers": 4,
@@ -509,7 +514,12 @@ response cache like the dashboard. No parameters, no ids in the response.
 }
 ```
 
-One row per `puzzle_id`, across all its versions, ordered by id.
+One row per `puzzle_id`, ordered by id, **over its latest version only**:
+`puzzleVersion` is the highest `puzzle_version` any attempt at that puzzle
+carries, and every number in the row counts that version's attempts alone. A
+re-frozen puzzle therefore starts from zero once its first attempt arrives,
+instead of keeping the old position's solve rate. Attempts at older versions
+stay in `puzzle_attempts` but are in no number here.
 
 - `attempts`: every recorded attempt; `solvedAttempts`: those with `result: "solved"`.
 - A **player** is `coalesce(account_id, analytics_id)`. An attempt with neither
@@ -524,9 +534,10 @@ One row per `puzzle_id`, across all its versions, ordered by id.
 - `medianSolveSeconds`: the median `duration_ms` of solved attempts, in seconds
   (the mean of the two middle values on an even count); `null` when nothing was
   solved.
-- "Solved" is the producer's `result` alone: a solve after a hint or after the
-  solution was shown still counts. `hint_used` and `solution_shown` are stored
-  per attempt but not filtered on here.
+- "Solved" is the attempt's `result`. Ingest refuses `solved` together with
+  `solution_shown: true`, so no solved attempt was shown the solution. A solve
+  after a hint does count: `hint_used` is stored per attempt but not filtered
+  on here.
 
 ### Admin control plane
 

@@ -841,6 +841,8 @@ export interface PuzzleAttemptSubmission {
 /** One puzzle's row in `GET /v1/stats/puzzles`. Definitions: src/stats/puzzles.ts. */
 export interface PuzzleStatsRow {
   puzzleId: string;
+  /** The highest `puzzle_version` seen for this puzzle; every number below is over that version only. */
+  puzzleVersion: number;
   attempts: number;
   solvedAttempts: number;
   /** Distinct `coalesce(account_id, analytics_id)` with at least one attempt. */

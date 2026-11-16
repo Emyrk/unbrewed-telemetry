@@ -1,5 +1,6 @@
 /**
- * Migration 019 (#107) applies on a fresh database and on one already at 013 —
+ * Migration 019 (#107) applies on a fresh database and on one already at 013,
+ * and migration 020 (#114) leaves the `puzzle_attempts` shape it promises —
  * DB-gated on TEST_DATABASE_URL. Each case works in its own scratch database
  * created (and dropped) on the same server, so it never touches the shared test
  * database's schema.
@@ -60,10 +61,15 @@ describeDb('quickplay migration (019)', () => {
     index: [expect.stringContaining('WHERE (xp_multiplier > (1)::double precision)')],
   };
 
+  const migrationFiles = async () =>
+    (await readdir(migrationsDir)).filter((file) => file.endsWith('.sql')).sort();
+
   it('applies on a fresh database', async () => {
     const pool = await scratchPool();
     try {
       const result = await migrate(pool);
+      // Every migration file, in file order: a new migration extends this list by itself.
+      expect(result.applied).toEqual(await migrationFiles());
       expect(result.applied).toContain('019_quickplay.sql');
       expect(await quickplayShape(pool)).toEqual(expectedShape);
     } finally {
@@ -75,7 +81,7 @@ describeDb('quickplay migration (019)', () => {
     const pool = await scratchPool();
     try {
       await pool.query(`CREATE TABLE schema_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`);
-      const files = (await readdir(migrationsDir)).filter((file) => file.endsWith('.sql')).sort();
+      const files = await migrationFiles();
       const upTo013 = files.filter((file) => file <= '013_accounts_player_lookup.sql');
       expect(upTo013).toHaveLength(13);
       for (const file of upTo013) {
@@ -84,9 +90,53 @@ describeDb('quickplay migration (019)', () => {
       }
       const result = await migrate(pool);
       expect(result.skipped).toEqual(upTo013);
-      // Not "the last one": later migrations (020+) apply after it.
-      expect(result.applied).toContain('019_quickplay.sql');
+      // Exactly the migrations after 013, in file order. Not "019 is the last
+      // one": later migrations (020+) apply after it and join this list.
+      const after013 = files.filter((file) => file > '013_accounts_player_lookup.sql');
+      expect(after013.indexOf('019_quickplay.sql')).toBe(5);
+      expect(result.applied).toEqual(after013);
       expect(await quickplayShape(pool)).toEqual(expectedShape);
+    } finally {
+      await pool.end();
+    }
+  });
+
+  it('creates puzzle_attempts (020) keyed on attempt_id with its three indexes', async () => {
+    const pool = await scratchPool();
+    try {
+      const result = await migrate(pool);
+      expect(result.applied).toContain('020_puzzle_attempts.sql');
+
+      const primaryKey = await pool.query<{ column_name: string }>(
+        `SELECT a.attname AS column_name
+         FROM pg_index i
+         JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY (i.indkey)
+         WHERE i.indrelid = 'puzzle_attempts'::regclass AND i.indisprimary`,
+      );
+      expect(primaryKey.rows).toEqual([{ column_name: 'attempt_id' }]);
+
+      const indexes = await pool.query<{ indexname: string; indexdef: string }>(
+        `SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'puzzle_attempts' ORDER BY indexname`,
+      );
+      expect(indexes.rows).toEqual([
+        {
+          indexname: 'puzzle_attempts_account_idx',
+          indexdef: expect.stringMatching(/\(account_id\) WHERE \(account_id IS NOT NULL\)$/),
+        },
+        {
+          indexname: 'puzzle_attempts_analytics_idx',
+          indexdef: expect.stringMatching(/\(analytics_id\) WHERE \(analytics_id IS NOT NULL\)$/),
+        },
+        { indexname: 'puzzle_attempts_pkey', indexdef: expect.stringMatching(/UNIQUE INDEX .* \(attempt_id\)$/) },
+        { indexname: 'puzzle_attempts_puzzle_idx', indexdef: expect.stringMatching(/\(puzzle_id\)$/) },
+      ]);
+
+      // No foreign key in or out: an attempt is not a game.
+      const foreignKeys = await pool.query(
+        `SELECT conname FROM pg_constraint
+         WHERE contype = 'f' AND 'puzzle_attempts'::regclass IN (conrelid, confrelid)`,
+      );
+      expect(foreignKeys.rows).toEqual([]);
     } finally {
       await pool.end();
     }
