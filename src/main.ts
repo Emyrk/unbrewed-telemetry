@@ -28,6 +28,7 @@ const server = createServer(createApp({
     allowUnauthenticatedIngest: config.allowUnauthenticatedIngest,
     bodyLimitBytes: config.bodyLimitBytes,
     replayBodyLimitBytes: config.replayBodyLimitBytes,
+    puzzleAttemptBodyLimitBytes: config.puzzleAttemptBodyLimitBytes,
     statsCacheTtlMs: config.statsCacheTtlMs,
     now: () => new Date(),
     discordClientId: config.discordClientId,

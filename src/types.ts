@@ -800,3 +800,60 @@ export interface SandboxStatsResponse {
   hourOfWeek: SandboxHourOfWeekRow[];
   topHeroes: Array<{ heroName: string; players: number }>;
 }
+
+/**
+ * One attempt at a Pro puzzle (schemas/puzzle-attempt.v1.schema.json, #114).
+ * Snake case on the wire, as the engine producer writes it. An attempt is not
+ * a game: it lands in `puzzle_attempts` and nowhere else.
+ */
+export type PuzzleType = 'defeat_hero';
+export type PuzzleContext = 'landing' | 'page' | 'quick_search' | 'lobby_wait';
+export type PuzzleResult = 'solved' | 'failed' | 'abandoned';
+
+export interface PuzzleAttemptAction {
+  t_ms: number;
+  actor: 'solver' | 'responder';
+  /** The engine action JSON verbatim. */
+  action: Record<string, unknown>;
+}
+
+export interface PuzzleAttemptSubmission {
+  schema_version?: 1;
+  attempt_id: string;
+  puzzle_id: string;
+  puzzle_version: number;
+  puzzle_type: PuzzleType;
+  context: PuzzleContext;
+  result: PuzzleResult;
+  try_number: number;
+  started_at: string;
+  ended_at: string;
+  duration_ms: number;
+  actions: PuzzleAttemptAction[];
+  hint_used: boolean;
+  solution_shown: boolean;
+  analytics_id: string | null;
+  account_id: string | null;
+  engine: { protocol_version: number; content_version?: string; dsl_version?: string };
+  source: string;
+}
+
+/** One puzzle's row in `GET /v1/stats/puzzles`. Definitions: src/stats/puzzles.ts. */
+export interface PuzzleStatsRow {
+  puzzleId: string;
+  attempts: number;
+  solvedAttempts: number;
+  /** Distinct `coalesce(account_id, analytics_id)` with at least one attempt. */
+  distinctPlayers: number;
+  /** Of those, the ones with at least one solved attempt. */
+  distinctSolvers: number;
+  /** distinctSolvers / distinctPlayers; null when no attempt carried a player id. */
+  solveRate: number | null;
+  /** Median duration of solved attempts; null when nothing was solved. */
+  medianSolveSeconds: number | null;
+}
+
+export interface PuzzleStatsResponse {
+  generatedAt: string;
+  puzzles: PuzzleStatsRow[];
+}

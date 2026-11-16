@@ -12,6 +12,7 @@ import {
   type QueueWaitStatsRow,
 } from '../stats/queue-wait.js';
 import { SANDBOX_STATS_SQL, sandboxStats, type SandboxStatsRow } from '../stats/sandbox.js';
+import { PUZZLE_STATS_SQL, puzzleStats, type PuzzleStatsSqlRow } from '../stats/puzzles.js';
 import {
   community,
   heroCommunity,
@@ -44,6 +45,8 @@ import type {
   DeckProfile,
   DeckStatsResponse,
   GameReplaySubmission,
+  PuzzleAttemptSubmission,
+  PuzzleStatsResponse,
   GameSubmission,
   IngestCreated,
   IngestDuplicate,
@@ -261,6 +264,63 @@ export class PgTelemetryRepository {
       ],
     );
     return { duplicate: result.rowCount === 0 };
+  }
+
+  /**
+   * Puzzle attempts (#114): store one attempt, keyed by the producer's
+   * `attempt_id`. A re-post of the same attempt is a no-op and reports
+   * `duplicate`. Writes `puzzle_attempts` only — an attempt is not a game.
+   */
+  async insertPuzzleAttempt(args: {
+    attempt: PuzzleAttemptSubmission;
+    receivedAt: Date;
+    authKeyId: string | null;
+  }): Promise<{ duplicate: boolean }> {
+    const { attempt } = args;
+    const result = await this.pool.query(
+      `INSERT INTO puzzle_attempts
+         (attempt_id, received_at, source, auth_key_id, puzzle_id, puzzle_version, puzzle_type,
+          context, result, try_number, started_at, ended_at, duration_ms, action_count, actions,
+          hint_used, solution_shown, analytics_id, account_id,
+          protocol_version, content_version, dsl_version)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb,
+               $16, $17, $18, $19, $20, $21, $22)
+       ON CONFLICT (attempt_id) DO NOTHING`,
+      [
+        attempt.attempt_id,
+        args.receivedAt,
+        attempt.source,
+        args.authKeyId,
+        attempt.puzzle_id,
+        attempt.puzzle_version,
+        attempt.puzzle_type,
+        attempt.context,
+        attempt.result,
+        attempt.try_number,
+        attempt.started_at,
+        attempt.ended_at,
+        attempt.duration_ms,
+        attempt.actions.length,
+        JSON.stringify(attempt.actions),
+        attempt.hint_used,
+        attempt.solution_shown,
+        attempt.analytics_id,
+        attempt.account_id,
+        attempt.engine.protocol_version,
+        attempt.engine.content_version ?? null,
+        attempt.engine.dsl_version ?? null,
+      ],
+    );
+    return { duplicate: result.rowCount === 0 };
+  }
+
+  /**
+   * Per-puzzle aggregates (#114). The query and its definitions live in
+   * `src/stats/puzzles.ts`.
+   */
+  async puzzleStats(generatedAt: Date = new Date()): Promise<PuzzleStatsResponse> {
+    const { rows } = await this.pool.query<PuzzleStatsSqlRow>(PUZZLE_STATS_SQL);
+    return puzzleStats(rows, generatedAt);
   }
 
   /**

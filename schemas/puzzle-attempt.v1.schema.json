@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unbrewed.xyz/schemas/telemetry/puzzle-attempt.v1.schema.json",
+  "title": "Unbrewed Telemetry Puzzle Attempt v1",
+  "description": "One attempt at a Pro puzzle (a frozen position the visitor solves in one turn), recorded by the game server whether it was solved, failed or abandoned. An attempt is not a game: nothing here joins to games/game_seats or feeds a game count. `attempt_id` is the idempotency key. Every level is closed (additionalProperties:false) except `actions[].action`, which is the engine action JSON verbatim.",
+  "type": "object",
+  "required": [
+    "attempt_id",
+    "puzzle_id",
+    "puzzle_version",
+    "puzzle_type",
+    "context",
+    "result",
+    "try_number",
+    "started_at",
+    "ended_at",
+    "duration_ms",
+    "actions",
+    "hint_used",
+    "solution_shown",
+    "analytics_id",
+    "account_id",
+    "engine",
+    "source"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "attempt_id": {
+      "description": "Unique per attempt, minted by the producer. Also the idempotency key: a re-post of the same id is a no-op.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "puzzle_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "puzzle_version": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+    "puzzle_type": {
+      "description": "Closed on purpose: a new puzzle type arrives with a schema bump.",
+      "enum": ["defeat_hero"]
+    },
+    "context": {
+      "description": "Where the puzzle was embedded.",
+      "enum": ["landing", "page", "quick_search", "lobby_wait"]
+    },
+    "result": { "enum": ["solved", "failed", "abandoned"] },
+    "try_number": {
+      "description": "1-based index of this try within one sitting.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "started_at": { "type": "string", "format": "date-time" },
+    "ended_at": { "type": "string", "format": "date-time" },
+    "duration_ms": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+    "actions": {
+      "description": "Every action of the attempt in order, the solver's and the responder's. May be empty (an attempt abandoned before the first move).",
+      "type": "array",
+      "maxItems": 200,
+      "items": { "$ref": "#/$defs/timedAction" }
+    },
+    "hint_used": { "type": "boolean" },
+    "solution_shown": { "type": "boolean" },
+    "analytics_id": {
+      "description": "Anonymous PostHog id of a guest, or null.",
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "account_id": {
+      "description": "Pseudonymous account uuid of a signed-in player, or null.",
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "engine": { "$ref": "#/$defs/engine" },
+    "source": {
+      "description": "Producer id, e.g. `server`.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100
+    }
+  },
+  "$defs": {
+    "timedAction": {
+      "type": "object",
+      "required": ["t_ms", "actor", "action"],
+      "additionalProperties": false,
+      "properties": {
+        "t_ms": {
+          "description": "Milliseconds since the attempt started.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "actor": { "enum": ["solver", "responder"] },
+        "action": {
+          "description": "The engine action JSON verbatim (keys such as type, player, attacker, target, path, card, promptId, optionId). Deliberately free-form: the engine owns its interior, and its size is bounded by the request body limit.",
+          "type": "object"
+        }
+      }
+    },
+    "engine": {
+      "type": "object",
+      "required": ["protocol_version"],
+      "additionalProperties": false,
+      "properties": {
+        "protocol_version": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "content_version": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "dsl_version": { "type": "string", "minLength": 1, "maxLength": 100 }
+      }
+    }
+  }
+}

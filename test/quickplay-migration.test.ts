@@ -84,7 +84,8 @@ describeDb('quickplay migration (019)', () => {
       }
       const result = await migrate(pool);
       expect(result.skipped).toEqual(upTo013);
-      expect(result.applied[result.applied.length - 1]).toBe('019_quickplay.sql');
+      // Not "the last one": later migrations (020+) apply after it.
+      expect(result.applied).toContain('019_quickplay.sql');
       expect(await quickplayShape(pool)).toEqual(expectedShape);
     } finally {
       await pool.end();
