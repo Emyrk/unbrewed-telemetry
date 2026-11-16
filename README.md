@@ -517,6 +517,25 @@ Server-to-server only, authenticated with `Authorization: Bearer $ACCOUNTS_READ_
   - `calendar: [{ date: "YYYY-MM-DD", games }]` — games per UTC day over the last 182 days ending today (UTC; day 182 is today − 181), **only days with games**, oldest first. A game is dated by `COALESCE(ended_at, received_at)` in UTC.
   - `byHeroOpponentHero: [{ heroId, heroName, opponentHeroId, opponentHeroName, games, wins, draws }]` — the player's own hero crossed with the opposing seat's hero, **duel/1v1 games only** (a 2v2 is left out, since a teammate's fight is not the player's matchup), games descending then `heroId`/`opponentHeroId` ascending.
 
+  `daily` (#110) is the player's lifetime daily activity — what unbrewed-api pays the daily play bonus and the first-win-of-the-day bonus from, as a pure function of this block:
+
+  ```json
+  "daily": { "activeDays": 14, "winDays": 6,
+             "byStreakDay": [{ "day": 1, "days": 3 }, { "day": 2, "days": 2 }, { "day": 3, "days": 2 },
+                             { "day": 4, "days": 2 }, { "day": 5, "days": 1 }, { "day": 6, "days": 1 },
+                             { "day": 7, "days": 3 }],
+             "streak": { "current": 4, "best": 9 },
+             "today": { "date": "2026-08-06", "games": 2, "wins": 1 } }
+  ```
+
+  - Same game set and day rule as `calendar` — the UTC date of `COALESCE(ended_at, received_at)`, every format, every opponent (casual bots included), campaigns excluded — but **lifetime**, not the 182-day window. Any finished game makes its day active.
+  - `activeDays` — distinct UTC days with at least one finished game. `winDays` — distinct UTC days with at least one win. **A draw is not a win** here (`won AND NOT draw`, the `streaks` rule), so a day whose only game was a draw is active but not a win day.
+  - `byStreakDay` — every active day bucketed by its 1-based position in its run of consecutive active days; `day: 7` means "7 or later". **Always seven rows**, `day` 1..7 ascending, zeroed when empty, and `days` sums to `activeDays`. A gap of one idle UTC day ends a run; the next active day is position 1 again.
+  - `streak.best` is the longest run of consecutive active days (uncapped). `streak.current` is the run ending **today or yesterday** (UTC, relative to the request's clock) — it stays alive until the day after the last active day ends — and `0` once the last active day is older than yesterday.
+  - `today` is the request's UTC date with that day's games and wins. Player stats only.
+  - A game stamped on a day after the request's UTC date (a producer with a fast clock) is no day at all until that day arrives, as on `calendar`; `totalGames` still counts it.
+  - A player with no games gets zeros: `activeDays`/`winDays` `0`, seven zeroed `byStreakDay` rows, `streak` `0`/`0`, `today` with `games`/`wins` `0`.
+
   `?minSeconds=<n>` is an optional anti-farm floor over `byHero[].byOpponent` **and nothing else** — `totalGames`, `byHero[].games`/`wins`, `byOpponentKind` and the records always count the full history, so one call serves both "you played 300 games" and "280 of them count for points". It floors `games.duration_seconds`, the only per-game duration the schema carries (nullable integer, migration `001`; `turns` is the other anti-farm signal and is left to the caller, which already gets `avgTurns`). The default of `0` is *no* filter, null durations included; any positive floor requires a game to have actually reported a duration meeting it, so omitting the field is not a way past the bar. Lenient like `limit`: blank, negative, or unparseable means no floor, and a fractional value truncates rather than 400ing. It stays as upstream contract; unbrewed-api no longer sends it, because `duration_seconds` turned out to be NULL on every live game.
 
 - `GET /accounts/leaderboard?limit=<n>&since=<ISO>` returns the XP inputs for **every** player with at least one completed game — the only cross-player read on this surface:
@@ -528,6 +547,11 @@ Server-to-server only, authenticated with `Authorization: Bearer $ACCOUNTS_READ_
                   "byXpMultiplier": [{ "multiplier": 2, "games": 9, "wins": 5, "draws": 0 }],
                   "mainHeroId": "medusa", "mainHeroName": "Medusa",
                   "recentForm": ["W", "L", "W", "W", "D"], "currentStreak": 1,
+                  "daily": { "activeDays": 31, "winDays": 12,
+                             "byStreakDay": [{ "day": 1, "days": 9 }, { "day": 2, "days": 7 }, { "day": 3, "days": 5 },
+                                             { "day": 4, "days": 4 }, { "day": 5, "days": 3 }, { "day": 6, "days": 2 },
+                                             { "day": 7, "days": 1 }],
+                             "streak": { "current": 2, "best": 6 } },
                   "windowGames": 12, "windowWins": 7 }] }
   ```
 
@@ -537,6 +561,7 @@ Server-to-server only, authenticated with `Authorization: Bearer $ACCOUNTS_READ_
 
   - `mainHeroId`/`mainHeroName` — the hero with the most games, ties to most wins, then `heroId` ascending; seats with no hero id never qualify, so both are null only for a player with no hero on record. The name is the one the player's latest game on that hero reported.
   - `recentForm` — the last 5 results, newest first; `currentStreak` — consecutive wins ending on the newest game. Both come from the same SQL as `/stats`'s `recentForm`/`streaks.current` (`resultRunsCtes` in `src/db/accounts.ts`), so `recentForm` is always the first five of the player's own list.
+  - `daily` (#110) — the player's own `/stats` `daily` block **without `today`**: `activeDays`, `winDays`, `byStreakDay` (always seven rows) and `streak`, from the same SQL (`dailyCtes` in `src/db/accounts.ts`) and the same request clock, so the daily XP the api derives for a leaderboard row equals what it derives for that player's profile. Its own query, like the other row blocks, so the XP inputs above cannot move with it.
   - `?since=<ISO>` adds `windowGames`/`windowWins`: games ending at or after `since`, **excluding** games against a casual (easy/medium) bot. A game's bot tier is `byOpponentKind`'s — any opposing bot makes it a bot game, filed under the alphabetically first tier — and an `unknown` tier is not casual. Players with no games in the window get `0`/`0`. Accepted forms are a date (`2026-09-01`, midnight UTC) or a date-time with `Z` or an offset; anything else, including an empty value or a time without a zone, is `400 BAD_SINCE`.
 
 - `GET /accounts/community?window=all|month` and `GET /accounts/heroes/:heroId?window=all|month` (#72) are the community aggregates behind the stats dashboard's community and per-hero pages (field-by-field shapes: the stats dashboard contract §1a/§1b). Both read **qualifying community games only**: `campaign_id IS NULL AND format IN ('duel','1v1') AND` at least one human seat, so sim campaigns, bot-vs-bot games and team formats never count. Timestamps are `COALESCE(ended_at, received_at)`.
