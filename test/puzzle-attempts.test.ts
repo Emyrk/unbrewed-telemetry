@@ -5,9 +5,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { migrate } from '../src/db/migrate.js';
 import { PgTelemetryRepository } from '../src/db/repository.js';
 import { ControlPlaneRepository } from '../src/db/control-plane-repository.js';
-import { createApp } from '../src/http/app.js';
+import { createApp, type AppConfig } from '../src/http/app.js';
 import { signBody } from '../src/http/auth.js';
-import { validatePuzzleAttempt } from '../src/ingest/puzzle-attempt-schema.js';
+import { MAX_ACTION_DEPTH, validatePuzzleAttempt } from '../src/ingest/puzzle-attempt-schema.js';
 import type { PuzzleAttemptSubmission } from '../src/types.js';
 import { sampleGame } from './fixtures.js';
 
@@ -178,7 +178,42 @@ describe('puzzle attempt schema', () => {
       ended_at: '2026-12-31T23:59:60Z',
     })).errors).toContain('/ended_at: not a storable timestamp');
   });
+
+  it('rejects a solve reported after the solution was shown', () => {
+    expect(validatePuzzleAttempt(examplePayload({ result: 'solved', solution_shown: true }))).toEqual({
+      ok: false,
+      errors: ['/result: must not be solved when solution_shown is true'],
+    });
+    // Shown the solution and not solved, or solved after only a hint, are both fine.
+    for (const result of ['failed', 'abandoned'] as const) {
+      expect(validatePuzzleAttempt(examplePayload({ result, solution_shown: true })).ok, result).toBe(true);
+    }
+    expect(validatePuzzleAttempt(examplePayload({ result: 'solved', hint_used: true })).ok).toBe(true);
+  });
+
+  it('caps how deep an action may nest', () => {
+    const tooDeep = `/actions: an action must not nest deeper than ${MAX_ACTION_DEPTH} levels`;
+    expect(MAX_ACTION_DEPTH).toBe(32);
+    for (const kind of ['object', 'array'] as const) {
+      const atCap = validatePuzzleAttempt(examplePayload({ actions: [nestedAction(MAX_ACTION_DEPTH, kind)] }));
+      expect(atCap, kind).toEqual({ ok: true, errors: [] });
+      const over = validatePuzzleAttempt(examplePayload({ actions: [nestedAction(MAX_ACTION_DEPTH + 1, kind)] }));
+      expect(over, kind).toEqual({ ok: false, errors: [tooDeep] });
+    }
+    // Far past the cap: an error, not a stack overflow.
+    expect(validatePuzzleAttempt(examplePayload({ actions: [nestedAction(50_000, 'array')] })).errors).toEqual([tooDeep]);
+  });
 });
+
+/**
+ * A timed action whose `action` is `levels` containers deep, the action object
+ * itself being level 1. Built in a loop: recursion would overflow first.
+ */
+function nestedAction(levels: number, kind: 'object' | 'array'): PuzzleAttemptSubmission['actions'][number] {
+  let inner: unknown = 'leaf';
+  for (let level = 1; level < levels; level += 1) inner = kind === 'object' ? { n: inner } : [inner];
+  return { t_ms: 1, actor: 'solver', action: { type: 'MANEUVER', nested: inner } };
+}
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const describeDb = databaseUrl ? describe : describe.skip;
@@ -204,6 +239,50 @@ describeDb('puzzle attempts with postgres', () => {
     return fetch(`${baseUrl}/v1/puzzle-attempts`, { method: 'POST', headers, body });
   }
 
+  /** POST a raw, signed body: for JSON too deep for `JSON.stringify` to build. */
+  async function postRaw(url: string, body: string): Promise<Response> {
+    const signed = signBody(secret, body, now.toISOString());
+    return fetch(`${url}/v1/puzzle-attempts`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-unbrewed-timestamp': signed.timestamp,
+        'x-unbrewed-signature': signed.signature,
+      },
+      body,
+    });
+  }
+
+  function appConfig(overrides: Partial<AppConfig> = {}): AppConfig {
+    return {
+      telemetrySecret: secret,
+      allowUnauthenticatedIngest: false,
+      bodyLimitBytes: 1024 * 1024,
+      replayBodyLimitBytes: 2 * 1024 * 1024,
+      now: () => now,
+      discordClientId: '',
+      discordClientSecret: '',
+      discordRedirectUri: '',
+      adminDiscordIds: [],
+      secureCookies: false,
+      accountsReadToken: '',
+      ...overrides,
+    };
+  }
+
+  /** Run `use` against a second app on the same database, e.g. one with the stats cache on. */
+  async function withApp(overrides: Partial<AppConfig>, use: (url: string) => Promise<void>): Promise<void> {
+    const other = createServer(createApp({ repo, cpRepo, config: appConfig(overrides) }));
+    await new Promise<void>((resolve) => other.listen(0, resolve));
+    try {
+      const address = other.address();
+      if (!address || typeof address === 'string') throw new Error('Expected TCP server address');
+      await use(`http://127.0.0.1:${address.port}`);
+    } finally {
+      await new Promise<void>((resolve, reject) => other.close((error) => error ? reject(error) : resolve()));
+    }
+  }
+
   const countAttempts = async () =>
     (await pool.query('SELECT count(*)::int AS n FROM puzzle_attempts')).rows[0].n as number;
 
@@ -221,24 +300,7 @@ describeDb('puzzle attempts with postgres', () => {
     await migrate(pool);
     repo = new PgTelemetryRepository(pool);
     cpRepo = new ControlPlaneRepository(pool);
-    server = createServer(createApp({
-      repo,
-      cpRepo,
-      config: {
-        telemetrySecret: secret,
-        allowUnauthenticatedIngest: false,
-        bodyLimitBytes: 1024 * 1024,
-        replayBodyLimitBytes: 2 * 1024 * 1024,
-        puzzleAttemptBodyLimitBytes,
-        now: () => now,
-        discordClientId: '',
-        discordClientSecret: '',
-        discordRedirectUri: '',
-        adminDiscordIds: [],
-        secureCookies: false,
-        accountsReadToken: '',
-      },
-    }));
+    server = createServer(createApp({ repo, cpRepo, config: appConfig({ puzzleAttemptBodyLimitBytes }) }));
     await new Promise<void>((resolve) => server.listen(0, resolve));
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('Expected TCP server address');
@@ -390,6 +452,48 @@ describeDb('puzzle attempts with postgres', () => {
     expect(await countAttempts()).toBe(0);
   });
 
+  it('rejects a solve after the solution was shown, and stores nothing', async () => {
+    const response = await post(examplePayload({ result: 'solved', solution_shown: true }));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      code: 'VALIDATION_FAILED',
+      errors: ['/result: must not be solved when solution_shown is true'],
+    });
+    expect(await countAttempts()).toBe(0);
+
+    // The engine's rewrite of the same attempt is accepted.
+    expect((await post(examplePayload({ result: 'failed', solution_shown: true }))).status).toBe(201);
+  });
+
+  it('answers a deeply nested action with 400, not 500', async () => {
+    const tooDeep = `/actions: an action must not nest deeper than ${MAX_ACTION_DEPTH} levels`;
+    const bodyNested = (levels: number): string => {
+      const marker = '"__nested__"';
+      const body = JSON.stringify(examplePayload({
+        attempt_id: `deep-${levels}`,
+        actions: [{ t_ms: 1, actor: 'solver', action: { type: 'MANEUVER', nested: '__nested__' } }],
+      }));
+      // The action object is level 1, so `levels - 1` arrays sit inside it.
+      return body.replace(marker, `${'['.repeat(levels - 1)}${']'.repeat(levels - 1)}`);
+    };
+
+    // At the cap is stored; one level past it is refused.
+    expect((await postRaw(baseUrl, bodyNested(MAX_ACTION_DEPTH))).status).toBe(201);
+    const justOver = await postRaw(baseUrl, bodyNested(MAX_ACTION_DEPTH + 1));
+    expect(justOver.status).toBe(400);
+    expect(await justOver.json()).toMatchObject({ code: 'VALIDATION_FAILED', errors: [tooDeep] });
+
+    // As deep as the production body cap allows: 100 000 levels in ~200 KB.
+    await withApp({}, async (url) => {
+      const body = bodyNested(100_000);
+      expect(Buffer.byteLength(body)).toBeLessThan(256 * 1024);
+      const response = await postRaw(url, body);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ code: 'VALIDATION_FAILED', errors: [tooDeep] });
+    });
+    expect(await countAttempts()).toBe(1);
+  });
+
   it('changes no row count in games or any game ingest table', async () => {
     await pool.query('TRUNCATE game_submissions CASCADE');
     await repo.ingestValid({
@@ -446,7 +550,7 @@ describeDb('puzzle attempts with postgres', () => {
     await seed({ puzzle_id: 'puzzle-a', analytics_id: 'guest-2', result: 'abandoned', duration_ms: 1_000, actions: [] });
     await seed({ puzzle_id: 'puzzle-a', result: 'solved', duration_ms: 30_000 });
 
-    // puzzle-b: one player, never solved; across two puzzle versions.
+    // puzzle-b: one player, never solved; only the version 2 attempt is counted.
     await seed({ puzzle_id: 'puzzle-b', analytics_id: 'guest-1', result: 'failed', duration_ms: 7_000 });
     await seed({ puzzle_id: 'puzzle-b', analytics_id: 'guest-1', result: 'abandoned', duration_ms: 3_000, puzzle_version: 2 });
 
@@ -464,6 +568,7 @@ describeDb('puzzle attempts with postgres', () => {
       puzzles: [
         {
           puzzleId: 'puzzle-a',
+          puzzleVersion: 1,
           attempts: 8,
           solvedAttempts: 4,
           distinctPlayers: 4,
@@ -474,7 +579,8 @@ describeDb('puzzle attempts with postgres', () => {
         },
         {
           puzzleId: 'puzzle-b',
-          attempts: 2,
+          puzzleVersion: 2,
+          attempts: 1,
           solvedAttempts: 0,
           distinctPlayers: 1,
           distinctSolvers: 0,
@@ -483,6 +589,7 @@ describeDb('puzzle attempts with postgres', () => {
         },
         {
           puzzleId: 'puzzle-c',
+          puzzleVersion: 1,
           attempts: 1,
           solvedAttempts: 1,
           distinctPlayers: 0,
@@ -492,6 +599,7 @@ describeDb('puzzle attempts with postgres', () => {
         },
         {
           puzzleId: 'puzzle-d',
+          puzzleVersion: 1,
           attempts: 2,
           solvedAttempts: 1,
           distinctPlayers: 1,
@@ -508,30 +616,48 @@ describeDb('puzzle attempts with postgres', () => {
     }
   });
 
-  it('serves the aggregate through the stats cache', async () => {
-    const cached = createServer(createApp({
-      repo,
-      cpRepo,
-      config: {
-        telemetrySecret: secret,
-        allowUnauthenticatedIngest: false,
-        bodyLimitBytes: 1024 * 1024,
-        replayBodyLimitBytes: 2 * 1024 * 1024,
-        statsCacheTtlMs: 60_000,
-        now: () => now,
-        discordClientId: '',
-        discordClientSecret: '',
-        discordRedirectUri: '',
-        adminDiscordIds: [],
-        secureCookies: false,
-        accountsReadToken: '',
+  it('aggregates only the latest version of a re-frozen puzzle', async () => {
+    // Version 1 was easy: three players, all solved. Version 2 is the re-freeze:
+    // two players so far, one solve. Version 1 must not prop up the solve rate.
+    for (const account_id of ['acct-1', 'acct-2', 'acct-3']) {
+      await seed({ puzzle_id: 'refrozen', puzzle_version: 1, account_id, result: 'solved', duration_ms: 4_000 });
+    }
+    await seed({ puzzle_id: 'refrozen', puzzle_version: 2, account_id: 'acct-1', result: 'failed', duration_ms: 9_000 });
+    await seed({ puzzle_id: 'refrozen', puzzle_version: 2, account_id: 'acct-4', result: 'solved', duration_ms: 30_000 });
+    // A straggler still on the old version after the re-freeze changes nothing.
+    await seed({ puzzle_id: 'refrozen', puzzle_version: 1, account_id: 'acct-5', result: 'solved', duration_ms: 2_000 });
+    // Another puzzle's higher version number is not this puzzle's latest.
+    await seed({ puzzle_id: 'steady', puzzle_version: 7, account_id: 'acct-1', result: 'solved', duration_ms: 8_000 });
+
+    const response = await fetch(`${baseUrl}/v1/stats/puzzles`);
+    expect(response.status).toBe(200);
+    expect((await response.json() as { puzzles: unknown[] }).puzzles).toEqual([
+      {
+        puzzleId: 'refrozen',
+        puzzleVersion: 2,
+        attempts: 2,
+        solvedAttempts: 1,
+        distinctPlayers: 2,
+        distinctSolvers: 1,
+        solveRate: 0.5,
+        medianSolveSeconds: 30,
       },
-    }));
-    await new Promise<void>((resolve) => cached.listen(0, resolve));
-    try {
-      const address = cached.address();
-      if (!address || typeof address === 'string') throw new Error('Expected TCP server address');
-      const url = `http://127.0.0.1:${address.port}/v1/stats/puzzles`;
+      {
+        puzzleId: 'steady',
+        puzzleVersion: 7,
+        attempts: 1,
+        solvedAttempts: 1,
+        distinctPlayers: 1,
+        distinctSolvers: 1,
+        solveRate: 1,
+        medianSolveSeconds: 8,
+      },
+    ]);
+  });
+
+  it('serves the aggregate through the stats cache', async () => {
+    await withApp({ statsCacheTtlMs: 60_000 }, async (appUrl) => {
+      const url = `${appUrl}/v1/stats/puzzles`;
 
       await seed({ puzzle_id: 'puzzle-a', analytics_id: 'guest-1', result: 'solved', duration_ms: 10_000 });
       const miss = await fetch(url);
@@ -551,8 +677,28 @@ describeDb('puzzle attempts with postgres', () => {
 
       const notModified = await fetch(url, { headers: { 'if-none-match': etag! } });
       expect(notModified.status).toBe(304);
-    } finally {
-      await new Promise<void>((resolve, reject) => cached.close((error) => error ? reject(error) : resolve()));
-    }
+    });
+  });
+
+  it('caches the aggregate under its path alone, whatever the query string', async () => {
+    await withApp({ statsCacheTtlMs: 60_000 }, async (appUrl) => {
+      const url = `${appUrl}/v1/stats/puzzles`;
+      await seed({ puzzle_id: 'puzzle-a', analytics_id: 'guest-1', result: 'solved', duration_ms: 10_000 });
+
+      const first = await fetch(`${url}?x=1`);
+      expect(first.status).toBe(200);
+      expect(first.headers.get('x-stats-cache')).toBe('miss');
+      const body = await first.text();
+
+      // A different throwaway parameter, and none at all, reuse the one entry:
+      // the attempt seeded in between is not visible, so the query did not run.
+      await seed({ puzzle_id: 'puzzle-a', analytics_id: 'guest-2', result: 'failed', duration_ms: 10_000 });
+      for (const query of ['?x=2', '', '?cachebust=3&x=4']) {
+        const again = await fetch(`${url}${query}`);
+        expect(again.status, query).toBe(200);
+        expect(again.headers.get('x-stats-cache'), query).toBe('hit');
+        expect(await again.text(), query).toBe(body);
+      }
+    });
   });
 });

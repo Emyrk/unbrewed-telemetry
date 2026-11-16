@@ -59,7 +59,10 @@
       "items": { "$ref": "#/$defs/timedAction" }
     },
     "hint_used": { "type": "boolean" },
-    "solution_shown": { "type": "boolean" },
+    "solution_shown": {
+      "description": "True when the solution was revealed during this attempt. Not allowed together with `result: \"solved\"`: the service rejects that combination.",
+      "type": "boolean"
+    },
     "analytics_id": {
       "description": "Anonymous PostHog id of a guest, or null.",
       "type": ["string", "null"],
@@ -94,7 +97,7 @@
         },
         "actor": { "enum": ["solver", "responder"] },
         "action": {
-          "description": "The engine action JSON verbatim (keys such as type, player, attacker, target, path, card, promptId, optionId). Deliberately free-form: the engine owns its interior, and its size is bounded by the request body limit.",
+          "description": "The engine action JSON verbatim (keys such as type, player, attacker, target, path, card, promptId, optionId). Deliberately free-form: the engine owns its interior; its size is bounded by the request body limit and the service rejects one nested more than 32 levels deep.",
           "type": "object"
         }
       }
