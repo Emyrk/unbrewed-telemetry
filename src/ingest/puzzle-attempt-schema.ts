@@ -22,15 +22,46 @@ function formatAjvError(error: ErrorObject): string {
 }
 
 /**
- * What the JSON Schema cannot say: an attempt cannot end before it started.
- * `actions[].action` is deliberately not inspected — it is the engine's action
- * JSON verbatim, and its size is bounded by the route's body limit.
+ * Strings Postgres cannot store: `text` and `jsonb` both refuse a NUL, and
+ * `jsonb` refuses a lone surrogate. Without this they would pass validation
+ * and fail the insert as a 500. Checks character content only, never key
+ * names, so it cannot reject a real engine action.
+ */
+const UNSTORABLE = /\u0000|\p{Surrogate}/u;
+
+function hasUnstorableString(value: unknown): boolean {
+  if (typeof value === 'string') return UNSTORABLE.test(value);
+  if (Array.isArray(value)) return value.some(hasUnstorableString);
+  if (value === null || typeof value !== 'object') return false;
+  return Object.entries(value).some(([key, child]) => UNSTORABLE.test(key) || hasUnstorableString(child));
+}
+
+/** A timestamp `timestamptz` accepts: parseable (no leap second) and not year 0000. */
+function storableTime(value: string): number | null {
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms) || new Date(ms).getUTCFullYear() < 1) return null;
+  return ms;
+}
+
+/**
+ * What the JSON Schema cannot say: the payload must be storable, and an
+ * attempt cannot end before it started. `actions[].action` is otherwise not
+ * inspected — it is the engine's action JSON verbatim, and its size is bounded
+ * by the route's body limit.
  */
 function semanticErrors(attempt: PuzzleAttemptSubmission): string[] {
-  if (Date.parse(attempt.ended_at) < Date.parse(attempt.started_at)) {
-    return ['/ended_at: must not be before started_at'];
+  const errors: string[] = [];
+  if (hasUnstorableString(attempt)) {
+    errors.push('/: strings must not contain a NUL character or a lone surrogate');
   }
-  return [];
+  const started = storableTime(attempt.started_at);
+  const ended = storableTime(attempt.ended_at);
+  if (started === null) errors.push('/started_at: not a storable timestamp');
+  if (ended === null) errors.push('/ended_at: not a storable timestamp');
+  if (started !== null && ended !== null && ended < started) {
+    errors.push('/ended_at: must not be before started_at');
+  }
+  return errors;
 }
 
 export function validatePuzzleAttempt(value: unknown): ValidationResult {

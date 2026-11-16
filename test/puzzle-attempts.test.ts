@@ -151,6 +151,33 @@ describe('puzzle attempt schema', () => {
     }));
     expect(result).toEqual({ ok: false, errors: ['/ended_at: must not be before started_at'] });
   });
+
+  it('rejects what Postgres could not store, instead of failing the insert', () => {
+    const nul = String.fromCharCode(0);
+    const loneSurrogate = String.fromCharCode(0xd800);
+    const unstorable = '/: strings must not contain a NUL character or a lone surrogate';
+    const action = (inner: Record<string, unknown>) => [{ t_ms: 1, actor: 'solver' as const, action: inner }];
+    for (const override of [
+      { attempt_id: `a${nul}b` },
+      { account_id: `acct${nul}` },
+      { actions: action({ type: 'MANEUVER', note: `x${nul}` }) },
+      { actions: action({ type: 'MANEUVER', nested: [{ [`k${nul}`]: 1 }] }) },
+      { actions: action({ type: 'MANEUVER', note: loneSurrogate }) },
+    ] as Array<Partial<PuzzleAttemptSubmission>>) {
+      expect(validatePuzzleAttempt(examplePayload(override)).errors, JSON.stringify(override)).toContain(unstorable);
+    }
+    // A real astral character (a surrogate pair) and a literal backslash-u text are fine.
+    expect(validatePuzzleAttempt(examplePayload({
+      actions: action({ type: 'MANEUVER', note: '\u{1F600} \\u0000' }),
+    }))).toEqual({ ok: true, errors: [] });
+
+    expect(validatePuzzleAttempt(examplePayload({ started_at: '0000-01-01T00:00:00Z' })).errors)
+      .toContain('/started_at: not a storable timestamp');
+    expect(validatePuzzleAttempt(examplePayload({
+      started_at: '2027-06-01T00:00:00Z',
+      ended_at: '2026-12-31T23:59:60Z',
+    })).errors).toContain('/ended_at: not a storable timestamp');
+  });
 });
 
 const databaseUrl = process.env.TEST_DATABASE_URL;

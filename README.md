@@ -481,8 +481,10 @@ action JSON verbatim and is stored untouched. A new attempt returns
 `201 {"ok": true, "attemptId", "duplicate": false}`; a re-post of the same
 `attempt_id` returns `200` with `"duplicate": true` and writes nothing, even if
 the body differs. Bad signature `401`, wrong content type `415`, oversized body
-`413`, bad JSON or a schema violation `400`. **Run `npm run db:migrate` before
-deploying this code.**
+`413`, bad JSON or a schema violation `400`. A string holding a NUL character
+or a lone surrogate, and a timestamp Postgres cannot store (a leap second,
+year 0000), are also `400`. **Run `npm run db:migrate` before deploying this
+code.**
 
 ### `GET /v1/stats/puzzles`
 
@@ -522,6 +524,9 @@ One row per `puzzle_id`, across all its versions, ordered by id.
 - `medianSolveSeconds`: the median `duration_ms` of solved attempts, in seconds
   (the mean of the two middle values on an even count); `null` when nothing was
   solved.
+- "Solved" is the producer's `result` alone: a solve after a hint or after the
+  solution was shown still counts. `hint_used` and `solution_shown` are stored
+  per attempt but not filtered on here.
 
 ### Admin control plane
 

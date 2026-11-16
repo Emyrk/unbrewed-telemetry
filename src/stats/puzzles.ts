@@ -6,7 +6,9 @@ import type { PuzzleStatsResponse, PuzzleStatsRow } from '../types.js';
  *
  * One row per `puzzle_id`, across all of its versions. Definitions:
  * - `attempts`: every recorded attempt, whatever its result.
- * - `solvedAttempts`: attempts with `result = 'solved'`.
+ * - `solvedAttempts`: attempts with `result = 'solved'`. That is the producer's
+ *   verdict alone: `hint_used` and `solution_shown` are not filtered on, so a
+ *   solve after the solution was shown still counts everywhere below.
  * - a **player** is `coalesce(account_id, analytics_id)`. An attempt with
  *   neither id counts in `attempts`/`solvedAttempts` but is nobody: it is in
  *   neither player count. A guest who later signs in is two players.
