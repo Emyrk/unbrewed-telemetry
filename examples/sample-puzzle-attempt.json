@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "attempt_id": "pz-attempt-7f3c2b9e-0001",
+  "puzzle_id": "kong-lethal-01",
+  "puzzle_version": 1,
+  "puzzle_type": "defeat_hero",
+  "context": "landing",
+  "result": "solved",
+  "try_number": 2,
+  "started_at": "2026-11-16T12:00:00.000Z",
+  "ended_at": "2026-11-16T12:00:41.250Z",
+  "duration_ms": 41250,
+  "actions": [
+    { "t_ms": 6200, "actor": "solver", "action": { "type": "MANEUVER", "player": "p1" } },
+    {
+      "t_ms": 11840,
+      "actor": "solver",
+      "action": { "type": "MOVE_FIGHTER", "player": "p1", "fighter": "p1:hero", "path": ["s12", "s13", "s14"] }
+    },
+    { "t_ms": 12400, "actor": "solver", "action": { "type": "END_MANEUVER", "player": "p1" } },
+    {
+      "t_ms": 24310,
+      "actor": "solver",
+      "action": { "type": "DECLARE_ATTACK", "player": "p1", "attacker": "p1:hero", "target": "p2:hero" }
+    },
+    {
+      "t_ms": 31005,
+      "actor": "solver",
+      "action": { "type": "COMMIT_ATTACK_CARD", "player": "p1", "card": "p1:c17", "attachItem": false }
+    },
+    {
+      "t_ms": 31006,
+      "actor": "responder",
+      "action": { "type": "COMMIT_DEFENSE_CARD", "player": "p2", "card": "p2:c04" }
+    },
+    {
+      "t_ms": 39870,
+      "actor": "solver",
+      "action": {
+        "type": "RESPOND_PROMPT",
+        "player": "p1",
+        "promptId": "prompt-3",
+        "optionId": "s15",
+        "path": ["s14", "s15"]
+      }
+    }
+  ],
+  "hint_used": false,
+  "solution_shown": false,
+  "analytics_id": "0193a1b2-7c4d-7e8f-9a0b-1c2d3e4f5a6b",
+  "account_id": null,
+  "engine": { "protocol_version": 39, "content_version": "1.42.0", "dsl_version": "0.92.0" },
+  "source": "server"
+}

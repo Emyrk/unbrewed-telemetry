@@ -421,6 +421,108 @@ Rows land in `game_replays` (migration `016`), one per game id, with
 no foreign key to `games`: join on `game_id` at read time. **Run
 `npm run db:migrate` before deploying this code.**
 
+### `POST /v1/puzzle-attempts`
+
+Records one attempt at a Pro puzzle (a frozen position the visitor solves in
+one turn), matching `schemas/puzzle-attempt.v1.schema.json`. The game server
+posts every attempt, whether it was solved, failed or abandoned. **An attempt
+is not a game**: it lands in `puzzle_attempts` (migration `020`) and nothing in
+`games`, `game_seats` or any game count reads it.
+
+Auth is the same **HMAC-only** scheme as `/v1/replays` and `/v1/queue-events`:
+the producer is the game server, never a browser. The body cap is this route's
+own: `MAX_PUZZLE_ATTEMPT_BODY_BYTES`, default 256 KB.
+
+A full example is in `examples/sample-puzzle-attempt.json`:
+
+```json
+{
+  "attempt_id": "pz-attempt-7f3c2b9e-0001",
+  "puzzle_id": "kong-lethal-01",
+  "puzzle_version": 1,
+  "puzzle_type": "defeat_hero",
+  "context": "landing",
+  "result": "solved",
+  "try_number": 2,
+  "started_at": "2026-11-16T12:00:00.000Z",
+  "ended_at": "2026-11-16T12:00:41.250Z",
+  "duration_ms": 41250,
+  "actions": [
+    { "t_ms": 24310, "actor": "solver", "action": { "type": "DECLARE_ATTACK", "player": "p1", "attacker": "p1:hero", "target": "p2:hero" } },
+    { "t_ms": 31006, "actor": "responder", "action": { "type": "COMMIT_DEFENSE_CARD", "player": "p2", "card": "p2:c04" } }
+  ],
+  "hint_used": false,
+  "solution_shown": false,
+  "analytics_id": "0193a1b2-7c4d-7e8f-9a0b-1c2d3e4f5a6b",
+  "account_id": null,
+  "engine": { "protocol_version": 39, "content_version": "1.42.0", "dsl_version": "0.92.0" },
+  "source": "server"
+}
+```
+
+| Field | Notes |
+| --- | --- |
+| `attempt_id` | Unique per attempt; also the idempotency key. |
+| `puzzle_id`, `puzzle_version` | Which puzzle, and which revision of it (integer). |
+| `puzzle_type` | `defeat_hero`. A new type arrives with a schema bump. |
+| `context` | `landing`, `page`, `quick_search` or `lobby_wait`. |
+| `result` | `solved`, `failed` or `abandoned`. |
+| `try_number` | 1-based index of this try within one sitting. |
+| `started_at`, `ended_at`, `duration_ms` | ISO date-times and the elapsed milliseconds; `ended_at` must not be before `started_at`. |
+| `actions` | At most 200, in order: `{ t_ms, actor, action }` with `actor` `solver` or `responder`. May be empty. |
+| `hint_used`, `solution_shown` | Booleans. |
+| `analytics_id`, `account_id` | Both required, each a string or `null`: a guest's anonymous PostHog id, a signed-in player's account id. |
+| `engine` | `protocol_version` (integer) required; `content_version`, `dsl_version` optional. |
+| `source` | Producer id, stored as sent. |
+| `schema_version` | Optional, `1`. |
+
+Every level rejects unknown keys except `actions[].action`, which is the engine
+action JSON verbatim and is stored untouched. A new attempt returns
+`201 {"ok": true, "attemptId", "duplicate": false}`; a re-post of the same
+`attempt_id` returns `200` with `"duplicate": true` and writes nothing, even if
+the body differs. Bad signature `401`, wrong content type `415`, oversized body
+`413`, bad JSON or a schema violation `400`. **Run `npm run db:migrate` before
+deploying this code.**
+
+### `GET /v1/stats/puzzles`
+
+Public per-puzzle aggregates over `puzzle_attempts`, served through the stats
+response cache like the dashboard. No parameters, no ids in the response.
+
+```json
+{
+  "ok": true,
+  "generatedAt": "2026-11-16T12:05:00.000Z",
+  "puzzles": [
+    {
+      "puzzleId": "kong-lethal-01",
+      "attempts": 8,
+      "solvedAttempts": 4,
+      "distinctPlayers": 4,
+      "distinctSolvers": 2,
+      "solveRate": 0.5,
+      "medianSolveSeconds": 25
+    }
+  ]
+}
+```
+
+One row per `puzzle_id`, across all its versions, ordered by id.
+
+- `attempts`: every recorded attempt; `solvedAttempts`: those with `result: "solved"`.
+- A **player** is `coalesce(account_id, analytics_id)`. An attempt with neither
+  id counts in `attempts` and `solvedAttempts` but in neither player count. A
+  guest who later signs in counts as two players.
+- `distinctPlayers`: distinct players with at least one attempt;
+  `distinctSolvers`: distinct players with at least one solved attempt.
+- **`solveRate` is `distinctSolvers / distinctPlayers`: the share of distinct
+  players who solved the puzzle at least once.** It is not solved attempts over
+  attempts, so a player who fails five times and then solves it counts as
+  solved. `null` when no attempt carried a player id.
+- `medianSolveSeconds`: the median `duration_ms` of solved attempts, in seconds
+  (the mean of the two middle values on an even count); `null` when nothing was
+  solved.
+
 ### Admin control plane
 
 `GET /admin` uses Discord OAuth and the `ADMIN_DISCORD_IDS` allowlist. Admins can:

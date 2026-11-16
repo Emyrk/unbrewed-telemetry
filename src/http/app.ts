@@ -5,6 +5,7 @@ import { validateDeckDefinitions } from '../ingest/deck-schema.js';
 import { validateQueueEvents } from '../ingest/queue-events-schema.js';
 import { validateGameReplay } from '../ingest/game-replay-schema.js';
 import { validateSandboxEvents } from '../ingest/sandbox-events-schema.js';
+import { validatePuzzleAttempt } from '../ingest/puzzle-attempt-schema.js';
 import { deckRulesNotices } from '../ingest/deck-rules.js';
 import type { PgTelemetryRepository } from '../db/repository.js';
 import type { CampaignItemBucket, ControlPlaneRepository, SimJobCheckpoint } from '../db/control-plane-repository.js';
@@ -13,6 +14,7 @@ import type {
   GameSubmission,
   QueueEventsSubmission,
   GameReplaySubmission,
+  PuzzleAttemptSubmission,
   RecentHourlyResponse,
   SandboxEventsSubmission,
 } from '../types.js';
@@ -49,6 +51,11 @@ export interface AppConfig {
   bodyLimitBytes: number;
   /** Cap for `POST /v1/replays` only: bundles run ~70 KB but carry cosmetics blobs. */
   replayBodyLimitBytes: number;
+  /**
+   * Cap for `POST /v1/puzzle-attempts` only (#114). Optional so existing app
+   * configs keep compiling; unset means `DEFAULT_PUZZLE_ATTEMPT_BODY_LIMIT_BYTES`.
+   */
+  puzzleAttemptBodyLimitBytes?: number;
   now: () => Date;
   discordClientId: string;
   discordClientSecret: string;
@@ -131,6 +138,11 @@ async function handleRequest(
     return;
   }
 
+  if (req.method === 'POST' && url.pathname === '/v1/puzzle-attempts') {
+    await handlePuzzleAttemptIngest(req, res, repo, config);
+    return;
+  }
+
   if (req.method === 'POST' && url.pathname === '/v1/decks') {
     await handleDeckIngest(req, res, repo, config, cpRepo);
     return;
@@ -143,6 +155,11 @@ async function handleRequest(
 
   if (req.method === 'GET' && url.pathname === '/v1/stats/sandbox') {
     await handleSandboxStats(url, res, repo, config);
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/v1/stats/puzzles') {
+    await handlePuzzleStats(req, url, res, repo, config, statsCache);
     return;
   }
 
@@ -623,6 +640,71 @@ async function handleReplayIngest(
   sendJson(res, duplicate ? 200 : 201, { ok: true, gameId, duplicate });
 }
 
+/**
+ * 200 actions of a few hundred bytes each is ~60 KB; 256 KB leaves room for
+ * long move paths without letting the free-form `action` objects grow unbounded.
+ */
+export const DEFAULT_PUZZLE_ATTEMPT_BODY_LIMIT_BYTES = 256 * 1024;
+
+/**
+ * Puzzle attempts (#114). HMAC only, like `/v1/replays`: the producer is the
+ * game server itself, which runs the puzzle room and records the attempt — a
+ * browser never submits one (it holds no secret, and no CORS header is sent).
+ * One row per `attempt_id`; a re-post is a 200 duplicate. Writes
+ * `puzzle_attempts` only: an attempt is not a game.
+ */
+async function handlePuzzleAttemptIngest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  repo: PgTelemetryRepository,
+  config: AppConfig,
+): Promise<void> {
+  const contentType = req.headers['content-type'];
+  if (contentType && !String(contentType).toLowerCase().includes('application/json')) {
+    sendJson(res, 415, { ok: false, code: 'UNSUPPORTED_MEDIA_TYPE', message: 'Content-Type must be application/json' });
+    return;
+  }
+
+  const body = await readBody(req, config.puzzleAttemptBodyLimitBytes ?? DEFAULT_PUZZLE_ATTEMPT_BODY_LIMIT_BYTES);
+  if (!body.ok) {
+    sendJson(res, body.status, { ok: false, code: body.code, message: body.message });
+    return;
+  }
+
+  const auth = verifyIngestAuth(req.headers, body.body, {
+    secret: config.telemetrySecret,
+    allowUnauthenticated: config.allowUnauthenticatedIngest,
+    toleranceMs: 5 * 60 * 1000,
+    nowMs: () => config.now().getTime(),
+  });
+  if (!auth.ok) {
+    sendJson(res, auth.status, { ok: false, code: auth.code, message: auth.message });
+    return;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body.body.toString('utf8'));
+  } catch {
+    sendJson(res, 400, { ok: false, code: 'BAD_JSON', message: 'Request body is not valid JSON' });
+    return;
+  }
+
+  const validation = validatePuzzleAttempt(parsed);
+  if (!validation.ok) {
+    sendJson(res, 400, { ok: false, code: 'VALIDATION_FAILED', errors: validation.errors });
+    return;
+  }
+
+  const attempt = parsed as PuzzleAttemptSubmission;
+  const { duplicate } = await repo.insertPuzzleAttempt({
+    attempt,
+    receivedAt: config.now(),
+    authKeyId: auth.authKeyId,
+  });
+  sendJson(res, duplicate ? 200 : 201, { ok: true, attemptId: attempt.attempt_id, duplicate });
+}
+
 async function handleDeckIngest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -837,6 +919,21 @@ async function handleSandboxStats(
   }
   const stats = await repo.sandboxStats({ windowHours }, config.now());
   sendJson(res, 200, { ok: true, ...stats });
+}
+
+/**
+ * Per-puzzle aggregates (#114). Public and aggregate-only, like the dashboard;
+ * takes no parameters. Definitions live in `src/stats/puzzles.ts`.
+ */
+async function handlePuzzleStats(
+  req: IncomingMessage,
+  url: URL,
+  res: ServerResponse,
+  repo: PgTelemetryRepository,
+  config: AppConfig,
+  statsCache: StatsCache,
+): Promise<void> {
+  await sendCachedStats(req, url, res, statsCache, 'public', async () => ok200(await repo.puzzleStats(config.now())));
 }
 
 async function handleDeckStats(
