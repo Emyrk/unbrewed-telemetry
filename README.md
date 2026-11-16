@@ -487,8 +487,8 @@ Server-to-server only, authenticated with `Authorization: Bearer $ACCOUNTS_READ_
 - `GET /accounts/players/:playerId/stats` returns lifetime aggregates:
 
   ```json
-  { "totalGames": 7, "wins": 4, "losses": 2, "draws": 1,
-    "byHero": [{ "heroId": "king-kong", "heroName": "King Kong", "games": 4, "wins": 3,
+  { "totalGames": 7, "conceded": 1, "wins": 4, "losses": 2, "draws": 1,
+    "byHero": [{ "heroId": "king-kong", "heroName": "King Kong", "games": 4, "wins": 3, "conceded": 1,
                  "byOpponent": { "human": { "games": 1, "wins": 1 },
                                  "easy":  { "games": 0, "wins": 0 },
                                  "medium":{ "games": 0, "wins": 0 },
@@ -503,7 +503,9 @@ Server-to-server only, authenticated with `Authorization: Bearer $ACCOUNTS_READ_
 
   `byOpponentKind` splits the bot side **by real tier** (#58): the engine has never stamped `game_seats.bot_difficulty` on the live serving path (NULL on 100% of live bot seats), so the tier is decoded from the seat's `pilot` label, which the engine writes from its running preset — `bot:easy` → easy, `bot:mc(16,…)` → medium, `bot:mc(64,…)`/`bot:mc` → hard, `bot:ismcts(…)`/`bot:expert(…)` → expert. A stamped `bot_difficulty` still wins when present. Labels no rule claims (the `bot:mc(sims-…/eps-…/depth-…)` sim knob-grid sweeps) bucket as `unknown` rather than being guessed at; the mapping lives in `src/db/bot-tier.ts` and is unit-tested. Every split row — `byOpponentKind.human`, each bot tier, and both sides of `firstPlayer` — carries `games`, `wins` and `draws`, so a client can read `losses = games - wins - draws` per slice.
 
-  `byXpMultiplier` (#107) is `[{ multiplier, games, wins, draws }]`: one row per distinct `games.xp_multiplier > 1` among the player's completed **human-opponent** games, multiplier ascending, `[]` when none. It is the `kind = 'human'` branch of the `byOpponentKind` classification (opposing seats only; any bot opponent means the game is not counted here) restricted to multiplied games. **Every game in `byXpMultiplier` is ALSO counted in `byOpponentKind.human`** — the api pays `(multiplier − 1)` extra on top and must not re-count it. Sim/campaign games stay excluded.
+  **`conceded`** (additive; top level, each `byHero[]` row, `byOpponentKind.human`, each `byOpponentKind.bots[]` row, each `byXpMultiplier[]` row, and the leaderboard row) is how many of that slice's `games` the player's **own seat conceded**: the seat lost (`won = false`) a non-draw game whose `end_condition` is `forfeit`, `timeout` or `disconnect` (`CONCESSION_END_CONDITIONS`, case-insensitive, the same predicate as the #66 rule below). Those games **stay inside `games`** — the record and every existing count are unchanged — so the caller can price them at nothing: unbrewed-api pays XP, the first-game bonuses, badge game counts and quest progress off `games − conceded`. The seat that was conceded *to* is not conceded (it won). `conceded` never includes a win (the conceding seat has `won = false`), so `wins` needs no adjustment. Always an integer ≥ 0, `0` when nothing was conceded.
+
+  `byXpMultiplier` (#107) is `[{ multiplier, games, wins, draws, conceded }]`: one row per distinct `games.xp_multiplier > 1` among the player's completed **human-opponent** games, multiplier ascending, `[]` when none. It is the `kind = 'human'` branch of the `byOpponentKind` classification (opposing seats only; any bot opponent means the game is not counted here) restricted to multiplied games. **Every game in `byXpMultiplier` is ALSO counted in `byOpponentKind.human`** — the api pays `(multiplier − 1)` extra on top and must not re-count it. Sim/campaign games stay excluded.
 
   `byHero[].byOpponent` (#63) is the cross of `byHero` and `byOpponentKind` — the per-hero, per-opponent-kind wins the cosmetics point system (unbrewed-p2p#610) is priced off. Five fixed keys, always present and zeroed when unplayed, each `{ games, wins }`. The classification is `byOpponentKind`'s, unchanged: opposing seats only, a game with *any* bot opponent is a bot game, a mixed-tier bot side counts once under its alphabetically first tier, and the tier is the stamped `bot_difficulty` or the decoded pilot label. Two kinds of game land in no bucket and so make the buckets sum to less than the row's `games` — a bot side whose label decodes to `unknown` (there is no key to invent one into), and a game with no opposing seat at all (a producer bug, dropped by `byOpponentKind` too).
 
@@ -528,12 +530,12 @@ Server-to-server only, authenticated with `Authorization: Bearer $ACCOUNTS_READ_
              "today": { "date": "2026-08-06", "games": 2, "wins": 1 } }
   ```
 
-  - Same game set and day rule as `calendar` — the UTC date of `COALESCE(ended_at, received_at)`, every format, every opponent (casual bots included), campaigns excluded — but **lifetime**, not the 182-day window. Any finished game makes its day active.
+  - Same game set and day rule as `calendar` — the UTC date of `COALESCE(ended_at, received_at)`, every format, every opponent (casual bots included), campaigns excluded — but **lifetime**, not the 182-day window. Any finished game makes its day active — **except a game the player's own seat conceded** (see `conceded` above), which is not activity: it never makes a day active, never counts in `today`, and never extends or starts a run. `calendar` still shows it.
   - `activeDays` — distinct UTC days with at least one finished game. `winDays` — distinct UTC days with at least one win. **A draw is not a win** here (`won AND NOT draw`, the `streaks` rule), so a day whose only game was a draw is active but not a win day.
   - `byStreakDay` — every active day bucketed by its 1-based position in its run of consecutive active days; `day: 7` means "7 or later". **Always seven rows**, `day` 1..7 ascending, zeroed when empty, and `days` sums to `activeDays`. A gap of one idle UTC day ends a run; the next active day is position 1 again.
   - `streak.best` is the longest run of consecutive active days (uncapped). `streak.current` is the run ending **today or yesterday** (UTC, relative to the request's clock) — it stays alive until the day after the last active day ends — and `0` once the last active day is older than yesterday.
   - `today` is the request's UTC date with that day's games and wins. Player stats only.
-  - A game stamped on a day after the request's UTC date (a producer with a fast clock) is no day at all until that day arrives, as on `calendar`; `totalGames` still counts it.
+  - A game stamped on a day after the request's UTC date (a producer with a fast clock) is no day at all until that day arrives, as on `calendar`; `totalGames` still counts it. A day whose only game was conceded is no day at all.
   - A player with no games gets zeros: `activeDays`/`winDays` `0`, seven zeroed `byStreakDay` rows, `streak` `0`/`0`, `today` with `games`/`wins` `0`.
 
   `?minSeconds=<n>` is an optional anti-farm floor over `byHero[].byOpponent` **and nothing else** — `totalGames`, `byHero[].games`/`wins`, `byOpponentKind` and the records always count the full history, so one call serves both "you played 300 games" and "280 of them count for points". It floors `games.duration_seconds`, the only per-game duration the schema carries (nullable integer, migration `001`; `turns` is the other anti-farm signal and is left to the caller, which already gets `avgTurns`). The default of `0` is *no* filter, null durations included; any positive floor requires a game to have actually reported a duration meeting it, so omitting the field is not a way past the bar. Lenient like `limit`: blank, negative, or unparseable means no floor, and a fractional value truncates rather than 400ing. It stays as upstream contract; unbrewed-api no longer sends it, because `duration_seconds` turned out to be NULL on every live game.
@@ -541,10 +543,10 @@ Server-to-server only, authenticated with `Authorization: Bearer $ACCOUNTS_READ_
 - `GET /accounts/leaderboard?limit=<n>&since=<ISO>` returns the XP inputs for **every** player with at least one completed game — the only cross-player read on this surface:
 
   ```json
-  { "players": [{ "playerId": "…", "gamesPlayed": 123, "wins": 45,
-                  "byOpponentKind": { "human": { "games": 80, "wins": 30, "draws": 2 },
-                                      "bots": [{ "difficulty": "hard", "games": 43, "wins": 15, "draws": 1 }] },
-                  "byXpMultiplier": [{ "multiplier": 2, "games": 9, "wins": 5, "draws": 0 }],
+  { "players": [{ "playerId": "…", "gamesPlayed": 123, "conceded": 4, "wins": 45,
+                  "byOpponentKind": { "human": { "games": 80, "wins": 30, "draws": 2, "conceded": 3 },
+                                      "bots": [{ "difficulty": "hard", "games": 43, "wins": 15, "draws": 1, "conceded": 1 }] },
+                  "byXpMultiplier": [{ "multiplier": 2, "games": 9, "wins": 5, "draws": 0, "conceded": 0 }],
                   "mainHeroId": "medusa", "mainHeroName": "Medusa",
                   "recentForm": ["W", "L", "W", "W", "D"], "currentStreak": 1,
                   "daily": { "activeDays": 31, "winDays": 12,
@@ -555,7 +557,7 @@ Server-to-server only, authenticated with `Authorization: Bearer $ACCOUNTS_READ_
                   "windowGames": 12, "windowWins": 7 }] }
   ```
 
-  XP is computed api-side from tiered weights telemetry does not know, so rows cannot be pre-sorted by it; they come back `gamesPlayed` descending (`playerId` breaks ties) and the caller sorts. `byOpponentKind` is the same block, with the same semantics, that `/stats` returns — a game with *any* bot opponent is a bot game, opposing seats only, bot rows keyed on the tier decoded from the pilot label — and it is what lets the caller price a human win differently from an easy-bot win instead of weighting everything as human. `limit` is an optional safety cap, not a page size: omit it — or send a blank, unparseable, or non-positive value — and every player is returned. A row is by construction identical to what that player's own `/stats` reports as `totalGames`/`wins`/`byOpponentKind`/`byXpMultiplier`. `byXpMultiplier` (#107) is the same block, with the same semantics and the same "also counted in `byOpponentKind.human`" rule, as `/stats` — `[]` for a player with no multiplied human games.
+  XP is computed api-side from tiered weights telemetry does not know, so rows cannot be pre-sorted by it; they come back `gamesPlayed` descending (`playerId` breaks ties) and the caller sorts. `byOpponentKind` is the same block, with the same semantics, that `/stats` returns — a game with *any* bot opponent is a bot game, opposing seats only, bot rows keyed on the tier decoded from the pilot label — and it is what lets the caller price a human win differently from an easy-bot win instead of weighting everything as human. `limit` is an optional safety cap, not a page size: omit it — or send a blank, unparseable, or non-positive value — and every player is returned. A row is by construction identical to what that player's own `/stats` reports as `totalGames`/`conceded`/`wins`/`byOpponentKind`/`byXpMultiplier`. `byXpMultiplier` (#107) is the same block, with the same semantics and the same "also counted in `byOpponentKind.human`" rule, as `/stats` — `[]` for a player with no multiplied human games.
 
   The leaderboard dashboard fields (stats dashboard T2) are always sent and never touch `gamesPlayed`/`wins`/`byOpponentKind`/`byXpMultiplier`, which the api prices XP from (a test pins those bytes):
 

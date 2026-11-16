@@ -134,6 +134,7 @@ function heroOpponents(filled: Partial<HeroOpponents>): HeroOpponents {
 interface StatsBody {
   ok: true;
   totalGames: number;
+  conceded: number;
   wins: number;
   losses: number;
   draws: number;
@@ -142,6 +143,7 @@ interface StatsBody {
     heroName: string;
     games: number;
     wins: number;
+    conceded: number;
     byOpponent: HeroOpponents;
   }>;
   firstGameAt: string | null;
@@ -153,10 +155,10 @@ interface StatsBody {
   byOpponentHero: Array<{ heroId: string; heroName: string; games: number; wins: number }>;
   byMap: Array<{ map: string; games: number; wins: number }>;
   byOpponentKind: {
-    human: { games: number; wins: number; draws: number };
-    bots: Array<{ difficulty: string; games: number; wins: number; draws: number }>;
+    human: { games: number; wins: number; draws: number; conceded: number };
+    bots: Array<{ difficulty: string; games: number; wins: number; draws: number; conceded: number }>;
   };
-  byXpMultiplier: Array<{ multiplier: number; games: number; wins: number; draws: number }>;
+  byXpMultiplier: Array<{ multiplier: number; games: number; wins: number; draws: number; conceded: number }>;
   firstPlayer: {
     first: { games: number; wins: number; draws: number };
     second: { games: number; wins: number; draws: number };
@@ -195,6 +197,7 @@ interface LeaderboardBody {
   players: Array<{
     playerId: string;
     gamesPlayed: number;
+    conceded: number;
     wins: number;
     byOpponentKind: StatsBody['byOpponentKind'];
     byXpMultiplier: StatsBody['byXpMultiplier'];
@@ -357,6 +360,7 @@ describeDb('accounts read api', () => {
     expect(await stats(ALICE)).toEqual({
       ok: true,
       totalGames: 0,
+      conceded: 0,
       wins: 0,
       losses: 0,
       draws: 0,
@@ -369,7 +373,7 @@ describeDb('accounts read api', () => {
       recentForm: [],
       byOpponentHero: [],
       byMap: [],
-      byOpponentKind: { human: { games: 0, wins: 0, draws: 0 }, bots: [] },
+      byOpponentKind: { human: { games: 0, wins: 0, draws: 0, conceded: 0 }, bots: [] },
       byXpMultiplier: [],
       firstPlayer: {
         first: { games: 0, wins: 0, draws: 0 },
@@ -444,8 +448,8 @@ describeDb('accounts read api', () => {
       ],
       byMap: [{ map: 'mended-drum', games: 1, wins: 1 }],
       byOpponentKind: {
-        human: { games: 0, wins: 0, draws: 0 },
-        bots: [{ difficulty: 'hard', games: 1, wins: 1, draws: 0 }],
+        human: { games: 0, wins: 0, draws: 0, conceded: 0 },
+        bots: [{ difficulty: 'hard', games: 1, wins: 1, draws: 0, conceded: 0 }],
       },
       firstPlayer: {
         first: { games: 1, wins: 1, draws: 0 },
@@ -544,8 +548,8 @@ describeDb('accounts read api', () => {
     // Both opposing seats are bots at different difficulties: one bot row, and
     // the alphabetically first difficulty represents the game.
     expect(body.byOpponentKind).toEqual({
-      human: { games: 0, wins: 0, draws: 0 },
-      bots: [{ difficulty: 'easy', games: 1, wins: 1, draws: 0 }],
+      human: { games: 0, wins: 0, draws: 0, conceded: 0 },
+      bots: [{ difficulty: 'easy', games: 1, wins: 1, draws: 0, conceded: 0 }],
     });
 
     // Bob shares Alice's team, so he sees the same two opposing heroes.
@@ -702,12 +706,12 @@ describeDb('accounts read api', () => {
       const body = await stats(ALICE);
       expect(body.byOpponentKind).toEqual({
         // Only g-human has an all-human opposition, and Alice lost it.
-        human: { games: 1, wins: 0, draws: 0 },
+        human: { games: 1, wins: 0, draws: 0, conceded: 0 },
         // g-mixed carries a stamped `hard`; g-bot-unknown's label decodes to
         // nothing, which is the only way an `unknown` row is produced.
         bots: [
-          { difficulty: 'hard', games: 1, wins: 1, draws: 0 },
-          { difficulty: 'unknown', games: 1, wins: 1, draws: 0 },
+          { difficulty: 'hard', games: 1, wins: 1, draws: 0, conceded: 0 },
+          { difficulty: 'unknown', games: 1, wins: 1, draws: 0, conceded: 0 },
         ],
       });
     });
@@ -823,15 +827,15 @@ describeDb('accounts read api', () => {
       // whole record shows up in the `hard` bucket of its #63 breakdown.
       expect(body.byHero).toEqual([
         {
-          heroId: 'king-kong', heroName: 'King Kong', games: 4, wins: 3,
+          heroId: 'king-kong', heroName: 'King Kong', games: 4, wins: 3, conceded: 0,
           byOpponent: heroOpponents({ hard: { games: 4, wins: 3 } }),
         },
         {
-          heroId: 'medusa', heroName: 'Medusa', games: 2, wins: 1,
+          heroId: 'medusa', heroName: 'Medusa', games: 2, wins: 1, conceded: 0,
           byOpponent: heroOpponents({ hard: { games: 2, wins: 1 } }),
         },
         {
-          heroId: 'bigfoot', heroName: 'Bigfoot', games: 1, wins: 0,
+          heroId: 'bigfoot', heroName: 'Bigfoot', games: 1, wins: 0, conceded: 0,
           byOpponent: heroOpponents({ hard: { games: 1, wins: 0 } }),
         },
       ]);
@@ -844,20 +848,21 @@ describeDb('accounts read api', () => {
         // Unchanged from the #52 payload, asserted whole so a regression in any
         // existing field fails here and not only in the test above.
         totalGames: 7,
+        conceded: 0,
         wins: 4,
         losses: 2,
         draws: 1,
         byHero: [
           {
-            heroId: 'king-kong', heroName: 'King Kong', games: 4, wins: 3,
+            heroId: 'king-kong', heroName: 'King Kong', games: 4, wins: 3, conceded: 0,
             byOpponent: heroOpponents({ hard: { games: 4, wins: 3 } }),
           },
           {
-            heroId: 'medusa', heroName: 'Medusa', games: 2, wins: 1,
+            heroId: 'medusa', heroName: 'Medusa', games: 2, wins: 1, conceded: 0,
             byOpponent: heroOpponents({ hard: { games: 2, wins: 1 } }),
           },
           {
-            heroId: 'bigfoot', heroName: 'Bigfoot', games: 1, wins: 0,
+            heroId: 'bigfoot', heroName: 'Bigfoot', games: 1, wins: 0, conceded: 0,
             byOpponent: heroOpponents({ hard: { games: 1, wins: 0 } }),
           },
         ],
@@ -874,10 +879,10 @@ describeDb('accounts read api', () => {
         ],
         byMap: [{ map: 'mended-drum', games: 7, wins: 4 }],
         byOpponentKind: {
-          human: { games: 0, wins: 0, draws: 0 },
+          human: { games: 0, wins: 0, draws: 0, conceded: 0 },
           // The day-4 draw is a bot game, so the tier row carries it too: the
           // client reads losses off `games - wins - draws` per row (#58).
-          bots: [{ difficulty: 'hard', games: 7, wins: 4, draws: 1 }],
+          bots: [{ difficulty: 'hard', games: 7, wins: 4, draws: 1, conceded: 0 }],
         },
         byXpMultiplier: [],
         firstPlayer: {
@@ -953,15 +958,15 @@ describeDb('accounts read api', () => {
       expect(body.totalGames).toBe(6);
       // Rows are games desc then tier asc: hard has two games, the rest one.
       expect(body.byOpponentKind).toEqual({
-        human: { games: 0, wins: 0, draws: 0 },
+        human: { games: 0, wins: 0, draws: 0, conceded: 0 },
         bots: [
-          { difficulty: 'hard', games: 2, wins: 1, draws: 1 },
-          { difficulty: 'easy', games: 1, wins: 1, draws: 0 },
-          { difficulty: 'expert', games: 1, wins: 0, draws: 0 },
-          { difficulty: 'medium', games: 1, wins: 0, draws: 0 },
+          { difficulty: 'hard', games: 2, wins: 1, draws: 1, conceded: 0 },
+          { difficulty: 'easy', games: 1, wins: 1, draws: 0, conceded: 0 },
+          { difficulty: 'expert', games: 1, wins: 0, draws: 0, conceded: 0 },
+          { difficulty: 'medium', games: 1, wins: 0, draws: 0, conceded: 0 },
           // Only the knob-grid sweep label stays unknown — it is a point in a
           // parameter search, not a serving preset, so no tier is invented.
-          { difficulty: 'unknown', games: 1, wins: 1, draws: 0 },
+          { difficulty: 'unknown', games: 1, wins: 1, draws: 0, conceded: 0 },
         ],
       });
     });
@@ -978,6 +983,7 @@ describeDb('accounts read api', () => {
         games: 2,
         wins: 1,
         draws: 0,
+        conceded: 0,
       });
       expect(body.byOpponentKind.bots.map((row) => row.difficulty)).not.toContain('easy');
     });
@@ -1037,7 +1043,7 @@ describeDb('accounts read api', () => {
       const body = await stats(ALICE);
       expect(body.byHero).toEqual([
         {
-          heroId: 'king-kong', heroName: 'King Kong', games: 7, wins: 5,
+          heroId: 'king-kong', heroName: 'King Kong', games: 7, wins: 5, conceded: 0,
           // Two human games (one won), then one game per tier. Day 7's bot
           // decodes to no tier, so it is counted in `games` above but in no
           // bucket here — 6 bucketed games against 7 played.
@@ -1050,7 +1056,7 @@ describeDb('accounts read api', () => {
           }),
         },
         {
-          heroId: 'medusa', heroName: 'Medusa', games: 1, wins: 1,
+          heroId: 'medusa', heroName: 'Medusa', games: 1, wins: 1, conceded: 0,
           byOpponent: heroOpponents({ easy: { games: 1, wins: 1 } }),
         },
       ]);
@@ -1127,9 +1133,9 @@ describeDb('accounts read api', () => {
       // The game is the player's history and counts in `games`; it classifies
       // into neither bucket, the same producer-bug handling byOpponentKind has.
       expect(body.byHero).toEqual([
-        { heroId: 'king-kong', heroName: 'King Kong', games: 1, wins: 1, byOpponent: NO_HERO_OPPONENTS },
+        { heroId: 'king-kong', heroName: 'King Kong', games: 1, wins: 1, conceded: 0, byOpponent: NO_HERO_OPPONENTS },
       ]);
-      expect(body.byOpponentKind).toEqual({ human: { games: 0, wins: 0, draws: 0 }, bots: [] });
+      expect(body.byOpponentKind).toEqual({ human: { games: 0, wins: 0, draws: 0, conceded: 0 }, bots: [] });
     });
 
     describe('?minSeconds=', () => {
@@ -1147,7 +1153,7 @@ describeDb('accounts read api', () => {
         // king-kong's easy bucket and nothing else in the payload.
         expect(body.byHero).toEqual([
           {
-            heroId: 'king-kong', heroName: 'King Kong', games: 7, wins: 5,
+            heroId: 'king-kong', heroName: 'King Kong', games: 7, wins: 5, conceded: 0,
             byOpponent: heroOpponents({
               human: { games: 2, wins: 1 },
               medium: { games: 1, wins: 1 },
@@ -1156,7 +1162,7 @@ describeDb('accounts read api', () => {
             }),
           },
           {
-            heroId: 'medusa', heroName: 'Medusa', games: 1, wins: 1,
+            heroId: 'medusa', heroName: 'Medusa', games: 1, wins: 1, conceded: 0,
             byOpponent: heroOpponents({ easy: { games: 1, wins: 1 } }),
           },
         ]);
@@ -1164,7 +1170,7 @@ describeDb('accounts read api', () => {
         // payload — including the global split, which keeps the easy game.
         expect({ ...body, byHero: null }).toEqual({ ...unfiltered, byHero: null });
         expect(body.byOpponentKind.bots).toContainEqual({
-          difficulty: 'easy', games: 2, wins: 2, draws: 0,
+          difficulty: 'easy', games: 2, wins: 2, draws: 0, conceded: 0,
         });
       });
 
@@ -1312,19 +1318,20 @@ describeDb('accounts read api', () => {
         const alice = await stats(ALICE);
         expect(alice.byHero).toEqual([
           {
-            heroId: 'king-kong', heroName: 'King Kong', games: 2, wins: 1,
+            heroId: 'king-kong', heroName: 'King Kong', games: 2, wins: 1, conceded: 1,
             byOpponent: heroOpponents({ human: { games: 1, wins: 1 } }),
           },
         ]);
         expect(alice.byOpponentKind).toEqual({
-          human: { games: 2, wins: 1, draws: 0 }, bots: [],
+          human: { games: 2, wins: 1, draws: 0, conceded: 1 }, bots: [],
         });
         expect(alice.totalGames).toBe(2);
+        expect(alice.conceded).toBe(1);
 
         const bob = await stats(BOB);
         expect(bob.byHero[0]).toMatchObject({ heroId: 'the-mandalorian', games: 2, wins: 1 });
         expect(bob.byOpponentKind).toEqual({
-          human: { games: 2, wins: 1, draws: 0 }, bots: [],
+          human: { games: 2, wins: 1, draws: 0, conceded: 0 }, bots: [],
         });
       });
     });
@@ -1381,7 +1388,7 @@ describeDb('accounts read api', () => {
         // Two wins in the history; only the bot one is countable for points.
         expect(body.byHero).toEqual([
           {
-            heroId: 'king-kong', heroName: 'King Kong', games: 2, wins: 2,
+            heroId: 'king-kong', heroName: 'King Kong', games: 2, wins: 2, conceded: 0,
             byOpponent: heroOpponents({
               human: { games: 1, wins: 0 },
               expert: { games: 1, wins: 1 },
@@ -1389,8 +1396,8 @@ describeDb('accounts read api', () => {
           },
         ]);
         expect(body.byOpponentKind).toEqual({
-          human: { games: 1, wins: 1, draws: 0 },
-          bots: [{ difficulty: 'expert', games: 1, wins: 1, draws: 0 }],
+          human: { games: 1, wins: 1, draws: 0, conceded: 0 },
+          bots: [{ difficulty: 'expert', games: 1, wins: 1, draws: 0, conceded: 0 }],
         });
         expect(body.totalGames).toBe(2);
       });
@@ -1615,10 +1622,11 @@ describeDb('accounts read api', () => {
           {
             playerId: ALICE,
             gamesPlayed: 4,
+            conceded: 0,
             wins: 3,
             byOpponentKind: {
-              human: { games: 2, wins: 1, draws: 0 },
-              bots: [{ difficulty: 'hard', games: 2, wins: 2, draws: 0 }],
+              human: { games: 2, wins: 1, draws: 0, conceded: 0 },
+              bots: [{ difficulty: 'hard', games: 2, wins: 2, draws: 0, conceded: 0 }],
             },
             byXpMultiplier: [],
             mainHeroId: 'king-kong',
@@ -1632,10 +1640,11 @@ describeDb('accounts read api', () => {
           {
             playerId: BOB,
             gamesPlayed: 3,
+            conceded: 0,
             wins: 2,
             byOpponentKind: {
-              human: { games: 2, wins: 1, draws: 0 },
-              bots: [{ difficulty: 'easy', games: 1, wins: 1, draws: 0 }],
+              human: { games: 2, wins: 1, draws: 0, conceded: 0 },
+              bots: [{ difficulty: 'easy', games: 1, wins: 1, draws: 0, conceded: 0 }],
             },
             byXpMultiplier: [],
             mainHeroId: 'medusa',
@@ -1649,12 +1658,13 @@ describeDb('accounts read api', () => {
           {
             playerId: CAROL,
             gamesPlayed: 2,
+            conceded: 0,
             wins: 1,
             byOpponentKind: {
-              human: { games: 0, wins: 0, draws: 0 },
+              human: { games: 0, wins: 0, draws: 0, conceded: 0 },
               bots: [
-                { difficulty: 'easy', games: 1, wins: 1, draws: 0 },
-                { difficulty: 'hard', games: 1, wins: 0, draws: 0 },
+                { difficulty: 'easy', games: 1, wins: 1, draws: 0, conceded: 0 },
+                { difficulty: 'hard', games: 1, wins: 0, draws: 0, conceded: 0 },
               ],
             },
             byXpMultiplier: [],
@@ -1690,10 +1700,11 @@ describeDb('accounts read api', () => {
         {
           playerId: ALICE,
           gamesPlayed: 4,
+          conceded: 0,
           wins: 3,
           byOpponentKind: {
-            human: { games: 2, wins: 1, draws: 0 },
-            bots: [{ difficulty: 'hard', games: 2, wins: 2, draws: 0 }],
+            human: { games: 2, wins: 1, draws: 0, conceded: 0 },
+            bots: [{ difficulty: 'hard', games: 2, wins: 2, draws: 0, conceded: 0 }],
           },
           byXpMultiplier: [],
           mainHeroId: 'king-kong',
@@ -1715,16 +1726,16 @@ describeDb('accounts read api', () => {
     // the T2 keys deleted from each row (served key order kept).
     it('leaves the XP-priced fields byte-identical, with or without ?since=', async () => {
       const LEGACY_PLAYERS =
-        '[{"playerId":"11111111-1111-4111-8111-111111111111","gamesPlayed":4,"wins":3,' +
-        '"byOpponentKind":{"human":{"games":2,"wins":1,"draws":0},' +
-        '"bots":[{"difficulty":"hard","games":2,"wins":2,"draws":0}]}},' +
-        '{"playerId":"22222222-2222-4222-8222-222222222222","gamesPlayed":3,"wins":2,' +
-        '"byOpponentKind":{"human":{"games":2,"wins":1,"draws":0},' +
-        '"bots":[{"difficulty":"easy","games":1,"wins":1,"draws":0}]}},' +
-        '{"playerId":"33333333-3333-4333-8333-333333333333","gamesPlayed":2,"wins":1,' +
-        '"byOpponentKind":{"human":{"games":0,"wins":0,"draws":0},' +
-        '"bots":[{"difficulty":"easy","games":1,"wins":1,"draws":0},' +
-        '{"difficulty":"hard","games":1,"wins":0,"draws":0}]}}]';
+        '[{"playerId":"11111111-1111-4111-8111-111111111111","gamesPlayed":4,"conceded":0,"wins":3,' +
+        '"byOpponentKind":{"human":{"games":2,"wins":1,"draws":0,"conceded":0},' +
+        '"bots":[{"difficulty":"hard","games":2,"wins":2,"draws":0,"conceded":0}]}},' +
+        '{"playerId":"22222222-2222-4222-8222-222222222222","gamesPlayed":3,"conceded":0,"wins":2,' +
+        '"byOpponentKind":{"human":{"games":2,"wins":1,"draws":0,"conceded":0},' +
+        '"bots":[{"difficulty":"easy","games":1,"wins":1,"draws":0,"conceded":0}]}},' +
+        '{"playerId":"33333333-3333-4333-8333-333333333333","gamesPlayed":2,"conceded":0,"wins":1,' +
+        '"byOpponentKind":{"human":{"games":0,"wins":0,"draws":0,"conceded":0},' +
+        '"bots":[{"difficulty":"easy","games":1,"wins":1,"draws":0,"conceded":0},' +
+        '{"difficulty":"hard","games":1,"wins":0,"draws":0,"conceded":0}]}}]';
       const t2Keys = ['byXpMultiplier', 'mainHeroId', 'mainHeroName', 'recentForm', 'currentStreak', 'daily', 'windowGames', 'windowWins'];
       for (const query of ['', '?since=2026-08-03T00:00:00.000Z', '?since=2000-01-01']) {
         const body = JSON.parse(await (await read(`/accounts/leaderboard${query}`)).text()) as {
@@ -2329,12 +2340,12 @@ describeDb('accounts read api', () => {
     it('reports one human-only row per multiplier, ascending, inside byOpponentKind.human', async () => {
       const body = await stats(ALICE);
       expect(body.byXpMultiplier).toEqual([
-        { multiplier: 2, games: 2, wins: 1, draws: 0 },
-        { multiplier: 3, games: 1, wins: 0, draws: 1 },
+        { multiplier: 2, games: 2, wins: 1, draws: 0, conceded: 0 },
+        { multiplier: 3, games: 1, wins: 0, draws: 1, conceded: 0 },
       ]);
       // (a), (b), (d), (e) and the pre-feature game; the bot game (c) is a bot game.
-      expect(body.byOpponentKind.human).toEqual({ games: 5, wins: 3, draws: 1 });
-      expect(body.byOpponentKind.bots).toEqual([{ difficulty: 'hard', games: 1, wins: 1, draws: 0 }]);
+      expect(body.byOpponentKind.human).toEqual({ games: 5, wins: 3, draws: 1, conceded: 0 });
+      expect(body.byOpponentKind.bots).toEqual([{ difficulty: 'hard', games: 1, wins: 1, draws: 0, conceded: 0 }]);
     });
 
     it('reports [] for a player with no multiplied human games', async () => {
@@ -2346,8 +2357,8 @@ describeDb('accounts read api', () => {
     });
 
     it('gives the opponent the same rows from their own seat', async () => {
-      expect((await stats(BOB)).byXpMultiplier).toEqual([{ multiplier: 2, games: 2, wins: 1, draws: 0 }]);
-      expect((await stats(CAROL)).byXpMultiplier).toEqual([{ multiplier: 3, games: 1, wins: 0, draws: 1 }]);
+      expect((await stats(BOB)).byXpMultiplier).toEqual([{ multiplier: 2, games: 2, wins: 1, draws: 0, conceded: 0 }]);
+      expect((await stats(CAROL)).byXpMultiplier).toEqual([{ multiplier: 3, games: 1, wins: 0, draws: 1, conceded: 0 }]);
     });
 
     it('is identical on the leaderboard row and the player stats', async () => {
@@ -2359,8 +2370,8 @@ describeDb('accounts read api', () => {
         expect(row!.byOpponentKind).toEqual((await stats(playerId)).byOpponentKind);
       }
       expect(board.players.find((player) => player.playerId === ALICE)!.byXpMultiplier).toEqual([
-        { multiplier: 2, games: 2, wins: 1, draws: 0 },
-        { multiplier: 3, games: 1, wins: 0, draws: 1 },
+        { multiplier: 2, games: 2, wins: 1, draws: 0, conceded: 0 },
+        { multiplier: 3, games: 1, wins: 0, draws: 1, conceded: 0 },
       ]);
     });
 
@@ -2410,11 +2421,11 @@ describeDb('accounts read api', () => {
     it('buckets Prodigy seats as jevx3 and a foreign stamp as unknown', async () => {
       const body = await stats(ALICE);
       expect(body.byOpponentKind).toEqual({
-        human: { games: 0, wins: 0, draws: 0 },
+        human: { games: 0, wins: 0, draws: 0, conceded: 0 },
         bots: [
-          { difficulty: 'jevx3', games: 2, wins: 1, draws: 0 },
-          { difficulty: 'expert', games: 1, wins: 1, draws: 0 },
-          { difficulty: 'unknown', games: 1, wins: 1, draws: 0 },
+          { difficulty: 'jevx3', games: 2, wins: 1, draws: 0, conceded: 0 },
+          { difficulty: 'expert', games: 1, wins: 1, draws: 0, conceded: 0 },
+          { difficulty: 'unknown', games: 1, wins: 1, draws: 0, conceded: 0 },
         ],
       });
       expect(body.byHero[0]!.byOpponent).toEqual(heroOpponents({
@@ -2552,6 +2563,165 @@ describeDb('accounts read api', () => {
         const [row] = await repo.leaderboard({ limit: null, now });
         expect(row!.daily).toEqual(own);
       }
+    });
+  });
+
+  // Conceded games (forfeit / timeout / disconnect by the player's own seat)
+  // stay in every `games` count but are surfaced as `conceded`, so the api can
+  // pay them nothing, and they never make a daily-bonus day. `now` is
+  // 2026-08-06T12:00Z.
+  describe('conceded games', () => {
+    const HARD: SeatSpec = { deck: 'medusa@1.0.0', heroId: 'medusa', pilot: 'bot:hard', botDifficulty: 'hard' };
+    const ALICE_SEAT: SeatSpec = { deck: 'king-kong@1.0.0', heroId: 'king-kong', pilot: 'human', playerId: ALICE };
+    const BOB_SEAT: SeatSpec = { deck: 'the-mandalorian@1.0.0', heroId: 'the-mandalorian', pilot: 'human', playerId: BOB };
+
+    /** Alice (team 0) against Bob or the hard bot; `winner` 0 is Alice. */
+    async function duel(options: {
+      id: string;
+      endedAt: string;
+      winner: number | null;
+      endCondition?: string;
+      draw?: boolean;
+      bot?: boolean;
+      xpMultiplier?: number;
+    }): Promise<void> {
+      await ingest(game({
+        id: options.id,
+        endedAt: options.endedAt,
+        teams: [[ALICE_SEAT], [options.bot ? HARD : BOB_SEAT]],
+        winner: options.winner,
+        ...(options.endCondition === undefined ? {} : { endCondition: options.endCondition }),
+        ...(options.draw === undefined ? {} : { draw: options.draw }),
+        ...(options.xpMultiplier === undefined ? {} : { xpMultiplier: options.xpMultiplier }),
+      }));
+    }
+
+    async function board(): Promise<LeaderboardBody['players']> {
+      return ((await (await read('/accounts/leaderboard')).json()) as LeaderboardBody).players;
+    }
+
+    describe('counts', () => {
+      beforeEach(async () => {
+        // Alice concedes to Bob three ways, however the end condition is cased.
+        await duel({ id: 'g-c-forfeit', endedAt: '2026-08-01T10:00:00.000Z', winner: 1, endCondition: 'forfeit' });
+        await duel({ id: 'g-c-timeout', endedAt: '2026-08-01T11:00:00.000Z', winner: 1, endCondition: 'TIMEOUT' });
+        await duel({ id: 'g-c-disconnect', endedAt: '2026-08-01T12:00:00.000Z', winner: 1, endCondition: ' Disconnect ' });
+        // Not concessions: an honest loss, a win by the opponent's forfeit, and
+        // a draw that happens to carry a concession-shaped end condition.
+        await duel({ id: 'g-c-honest-loss', endedAt: '2026-08-02T10:00:00.000Z', winner: 1 });
+        await duel({ id: 'g-c-won-by-forfeit', endedAt: '2026-08-02T11:00:00.000Z', winner: 0, endCondition: 'forfeit' });
+        await duel({ id: 'g-c-draw', endedAt: '2026-08-02T12:00:00.000Z', winner: null, draw: true, endCondition: 'forfeit' });
+        // Against a hard bot: one forfeit, one honest win.
+        await duel({ id: 'g-c-bot-forfeit', endedAt: '2026-08-03T10:00:00.000Z', winner: 1, bot: true, endCondition: 'forfeit' });
+        await duel({ id: 'g-c-bot-win', endedAt: '2026-08-03T11:00:00.000Z', winner: 0, bot: true });
+        // Quick Play 2x human games: one forfeit, one honest win.
+        await duel({ id: 'g-c-qp-forfeit', endedAt: '2026-08-04T10:00:00.000Z', winner: 1, endCondition: 'forfeit', xpMultiplier: 2 });
+        await duel({ id: 'g-c-qp-win', endedAt: '2026-08-04T11:00:00.000Z', winner: 0, xpMultiplier: 2 });
+      });
+
+      it('counts the conceding seat across forfeit, timeout and disconnect, case-insensitively, inside `games`', async () => {
+        const body = await stats(ALICE);
+        // Ten games, five of them Alice's own concessions: forfeit, timeout and
+        // disconnect against Bob, a forfeit against the bot, a Quick Play forfeit.
+        expect(body.totalGames).toBe(10);
+        expect(body.conceded).toBe(5);
+        // The record is untouched: the concessions are still losses.
+        expect(body.wins).toBe(3);
+        expect(body.losses).toBe(6);
+        expect(body.draws).toBe(1);
+      });
+
+      it('never counts a win by the opponent\'s forfeit, a draw, or an honest loss', async () => {
+        const body = await stats(ALICE);
+        // Human games: 3 concessions, honest loss, won-by-forfeit, draw, 2 QP.
+        expect(body.byOpponentKind.human).toEqual({ games: 8, wins: 2, draws: 1, conceded: 4 });
+        expect(body.byOpponentKind.bots).toEqual([{ difficulty: 'hard', games: 2, wins: 1, draws: 0, conceded: 1 }]);
+        expect(body.byHero).toEqual([
+          expect.objectContaining({ heroId: 'king-kong', games: 10, wins: 3, conceded: 5 }),
+        ]);
+      });
+
+      it('never counts the seat conceded to: Bob\'s only concession is the game he forfeited himself', async () => {
+        const bob = await stats(BOB);
+        // Bob won Alice's three concessions, the honest game and the QP forfeit,
+        // drew one, and lost the game he forfeited himself (`g-c-won-by-forfeit`)
+        // and the QP game Alice won.
+        expect(bob.totalGames).toBe(8);
+        expect(bob.conceded).toBe(1);
+        expect(bob.byOpponentKind.human).toEqual({ games: 8, wins: 5, draws: 1, conceded: 1 });
+        expect(bob.byHero[0]).toMatchObject({ heroId: 'the-mandalorian', conceded: 1 });
+      });
+
+      it('carries conceded on the Quick Play multiplier rows, a subset of byOpponentKind.human', async () => {
+        const body = await stats(ALICE);
+        expect(body.byXpMultiplier).toEqual([{ multiplier: 2, games: 2, wins: 1, draws: 0, conceded: 1 }]);
+      });
+
+      it('gives the leaderboard row exactly the player\'s own conceded counts', async () => {
+        const rows = await board();
+        for (const playerId of [ALICE, BOB]) {
+          const own = await stats(playerId);
+          const row = rows.find((candidate) => candidate.playerId === playerId)!;
+          expect(row.gamesPlayed).toBe(own.totalGames);
+          expect(row.conceded).toBe(own.conceded);
+          expect(row.byOpponentKind).toEqual(own.byOpponentKind);
+          expect(row.byXpMultiplier).toEqual(own.byXpMultiplier);
+        }
+        expect(rows.find((row) => row.playerId === ALICE)!.conceded).toBe(5);
+      });
+    });
+
+    describe('daily', () => {
+      beforeEach(async () => {
+        // Aug 2: a forfeit and nothing else. Aug 3: an honest loss. Aug 4: a
+        // forfeit and an honest win. Aug 5: idle. Aug 6 (today): a forfeit only.
+        await duel({ id: 'g-d-aug2-forfeit', endedAt: '2026-08-02T10:00:00.000Z', winner: 1, endCondition: 'forfeit' });
+        await duel({ id: 'g-d-aug3-loss', endedAt: '2026-08-03T10:00:00.000Z', winner: 1 });
+        await duel({ id: 'g-d-aug4-timeout', endedAt: '2026-08-04T09:00:00.000Z', winner: 1, endCondition: 'timeout' });
+        await duel({ id: 'g-d-aug4-win', endedAt: '2026-08-04T10:00:00.000Z', winner: 0 });
+        await duel({ id: 'g-d-today-forfeit', endedAt: '2026-08-06T09:00:00.000Z', winner: 1, endCondition: 'forfeit' });
+      });
+
+      // Only Aug 3 and Aug 4 are active: a run of two. Had Aug 2 counted, the
+      // run would be three; had today's forfeit counted, today would have a game
+      // and the current streak would be 1.
+      const EXPECTED: DailyBody = {
+        activeDays: 2,
+        winDays: 1,
+        byStreakDay: streakDays([1, 1]),
+        streak: { current: 0, best: 2 },
+      };
+
+      it('never makes a day active, extends a run, or fills today from a concession', async () => {
+        const body = await stats(ALICE);
+        expect(body.daily).toEqual({ ...EXPECTED, today: { date: '2026-08-06', games: 0, wins: 0 } });
+        // The games themselves are all still in the totals.
+        expect(body.totalGames).toBe(5);
+        expect(body.conceded).toBe(3);
+      });
+
+      it('leaves the calendar showing every game that was played', async () => {
+        const body = await stats(ALICE);
+        expect(body.calendar).toEqual([
+          { date: '2026-08-02', games: 1 },
+          { date: '2026-08-03', games: 1 },
+          { date: '2026-08-04', games: 2 },
+          { date: '2026-08-06', games: 1 },
+        ]);
+      });
+
+      it('applies the same rule to the leaderboard row', async () => {
+        const row = (await board()).find((candidate) => candidate.playerId === ALICE)!;
+        expect(row.daily).toEqual(EXPECTED);
+        expect(row.conceded).toBe(3);
+      });
+
+      it('gives the opponent the days they won by concession (they are not the conceder)', async () => {
+        const bob = await stats(BOB);
+        // Bob played all five games and conceded none: Aug 2-4 and Aug 6.
+        expect(bob.daily.activeDays).toBe(4);
+        expect(bob.daily.today).toEqual({ date: '2026-08-06', games: 1, wins: 1 });
+      });
     });
   });
 });
