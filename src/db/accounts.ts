@@ -48,6 +48,21 @@ export const PLAYER_STATS_DEFAULT_MIN_SECONDS = 0;
 export const CONCESSION_END_CONDITIONS = ['forfeit', 'timeout', 'disconnect'];
 
 /**
+ * SQL for "this seat conceded this game" (the `conceded` count in every XP
+ * input slice). The seat lost (`won` false) in a game that was not a draw, and
+ * the game's `end_condition` is one of {@link CONCESSION_END_CONDITIONS},
+ * compared case-insensitively. A NULL `end_condition` is not a concession.
+ *
+ * The list is inlined as literals, not bound, so the predicate can sit inside
+ * the shared CTEs without renumbering any query's parameters. Every entry is a
+ * module constant, never user input.
+ */
+function concededSql(won: string, draw: string, endCondition: string): string {
+  const list = CONCESSION_END_CONDITIONS.map((condition) => `'${condition.replace(/'/g, "''")}'`).join(', ');
+  return `(NOT ${won} AND NOT ${draw} AND COALESCE(lower(btrim(${endCondition})) IN (${list}), false))`;
+}
+
+/**
  * A win against a human in fewer than this many turns pays no win bonus (#66).
  *
  * Bot buckets are exempt: a 2-turn kill on an expert bot is a real result, and
@@ -156,6 +171,8 @@ export interface PlayerHeroStat {
   heroName: string | null;
   games: number;
   wins: number;
+  /** Of `games`, the ones the player's own seat conceded — see {@link PlayerConcededSplitStat}. */
+  conceded: number;
   /**
    * The same games, crossed with opponent kind (#63), less what the anti-farm
    * rules of #66 disqualify. `games`/`wins` above are never filtered; this
@@ -264,13 +281,24 @@ export interface PlayerSplitStat {
   draws: number;
 }
 
-export interface PlayerBotStat extends PlayerSplitStat {
+/**
+ * A {@link PlayerSplitStat} that also says how many of its games the player's
+ * own seat *conceded* (a loss by forfeit/timeout/disconnect, see
+ * {@link CONCESSION_END_CONDITIONS}). Those games stay inside `games` — the
+ * record is unchanged — so unbrewed-api can price them at nothing: XP, the
+ * first-game bonus and badge game counts read `games - conceded`.
+ */
+export interface PlayerConcededSplitStat extends PlayerSplitStat {
+  conceded: number;
+}
+
+export interface PlayerBotStat extends PlayerConcededSplitStat {
   /** A tier from `bot-tier.ts` — `easy`/`medium`/`hard`/`expert`/`jevx3`, or `unknown`. */
   difficulty: string;
 }
 
 export interface PlayerOpponentKindStats {
-  human: PlayerSplitStat;
+  human: PlayerConcededSplitStat;
   bots: PlayerBotStat[];
 }
 
@@ -285,6 +313,8 @@ export interface PlayerXpMultiplierStat {
   games: number;
   wins: number;
   draws: number;
+  /** Of `games`, the ones the player's own seat conceded — see {@link PlayerConcededSplitStat}. */
+  conceded: number;
 }
 
 export interface PlayerFirstPlayerStats {
@@ -294,6 +324,8 @@ export interface PlayerFirstPlayerStats {
 
 export interface PlayerStats {
   totalGames: number;
+  /** Of `totalGames`, the games the player's own seat conceded — see {@link PlayerConcededSplitStat}. */
+  conceded: number;
   wins: number;
   losses: number;
   draws: number;
@@ -413,7 +445,8 @@ const PLAYER_GAMES_CTE = `
   SELECT mine.game_id, mine.team_index, mine.won, mine.first_player, mine.final_health,
          mine.hero_id, mine.hero_name,
          g.draw, g.map, g.turns, g.duration_seconds, g.first_player_team, g.end_condition,
-         g.xp_multiplier, ${ENDED_AT} AS ended_at
+         g.xp_multiplier, ${concededSql('mine.won', 'g.draw', 'g.end_condition')} AS conceded,
+         ${ENDED_AT} AS ended_at
   FROM mine
   JOIN games g ON g.id = mine.game_id
   WHERE g.campaign_id IS NULL
@@ -428,7 +461,7 @@ const PLAYER_GAMES_CTE = `
  * teammate contributes none.
  */
 const OPPOSING_SEATS_CTE = `
-  SELECT p.game_id, p.won, p.draw, p.xp_multiplier, o.hero_id, o.hero_name, o.pilot_kind,
+  SELECT p.game_id, p.won, p.draw, p.conceded, p.xp_multiplier, o.hero_id, o.hero_name, o.pilot_kind,
          ${botTierSql('o.pilot', 'o.bot_difficulty')} AS bot_tier,
          NULLIF(lower(btrim(o.bot_difficulty)), '') AS stamped_difficulty
   FROM played p
@@ -667,7 +700,7 @@ function heroKey(heroId: string | null, heroName: string | null): string {
 async function playerTotals(
   pool: Pool,
   playerId: string,
-): Promise<Pick<PlayerStats, 'totalGames' | 'wins' | 'losses' | 'draws' | 'byHero' | 'firstGameAt' | 'lastGameAt'>> {
+): Promise<Pick<PlayerStats, 'totalGames' | 'conceded' | 'wins' | 'losses' | 'draws' | 'byHero' | 'firstGameAt' | 'lastGameAt'>> {
   // Grouped by the player's *own* seat hero, so a hero row means "games I
   // played as this hero", not "games this hero appeared in".
   //
@@ -682,13 +715,16 @@ async function playerTotals(
     wins: string;
     draws: string;
     losses: string;
+    conceded: string;
     first_game_at: Date | null;
     last_game_at: Date | null;
   }>(
     `
       WITH mine AS (${PLAYER_SEATS_CTE}),
       joined AS (
-        SELECT mine.hero_id, mine.hero_name, mine.won, g.draw, ${ENDED_AT} AS ended_at
+        SELECT mine.hero_id, mine.hero_name, mine.won, g.draw,
+               ${concededSql('mine.won', 'g.draw', 'g.end_condition')} AS conceded,
+               ${ENDED_AT} AS ended_at
         FROM mine
         JOIN games g ON g.id = mine.game_id
         WHERE g.campaign_id IS NULL
@@ -698,6 +734,7 @@ async function playerTotals(
              count(*) FILTER (WHERE won) AS wins,
              count(*) FILTER (WHERE draw) AS draws,
              count(*) FILTER (WHERE NOT won AND NOT draw) AS losses,
+             count(*) FILTER (WHERE conceded) AS conceded,
              min(ended_at) AS first_game_at,
              max(ended_at) AS last_game_at
       FROM joined
@@ -709,6 +746,7 @@ async function playerTotals(
 
   const stats = {
     totalGames: 0,
+    conceded: 0,
     wins: 0,
     losses: 0,
     draws: 0,
@@ -720,7 +758,9 @@ async function playerTotals(
   for (const row of result.rows) {
     const games = Number(row.games);
     const wins = Number(row.wins);
+    const conceded = Number(row.conceded);
     stats.totalGames += games;
+    stats.conceded += conceded;
     stats.wins += wins;
     stats.draws += Number(row.draws);
     stats.losses += Number(row.losses);
@@ -731,6 +771,7 @@ async function playerTotals(
       heroName: row.hero_name,
       games,
       wins,
+      conceded,
       byOpponent: emptyHeroOpponents(),
     });
     const first = row.first_game_at ? row.first_game_at.toISOString() : null;
@@ -962,6 +1003,10 @@ async function playerCalendar(pool: Pool, playerId: string, now: Date): Promise<
  * - Same game set and day rule as {@link playerCalendar}: the UTC date of
  *   `COALESCE(ended_at, received_at)`, all formats, every opponent, campaigns
  *   excluded — but lifetime, not the calendar's 182-day window.
+ * - A game the player's own seat conceded is not activity: `played.conceded`
+ *   rows are left out, so a forfeit never makes an active day, never counts in
+ *   `today`, and never extends or starts a run. (`playerCalendar` still shows
+ *   it — the calendar is a record of games sat down to, not a reward input.)
  * - A win is `won AND NOT draw`, the streak rule: a draw is not a win.
  * - A day after `now`'s UTC date (a producer with a fast clock) is left out, as
  *   the calendar leaves it out; it starts counting when that day arrives. That
@@ -982,7 +1027,8 @@ function dailyCtes(key: string | null, nowParam: string): string {
                count(*) AS games,
                count(*) FILTER (WHERE won AND NOT draw) AS wins
         FROM played
-        WHERE (ended_at AT TIME ZONE 'UTC')::date <= ${dailyTodaySql(nowParam)}
+        WHERE NOT conceded
+          AND (ended_at AT TIME ZONE 'UTC')::date <= ${dailyTodaySql(nowParam)}
         GROUP BY ${by}(ended_at AT TIME ZONE 'UTC')::date
       ),
       daily_runs AS (
@@ -1167,6 +1213,7 @@ async function playerByOpponentKind(pool: Pool, playerId: string): Promise<Playe
     games: string;
     wins: string;
     draws: string;
+    conceded: string;
   }>(
     `
       WITH mine AS (${PLAYER_SEATS_CTE}),
@@ -1176,6 +1223,7 @@ async function playerByOpponentKind(pool: Pool, playerId: string): Promise<Playe
         SELECT game_id,
                bool_and(won) AS won,
                bool_or(draw) AS draw,
+               bool_or(conceded) AS conceded,
                bool_or(pilot_kind = 'bot') AS any_bot,
                min(bot_tier) FILTER (WHERE pilot_kind = 'bot') AS difficulty
         FROM opposing
@@ -1185,7 +1233,8 @@ async function playerByOpponentKind(pool: Pool, playerId: string): Promise<Playe
              CASE WHEN any_bot THEN difficulty END AS difficulty,
              count(*) AS games,
              count(*) FILTER (WHERE won) AS wins,
-             count(*) FILTER (WHERE draw) AS draws
+             count(*) FILTER (WHERE draw) AS draws,
+             count(*) FILTER (WHERE conceded) AS conceded
       FROM per_game
       GROUP BY 1, 2
       ORDER BY count(*) DESC, 2 ASC NULLS LAST
@@ -1193,18 +1242,20 @@ async function playerByOpponentKind(pool: Pool, playerId: string): Promise<Playe
     [playerId],
   );
 
-  const stats: PlayerOpponentKindStats = { human: { games: 0, wins: 0, draws: 0 }, bots: [] };
+  const stats: PlayerOpponentKindStats = { human: { games: 0, wins: 0, draws: 0, conceded: 0 }, bots: [] };
   for (const row of result.rows) {
     const games = Number(row.games);
     const wins = Number(row.wins);
     const draws = Number(row.draws);
+    const conceded = Number(row.conceded);
     if (row.kind === 'bot') {
-      stats.bots.push({ difficulty: row.difficulty ?? UNKNOWN_BOT_TIER, games, wins, draws });
+      stats.bots.push({ difficulty: row.difficulty ?? UNKNOWN_BOT_TIER, games, wins, draws, conceded });
     } else {
       // 'unknown' pilot kinds land here too — not a bot, so not a bot row.
       stats.human.games += games;
       stats.human.wins += wins;
       stats.human.draws += draws;
+      stats.human.conceded += conceded;
     }
   }
   return stats;
@@ -1221,7 +1272,7 @@ async function playerByOpponentKind(pool: Pool, playerId: string): Promise<Playe
  * `(multiplier - 1)` on top and does not re-count it.
  */
 async function playerByXpMultiplier(pool: Pool, playerId: string): Promise<PlayerXpMultiplierStat[]> {
-  const result = await pool.query<{ multiplier: number; games: string; wins: string; draws: string }>(
+  const result = await pool.query<{ multiplier: number; games: string; wins: string; draws: string; conceded: string }>(
     `
       WITH mine AS (${PLAYER_SEATS_CTE}),
       played AS (${PLAYER_GAMES_CTE}),
@@ -1230,6 +1281,7 @@ async function playerByXpMultiplier(pool: Pool, playerId: string): Promise<Playe
         SELECT game_id,
                bool_and(won) AS won,
                bool_or(draw) AS draw,
+               bool_or(conceded) AS conceded,
                bool_or(pilot_kind = 'bot') AS any_bot,
                max(xp_multiplier) AS xp_multiplier
         FROM opposing
@@ -1238,7 +1290,8 @@ async function playerByXpMultiplier(pool: Pool, playerId: string): Promise<Playe
       SELECT xp_multiplier AS multiplier,
              count(*) AS games,
              count(*) FILTER (WHERE won) AS wins,
-             count(*) FILTER (WHERE draw) AS draws
+             count(*) FILTER (WHERE draw) AS draws,
+             count(*) FILTER (WHERE conceded) AS conceded
       FROM per_game
       WHERE NOT any_bot AND xp_multiplier > 1
       GROUP BY xp_multiplier
@@ -1249,12 +1302,15 @@ async function playerByXpMultiplier(pool: Pool, playerId: string): Promise<Playe
   return result.rows.map(xpMultiplierRow);
 }
 
-function xpMultiplierRow(row: { multiplier: number; games: string; wins: string; draws: string }): PlayerXpMultiplierStat {
+function xpMultiplierRow(
+  row: { multiplier: number; games: string; wins: string; draws: string; conceded: string },
+): PlayerXpMultiplierStat {
   return {
     multiplier: Number(row.multiplier),
     games: Number(row.games),
     wins: Number(row.wins),
     draws: Number(row.draws),
+    conceded: Number(row.conceded),
   };
 }
 
@@ -1303,8 +1359,12 @@ function xpMultiplierRow(row: { multiplier: number; games: string; wins: string;
  *    is exactly the mistake that zeroed everyone in unbrewed-api#35.
  *
  * The rules bite only on the buckets. `playerTotals` and `playerByOpponentKind`
- * run their own queries over the same games and are untouched, so the record,
- * badges and XP still see every game the player played.
+ * run their own queries over the same games and keep them in `games`, so the
+ * record still shows every game the player played. The same concession
+ * predicate is surfaced there as a `conceded` count (see
+ * {@link PlayerConcededSplitStat}), and unbrewed-api prices XP, the first-game
+ * bonus and the daily bonus off it, so a conceded game pays the conceder
+ * nothing anywhere; `daily` leaves conceded games out entirely.
  */
 async function playerByHeroOpponent(
   pool: Pool,
@@ -1385,6 +1445,8 @@ async function playerByHeroOpponent(
 export interface LeaderboardPlayer {
   playerId: string;
   gamesPlayed: number;
+  /** Of `gamesPlayed`, the games this player's own seat conceded — `PlayerStats.conceded`'s rule. */
+  conceded: number;
   wins: number;
   byOpponentKind: PlayerOpponentKindStats;
   /** `PlayerStats.byXpMultiplier`, same rule — a subset of `byOpponentKind.human`. */
@@ -1443,7 +1505,8 @@ const ALL_PLAYER_SEATS_CTE = `
 /** The cross-player twin of `PLAYER_GAMES_CTE`: same completed-game filter. */
 const ALL_PLAYER_GAMES_CTE = `
   SELECT seats.player_id, seats.game_id, seats.team_index, seats.won, seats.hero_id, seats.hero_name,
-         g.draw, g.xp_multiplier, ${ENDED_AT} AS ended_at
+         g.draw, g.xp_multiplier, ${concededSql('seats.won', 'g.draw', 'g.end_condition')} AS conceded,
+         ${ENDED_AT} AS ended_at
   FROM seats
   JOIN games g ON g.id = seats.game_id
   WHERE g.campaign_id IS NULL
@@ -1476,12 +1539,13 @@ export async function leaderboard(
 ): Promise<LeaderboardPlayer[]> {
   const limit = clampLeaderboardLimit(options.limit);
   const now = options.now ?? new Date();
-  const result = await pool.query<{ player_id: string; games_played: string; wins: string }>(
+  const result = await pool.query<{ player_id: string; games_played: string; conceded: string; wins: string }>(
     `
       WITH seats AS (${ALL_PLAYER_SEATS_CTE}),
       played AS (${ALL_PLAYER_GAMES_CTE})
       SELECT player_id,
              count(*) AS games_played,
+             count(*) FILTER (WHERE conceded) AS conceded,
              count(*) FILTER (WHERE won) AS wins
       FROM played
       GROUP BY player_id
@@ -1494,8 +1558,9 @@ export async function leaderboard(
   const players: LeaderboardPlayer[] = result.rows.map((row) => ({
     playerId: row.player_id,
     gamesPlayed: Number(row.games_played),
+    conceded: Number(row.conceded),
     wins: Number(row.wins),
-    byOpponentKind: { human: { games: 0, wins: 0, draws: 0 }, bots: [] } as PlayerOpponentKindStats,
+    byOpponentKind: { human: { games: 0, wins: 0, draws: 0, conceded: 0 }, bots: [] } as PlayerOpponentKindStats,
     byXpMultiplier: [] as PlayerXpMultiplierStat[],
     mainHeroId: null,
     mainHeroName: null,
@@ -1716,12 +1781,13 @@ async function leaderboardOpponentKinds(
     games: string;
     wins: string;
     draws: string;
+    conceded: string;
   }>(
     `
       WITH seats AS (${ALL_PLAYER_SEATS_CTE}),
       played AS (${ALL_PLAYER_GAMES_CTE}),
       opposing AS (
-        SELECT p.player_id, p.game_id, p.won, p.draw, o.pilot_kind,
+        SELECT p.player_id, p.game_id, p.won, p.draw, p.conceded, o.pilot_kind,
                ${botTierSql('o.pilot', 'o.bot_difficulty')} AS bot_tier
         FROM played p
         JOIN game_seats o ON o.game_id = p.game_id AND o.team_index <> p.team_index
@@ -1731,6 +1797,7 @@ async function leaderboardOpponentKinds(
         SELECT player_id, game_id,
                bool_and(won) AS won,
                bool_or(draw) AS draw,
+               bool_or(conceded) AS conceded,
                bool_or(pilot_kind = 'bot') AS any_bot,
                min(bot_tier) FILTER (WHERE pilot_kind = 'bot') AS difficulty
         FROM opposing
@@ -1741,7 +1808,8 @@ async function leaderboardOpponentKinds(
              CASE WHEN any_bot THEN difficulty END AS difficulty,
              count(*) AS games,
              count(*) FILTER (WHERE won) AS wins,
-             count(*) FILTER (WHERE draw) AS draws
+             count(*) FILTER (WHERE draw) AS draws,
+             count(*) FILTER (WHERE conceded) AS conceded
       FROM per_game
       GROUP BY 1, 2, 3
       ORDER BY player_id ASC, count(*) DESC, 3 ASC NULLS LAST
@@ -1752,19 +1820,21 @@ async function leaderboardOpponentKinds(
   for (const row of result.rows) {
     let entry = stats.get(row.player_id);
     if (!entry) {
-      entry = { human: { games: 0, wins: 0, draws: 0 }, bots: [] };
+      entry = { human: { games: 0, wins: 0, draws: 0, conceded: 0 }, bots: [] };
       stats.set(row.player_id, entry);
     }
     const games = Number(row.games);
     const wins = Number(row.wins);
     const draws = Number(row.draws);
+    const conceded = Number(row.conceded);
     if (row.kind === 'bot') {
-      entry.bots.push({ difficulty: row.difficulty ?? UNKNOWN_BOT_TIER, games, wins, draws });
+      entry.bots.push({ difficulty: row.difficulty ?? UNKNOWN_BOT_TIER, games, wins, draws, conceded });
     } else {
       // 'unknown' pilot kinds land here too — not a bot, so not a bot row.
       entry.human.games += games;
       entry.human.wins += wins;
       entry.human.draws += draws;
+      entry.human.conceded += conceded;
     }
   }
   return stats;
@@ -1789,12 +1859,13 @@ async function leaderboardXpMultipliers(
     games: string;
     wins: string;
     draws: string;
+    conceded: string;
   }>(
     `
       WITH seats AS (${ALL_PLAYER_SEATS_CTE}),
       played AS (${ALL_PLAYER_GAMES_CTE}),
       opposing AS (
-        SELECT p.player_id, p.game_id, p.won, p.draw, p.xp_multiplier, o.pilot_kind
+        SELECT p.player_id, p.game_id, p.won, p.draw, p.conceded, p.xp_multiplier, o.pilot_kind
         FROM played p
         JOIN game_seats o ON o.game_id = p.game_id AND o.team_index <> p.team_index
         WHERE p.player_id = ANY($1::text[]) AND p.xp_multiplier > 1
@@ -1803,6 +1874,7 @@ async function leaderboardXpMultipliers(
         SELECT player_id, game_id,
                bool_and(won) AS won,
                bool_or(draw) AS draw,
+               bool_or(conceded) AS conceded,
                bool_or(pilot_kind = 'bot') AS any_bot,
                max(xp_multiplier) AS xp_multiplier
         FROM opposing
@@ -1812,7 +1884,8 @@ async function leaderboardXpMultipliers(
              xp_multiplier AS multiplier,
              count(*) AS games,
              count(*) FILTER (WHERE won) AS wins,
-             count(*) FILTER (WHERE draw) AS draws
+             count(*) FILTER (WHERE draw) AS draws,
+             count(*) FILTER (WHERE conceded) AS conceded
       FROM per_game
       WHERE NOT any_bot
       GROUP BY player_id, xp_multiplier
