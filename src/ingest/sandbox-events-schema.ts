@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { Ajv2020 } from 'ajv/dist/2020.js';
 import addFormatsPlugin from 'ajv-formats';
 import type { ErrorObject } from 'ajv';
-import type { SandboxEvent, SandboxEventType, SandboxEventsSubmission, ValidationResult } from '../types.js';
+import type { SandboxDeckSource, SandboxEvent, SandboxEventType, SandboxEventsSubmission, ValidationResult } from '../types.js';
 
 const schemaUrl = new URL('../../schemas/sandbox-events.v1.schema.json', import.meta.url);
 const schema = JSON.parse(readFileSync(schemaUrl, 'utf8')) as object;
@@ -35,6 +35,8 @@ const OPTIONAL_FIELDS: readonly OptionalField[] = [
   'playerHash',
   'connections',
   'heroName',
+  'deckSource',
+  'deckUrl',
   'reason',
   'lifetimeMs',
   'distinctPlayers',
@@ -65,14 +67,43 @@ function semanticErrors(submission: SandboxEventsSubmission): string[] {
     const allowed = FIELDS_BY_TYPE[event.type];
     for (const field of OPTIONAL_FIELDS) {
       const present = event[field] !== undefined;
+      if (field === 'deckSource' || field === 'deckUrl') {
+        if (present && event.type !== 'hero_seen') errors.push(`/events/${i}/${field}: not carried by ${event.type} events`);
+        continue;
+      }
       if (allowed.includes(field) && !present) {
         errors.push(`/events/${i}/${field}: required on ${event.type} events`);
       } else if (!allowed.includes(field) && present) {
         errors.push(`/events/${i}/${field}: not carried by ${event.type} events`);
       }
     }
+    errors.push(...deckErrors(event, i));
   });
   return errors;
+}
+
+/** Hosts a `deckUrl` may point at, per `deckSource`. */
+const DECK_HOSTS: Record<SandboxDeckSource, readonly string[]> = {
+  'unmatched-club': ['the-unmatched.club', 'www.the-unmatched.club'],
+  'unmatched-cards': ['unmatched.cards', 'www.unmatched.cards'],
+  labs: ['unmatchedlabs.com', 'www.unmatchedlabs.com'],
+};
+
+/** deckSource and deckUrl travel together, and the URL must live on the source's site. */
+function deckErrors(event: SandboxEvent, i: number): string[] {
+  if (event.deckSource === undefined && event.deckUrl === undefined) return [];
+  if (event.deckSource === undefined || event.deckUrl === undefined) {
+    return [`/events/${i}/${event.deckSource === undefined ? 'deckSource' : 'deckUrl'}: required with ${event.deckSource === undefined ? 'deckUrl' : 'deckSource'}`];
+  }
+  let host = '';
+  try {
+    host = new URL(event.deckUrl).hostname;
+  } catch {
+    // falls through to the host check below
+  }
+  return DECK_HOSTS[event.deckSource].includes(host)
+    ? []
+    : [`/events/${i}/deckUrl: host must belong to ${event.deckSource}`];
 }
 
 export function validateSandboxEvents(value: unknown): ValidationResult {

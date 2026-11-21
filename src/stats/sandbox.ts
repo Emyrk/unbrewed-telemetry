@@ -24,11 +24,15 @@ import type { SandboxStatsResponse } from '../types.js';
  *   before the window.
  * - `hourOfWeek`: `player_joined` counts by UTC day of week (0 = Sunday) and
  *   hour, zero-filled to all 7×24 cells.
- * - `topHeroes`: distinct players per `hero_seen` hero name, top 10.
+ * - `topHeroes`: distinct players per `hero_seen` hero name, top 10. Carries
+ *   the deck's source and page URL only when every sighting agrees on one.
+ * - `fandecks` (#93): every (hero, source, URL) with a known deck source, no
+ *   limit, with the game rooms (≥2 joined) and distinct players it appeared in.
+ *   Sandbox has no bot pilots, so these are human counts by construction.
  */
 export const SANDBOX_STATS_SQL = `
   WITH w AS (
-    SELECT type, room_id, player_hash, hero_name, connections,
+    SELECT type, room_id, player_hash, hero_name, deck_source, deck_url, connections,
            (received_at AT TIME ZONE 'UTC') AS at_utc
     FROM sandbox_events
     WHERE received_at >= $1
@@ -60,10 +64,19 @@ export const SANDBOX_STATS_SQL = `
     FROM joins GROUP BY 1, 2
   ),
   heroes AS (
-    SELECT hero_name, count(DISTINCT player_hash) AS players
+    SELECT hero_name, count(DISTINCT player_hash) AS players,
+           CASE WHEN count(DISTINCT deck_url) = 1 THEN min(deck_source) END AS deck_source,
+           CASE WHEN count(DISTINCT deck_url) = 1 THEN min(deck_url) END AS deck_url
     FROM w WHERE type = 'hero_seen' GROUP BY hero_name
     ORDER BY players DESC, hero_name
     LIMIT 10
+  ),
+  fandecks AS (
+    SELECT hero_name, deck_source, deck_url,
+           count(DISTINCT room_id) FILTER (WHERE room_id IN (SELECT room_id FROM game_rooms)) AS games,
+           count(DISTINCT player_hash) AS players
+    FROM w WHERE type = 'hero_seen' AND deck_url IS NOT NULL
+    GROUP BY hero_name, deck_source, deck_url
   )
   SELECT
     (SELECT count(DISTINCT room_id) FROM w WHERE type = 'room_opened')::int AS rooms_opened,
@@ -93,9 +106,17 @@ export const SANDBOX_STATS_SQL = `
       LEFT JOIN hour_counts c ON c.dow = d AND c.hour = h
     ) AS hour_of_week,
     COALESCE((
-      SELECT json_agg(json_build_object('heroName', hero_name, 'players', players) ORDER BY players DESC, hero_name)
+      SELECT json_agg(json_strip_nulls(json_build_object(
+        'heroName', hero_name, 'players', players, 'deckSource', deck_source, 'deckUrl', deck_url
+      )) ORDER BY players DESC, hero_name)
       FROM heroes
-    ), '[]'::json) AS top_heroes
+    ), '[]'::json) AS top_heroes,
+    COALESCE((
+      SELECT json_agg(json_build_object(
+        'heroName', hero_name, 'deckSource', deck_source, 'deckUrl', deck_url, 'games', games, 'players', players
+      ) ORDER BY games DESC, players DESC, hero_name, deck_url)
+      FROM fandecks
+    ), '[]'::json) AS fandecks
 `;
 
 export interface SandboxStatsRow {
@@ -107,6 +128,7 @@ export interface SandboxStatsRow {
   daily: SandboxStatsResponse['daily'];
   hour_of_week: SandboxStatsResponse['hourOfWeek'];
   top_heroes: SandboxStatsResponse['topHeroes'];
+  fandecks: SandboxStatsResponse['fandecks'];
 }
 
 /** Map the one `SANDBOX_STATS_SQL` row into the API shape. */
@@ -126,6 +148,7 @@ export function sandboxStats(
     daily: row.daily,
     hourOfWeek: row.hour_of_week,
     topHeroes: row.top_heroes,
+    fandecks: row.fandecks,
   };
 }
 
